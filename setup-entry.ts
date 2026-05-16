@@ -20,11 +20,16 @@ export default {
   ],
 
   validate(config: Record<string, string>): string | null {
-    if (!config.botToken?.startsWith("bf_")) {
+    if (!config.botToken?.startsWith("bf_") || config.botToken.length <= 13) {
       return "Bot token must start with 'bf_'. Create one via /newbot in Octo BotFather.";
     }
     if (!config.apiUrl) {
       return "API URL is required.";
+    }
+    try {
+      new URL(config.apiUrl);
+    } catch {
+      return "API URL must be a valid URL (e.g. https://your-server/api).";
     }
     return null;
   },

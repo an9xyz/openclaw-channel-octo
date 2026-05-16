@@ -16,6 +16,7 @@ Repository: https://github.com/Mininglamp-OSS/octo-adapters
 ## Prerequisites
 
 - Node.js >= 22
+  (OpenClaw >= 2026.4.15 requires Node 22; this is a platform constraint, not a plugin-level requirement.)
 - OpenClaw installed and configured (`npm i -g openclaw`)
 - A bot created via BotFather in Octo (send `/newbot` to BotFather)
 

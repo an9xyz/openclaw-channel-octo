@@ -5,7 +5,7 @@ Thanks for your interest in contributing!
 ## Getting started
 
 ```bash
-git clone https://github.com/Mininglamp-OSS/octo-adapters.git
+git clone https://github.com/Mininglamp-OSS/openclaw-channel-octo.git
 cd openclaw-channel-octo
 npm install
 npm run type-check
@@ -27,4 +27,4 @@ npm test
 
 ## Reporting issues
 
-Open an issue at https://github.com/Mininglamp-OSS/octo-adapters/issues.
+Open an issue at https://github.com/Mininglamp-OSS/openclaw-channel-octo/issues.
