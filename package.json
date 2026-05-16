@@ -1,6 +1,6 @@
 {
   "name": "octo",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Octo channel plugin for OpenClaw",
   "license": "Apache-2.0",
   "main": "dist/index.js",
@@ -33,7 +33,6 @@
   },
   "dependencies": {
     "axios": "^1.7.0",
-    "commander": "^12.1.0",
     "cos-nodejs-sdk-v5": "^2.15.4",
     "crypto-js": "^4.2.0",
     "curve25519-js": "^0.0.4",

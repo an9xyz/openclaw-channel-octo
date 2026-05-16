@@ -10,6 +10,6 @@
     "declaration": true,
     "sourceMap": true
   },
-  "include": ["index.ts", "setup-entry.ts", "src/**/*.ts", "cli/**/*.ts"],
+  "include": ["index.ts", "setup-entry.ts", "src/**/*.ts"],
   "exclude": ["node_modules", "dist", "**/*.test.ts"]
 }
