@@ -376,7 +376,12 @@ export class WKSocket extends EventEmitter {
 
     ws.on("message", (data: ArrayBuffer | Buffer) => {
       if (this.ws !== ws) return; // stale guard
-      const bytes = new Uint8Array(data instanceof ArrayBuffer ? data : data.buffer);
+      // Buffer is already a Uint8Array view; use it directly to avoid the
+      // 3-arg vs 1-arg footgun. `new Uint8Array(buffer)` without byteOffset/
+      // byteLength reads the WHOLE underlying ArrayBuffer, which for a Buffer
+      // that is a view (e.g. from a buffer pool) leaks adjacent memory into
+      // the frame parser.
+      const bytes: Uint8Array = data instanceof ArrayBuffer ? new Uint8Array(data) : data;
       this.handleRawData(bytes);
     });
 

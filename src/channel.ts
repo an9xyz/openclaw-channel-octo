@@ -279,9 +279,11 @@ const meta = {
   id: "octo",
   label: "Octo",
   selectionLabel: "Octo",
+  detailLabel: "Octo Bot",
   docsPath: "/channels/octo",
   docsLabel: "octo",
   blurb: "Connect OpenClaw to Octo",
+  markdownCapable: false,
   order: 90,
 };
 
