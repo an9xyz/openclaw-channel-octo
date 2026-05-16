@@ -12,3 +12,4 @@ CLAUDE.md
 *.bak
 *.bak2
 openclaw-channel-octo-*.tgz
+.idea/
