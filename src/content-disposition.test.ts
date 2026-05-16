@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { rfc5987Encode, buildContentDisposition } from "./api-fetch.js";
+import { extractFilename, sanitizeFilename } from "./inbound.js";
 
 /**
  * Tests for issue #225 fixes:
@@ -8,6 +9,57 @@ import { rfc5987Encode, buildContentDisposition } from "./api-fetch.js";
  * - uploadFileToCOS Content-Disposition header
  * - channel.ts filename decoding
  */
+
+// ---------------------------------------------------------------------------
+// sanitizeFilename + extractFilename — path traversal defense (P1-2)
+// ---------------------------------------------------------------------------
+describe("sanitizeFilename — path traversal defense", () => {
+  it("strips leading directory components", () => {
+    expect(sanitizeFilename("foo/bar.txt")).toBe("bar.txt");
+    expect(sanitizeFilename("/etc/passwd")).toBe("passwd");
+    expect(sanitizeFilename("a\\b\\c.txt")).toBe("c.txt");
+  });
+
+  it("rejects bare traversal segments", () => {
+    expect(sanitizeFilename("..")).toBe("file");
+    expect(sanitizeFilename(".")).toBe("file");
+    expect(sanitizeFilename("")).toBe("file");
+  });
+
+  it("rejects names containing null bytes", () => {
+    expect(sanitizeFilename("foo\0.txt")).toBe("file");
+  });
+
+  it("caps length at 200 chars", () => {
+    const longName = "a".repeat(250) + ".txt";
+    const result = sanitizeFilename(longName);
+    expect(result.length).toBe(200);
+  });
+});
+
+describe("extractFilename — path traversal via URL-encoded segments (P1-2)", () => {
+  it("URL-encoded ..%2F..%2Fetc%2Fpasswd does NOT escape temp dir", () => {
+    // Before fix: extractFilename returned "../../etc/passwd" and a caller
+    // doing `path.join("/tmp/octo-upload", filename)` resolved to
+    // `/etc/passwd`. After fix: basename() strips path separators.
+    const result = extractFilename("https://attacker.example/path/..%2F..%2Fetc%2Fpasswd");
+    expect(result).toBe("passwd");
+    expect(result).not.toContain("/");
+    expect(result).not.toContain("..");
+  });
+
+  it("absolute-path filename gets basenamed", () => {
+    expect(extractFilename("https://x.com/%2Fetc%2Fshadow")).toBe("shadow");
+  });
+
+  it("null byte injection is rejected", () => {
+    expect(extractFilename("https://x.com/foo%00.txt")).toBe("file");
+  });
+
+  it("clean unicode filenames pass through", () => {
+    expect(extractFilename("https://x.com/path/%E4%B8%AD%E6%96%87.txt")).toBe("中文.txt");
+  });
+});
 
 // ---------------------------------------------------------------------------
 // extractFilename — percent-decoding

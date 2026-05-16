@@ -26,7 +26,7 @@ function getAgentVersion(): string {
   }
 }
 import { WKSocket } from "./socket.js";
-import { handleInboundMessage, type DmworkStatusSink } from "./inbound.js";
+import { handleInboundMessage, type DmworkStatusSink, sanitizeFilename } from "./inbound.js";
 import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "./types.js";
 import { buildEntitiesFromFallback, parseStructuredMentions, convertStructuredMentions } from "./mention-utils.js";
 import type { MentionEntity } from "./types.js";
@@ -52,7 +52,10 @@ const UPLOAD_TEMP_DIR = path.join("/tmp", "octo-upload");
 /** Download a URL to a temp file with backpressure, return the temp path. */
 async function downloadToTempFile(url: string, filename: string, signal?: AbortSignal): Promise<{ tempPath: string; contentType: string | undefined }> {
   await mkdir(UPLOAD_TEMP_DIR, { recursive: true });
-  const tempPath = path.join(UPLOAD_TEMP_DIR, `${randomUUID()}-${filename}`);
+  // sanitizeFilename: defense in depth — strips path separators / rejects
+  // traversal segments. Shared with inbound.ts (single source of truth).
+  const safeName = sanitizeFilename(filename);
+  const tempPath = path.join(UPLOAD_TEMP_DIR, `${randomUUID()}-${safeName}`);
 
   // HEAD to check size first
   const head = await fetch(url, { method: "HEAD", signal: signal ?? AbortSignal.timeout(30_000) });
@@ -276,9 +279,11 @@ const meta = {
   id: "octo",
   label: "Octo",
   selectionLabel: "Octo",
+  detailLabel: "Octo Bot",
   docsPath: "/channels/octo",
   docsLabel: "octo",
   blurb: "Connect OpenClaw to Octo",
+  markdownCapable: false,
   order: 90,
 };
 

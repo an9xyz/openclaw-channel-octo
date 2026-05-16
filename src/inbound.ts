@@ -44,17 +44,37 @@ function resolveOutboundMediaUrls(payload: { mediaUrl?: string; mediaUrls?: stri
   ].filter(Boolean);
 }
 
-/** Extract filename from a URL path */
-function extractFilename(url: string): string {
+/**
+ * Sanitize a filename for safe use inside a temp directory.
+ *
+ * Strips path separators (basename), rejects path-traversal segments and
+ * null bytes, caps length. Returns "file" for empty/dangerous input.
+ *
+ * Exported so unit tests (`content-disposition.test.ts`) can lock in the
+ * defense against URL-encoded path traversal (e.g. `..%2F..%2Fetc%2Fpasswd`).
+ */
+export function sanitizeFilename(name: string): string {
+  // basename() strips any leading directory components
+  const base = join("/", name).split(/[/\\]/).pop() || "";
+  // Reject traversal segments and null bytes after basename
+  if (!base || base === "." || base === ".." || base.includes("\0")) return "file";
+  // Cap length to avoid filesystem limits / DoS via huge names
+  return base.length > 200 ? base.slice(0, 200) : base;
+}
+
+/** Extract filename from a URL path (sanitized for use in temp paths) */
+export function extractFilename(url: string): string {
   try {
     const pathname = new URL(url).pathname;
     const parts = pathname.split("/");
     const raw = parts[parts.length - 1] || "file";
+    let decoded: string;
     try {
-      return decodeURIComponent(raw);
+      decoded = decodeURIComponent(raw);
     } catch {
-      return raw;
+      decoded = raw;
     }
+    return sanitizeFilename(decoded);
   } catch {
     return "file";
   }
