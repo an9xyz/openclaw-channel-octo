@@ -3,23 +3,15 @@
   "version": "1.0.0",
   "description": "Octo channel plugin for OpenClaw",
   "main": "dist/index.js",
-  "bin": {
-    "openclaw-channel-octo": "bin/octo.js"
-  },
   "types": "dist/index.d.ts",
   "type": "module",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    },
-    "./cli": {
-      "types": "./dist/cli/index.d.ts",
-      "import": "./dist/cli/index.js"
     }
   },
   "files": [
-    "bin",
     "dist",
     "index.ts",
     "skills",
