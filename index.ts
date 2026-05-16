@@ -7,13 +7,19 @@
  * Slash commands are registered under both the new `/octo_*` names and the
  * deprecated `/dmwork_*` aliases (one release cycle for backward compat).
  *
- * TODO: Migrate to defineChannelPluginEntry when the openclaw plugin-sdk
- * exports it. The current SDK (>=2026.4.15) does not expose this API yet;
- * the manual plugin-object pattern below remains the supported approach.
+ * Entry uses defineBundledChannelEntry — the SDK contract OpenClaw's plugin
+ * loader expects (>=2026.5.x). The previous plain `{ id, name, register }`
+ * object shape silently failed loader detection ("missing register/activate
+ * export") because the loader checks for the bundled-channel-entry contract
+ * specifically, not any object that happens to have a `register` field.
  */
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { defineBundledChannelEntry } from "openclaw/plugin-sdk/channel-entry-contract";
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { dmworkPlugin } from "./src/channel.js";
 import { setDmworkRuntime } from "./src/runtime.js";
 import { getGroupMdForPrompt } from "./src/group-md.js";
@@ -170,16 +176,48 @@ async function handleRemoveAccount(ctx: any, primaryCommandName: string) {
   }
 }
 
-const plugin: {
-  id: string;
-  name: string;
-  description: string;
-  register: (api: OpenClawPluginApi) => void;
-} = {
-  id: "openclaw-channel-octo",
+// ---------------------------------------------------------------------------
+// Plugin entry — uses defineBundledChannelEntry contract (OpenClaw 2026.5.x+).
+//
+// configSchema is loaded at module-load time from openclaw.plugin.json so we
+// keep the static manifest as single source of truth (avoids drift between
+// the JSON schema shipped to ClawHub and the runtime schema OpenClaw asks
+// for during config validation).
+// ---------------------------------------------------------------------------
+
+function loadConfigSchema(): any {
+  // openclaw.plugin.json sits at the package root; index.js after build is
+  // at <pkg>/dist/index.js, so go up one level.
+  //
+  // Wrapped in try/catch because the OpenClaw plugin loader runs us in an
+  // isolated module context — if readFileSync fails for any reason (path
+  // resolution quirk, missing file in a partial install), throwing here
+  // would kill the whole entry module, and the loader would report the
+  // generic "missing register/activate" error with no clue what actually
+  // failed. Returning {} is a safe fallback: validation still runs but
+  // with no constraints.
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const manifestPath = join(here, "..", "openclaw.plugin.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+    return manifest?.channelConfigs?.octo?.schema ?? {};
+  } catch (err) {
+    console.warn(`[octo] failed to load configSchema from openclaw.plugin.json: ${(err as Error).message}`);
+    return {};
+  }
+}
+
+export default defineBundledChannelEntry({
+  id: "octo",
   name: "Octo",
   description: "OpenClaw Octo channel plugin",
-  register(api) {
+  importMetaUrl: import.meta.url,
+  plugin: {
+    specifier: "./src/channel.js",
+    exportName: "dmworkPlugin",
+  },
+  configSchema: loadConfigSchema(),
+  registerFull(api: OpenClawPluginApi) {
     setDmworkRuntime(api.runtime);
     api.registerChannel({ plugin: dmworkPlugin });
 
@@ -289,6 +327,4 @@ const plugin: {
       return { prependContext: sections.join('\n\n') };
     });
   },
-};
-
-export default plugin;
+});
