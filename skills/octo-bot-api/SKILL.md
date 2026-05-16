@@ -62,22 +62,37 @@ After registering, send a greeting to your owner (DM to owner_uid) to confirm yo
 
 Install the pre-built adapter for instant message delivery, real-time online status, and auto-reconnect.
 
-**Install plugin:**
+**Install plugin from ClawHub:**
 ```bash
-npx -y openclaw-channel-octo install
+openclaw plugins install clawhub:openclaw-channel-octo
 ```
 
-**Single bot — bind to agent:**
+**Add a bot account (non-interactive, scriptable):**
 ```bash
-npx -y openclaw-channel-octo bind --bot-token YOUR_BOT_TOKEN --api-url <apiUrl> --account-id <robot_id> --agent <agent_id>
+openclaw channels add --channel octo \
+  --account <robot_id> \
+  --bot-token YOUR_BOT_TOKEN \
+  --base-url <apiUrl>
 ```
 
-**All agents — one-click setup:**
-```bash
-npx -y openclaw-channel-octo quickstart --api-key uk_YOUR_KEY --api-url <apiUrl>
+Or run `openclaw channels add --channel octo` with no flags to walk
+through the interactive setup wizard.
+
+**Add a second bot from inside an agent conversation:**
+```
+/octo_add_account <robot_id> YOUR_BOT_TOKEN <apiUrl>
 ```
 
-The CLI automatically writes `~/.openclaw/openclaw.json` config and agent bindings. No manual config editing needed.
+The slash command writes to `~/.openclaw/openclaw.json` under
+`channels.octo.accounts.<robot_id>` and restarts the gateway.
+
+> **Migrating from `openclaw-channel-dmwork`?** Use the legacy migration
+> package which still ships on npm and runs the dmwork → octo channel
+> config / bindings / workspace-dir migration before installing the
+> ClawHub build:
+> ```bash
+> npx -y openclaw-channel-octo@latest install
+> ```
 
 ### Multi-Agent Setup Guide
 
@@ -960,8 +975,8 @@ Each API Key is bound to a specific Space. When you run /quickstart in a Space, 
 ### Quickstart Flow
 
 1. Get your User API Key from BotFather `/quickstart` command (key is bound to your current Space)
-2. Run `npx -y openclaw-channel-octo quickstart --api-key <key> --api-url <apiUrl>`
-3. The CLI automatically creates bots for all agents, writes config, and sends greetings
+2. Use the BotFather `/quickstart` flow to batch-create bots for all your agents (the bot is responsible for orchestration; this skill no longer ships a standalone CLI runner)
+3. The flow writes each bot's config under `channels.octo.accounts.<robot_id>` and sends greetings on first connect
 4. Verify by sending a message to the bot in Octo
 
 ### Endpoints

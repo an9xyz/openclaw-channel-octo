@@ -213,32 +213,6 @@ function ensureCleanupTimer(): void {
   }
 }
 
-async function checkForUpdates(
-  apiUrl: string,
-  log?: { info?: (msg: string) => void; error?: (msg: string) => void; warn?: (msg: string) => void; debug?: (msg: string) => void },
-): Promise<void> {
-  try {
-    // Check npm version
-    const localVersion = PLUGIN_VERSION;
-    const resp = await fetch("https://registry.npmjs.org/openclaw-channel-octo/latest");
-    if (resp.ok) {
-      const data = await resp.json() as { version?: string };
-      if (data.version && data.version !== localVersion) {
-        log?.info?.(`octo: new version available: ${data.version} (current: ${localVersion}). Run: npm install openclaw-channel-octo@latest`);
-      }
-    } else if (resp.status === 404) {
-      // Phase A: package not yet published to npm. Silently ignore.
-      // Once published in Phase B this branch becomes unreachable.
-      log?.debug?.(`octo: registry returned 404 for openclaw-channel-octo (not published yet)`);
-    }
-  } catch (err) {
-    log?.debug?.(`octo: version check failed: ${String(err)}`);
-  }
-
-  // Skills are distributed via the plugin's skills/ directory (openclaw.plugin.json "skills" field).
-  // No runtime fetch needed — openclaw loads skills from ~/.openclaw/extensions/openclaw-channel-octo/skills/ automatically.
-}
-
 /** Resolve correct accountId for outbound context using group→account mapping */
 export function resolveOutboundAccountId(ctxTo: string, fallbackAccountId: string): string {
   // Same prefix / inline-mention-UID normalisation as the outbound send path —
@@ -847,9 +821,6 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
       log?.info?.(
         `[${account.accountId}] bot registered as ${credentials.robot_id}`,
       );
-
-      // Check for updates in background (fire-and-forget)
-      checkForUpdates(account.config.apiUrl, log).catch(() => {});
 
       // Preload member cache for cross-session permission checks (fire-and-forget)
       preloadGroupMemberCache({

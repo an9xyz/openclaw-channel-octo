@@ -77,7 +77,6 @@
     },
     "install": {
       "clawhubSpec": "openclaw-channel-octo",
-      "npmSpec": "openclaw-channel-octo",
       "defaultChoice": "clawhub",
       "minHostVersion": ">=2026.4.15"
     },

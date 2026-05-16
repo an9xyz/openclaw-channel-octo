@@ -31,6 +31,7 @@ import {
 } from "./cli/openclaw-cli.js";
 import {
   PLUGIN_ID,
+  PACKAGE_NAME,
   CHANNEL_ID,
   RECOMMENDED_DM_SCOPE,
   validateAccountId,
@@ -49,7 +50,7 @@ async function handleInfo() {
     text: [
       `${PLUGIN_ID}: ${installedVersion}`,
       `openclaw: ${openclawVersion}`,
-      `plugin package: ${PLUGIN_ID}`,
+      `plugin package: ${PACKAGE_NAME}`,
     ].join("\n"),
   };
 }

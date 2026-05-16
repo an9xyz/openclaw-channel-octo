@@ -6,14 +6,14 @@
  */
 
 import {
-  PLUGIN_ID, CHANNEL_ID,
+  PLUGIN_ID, PACKAGE_NAME, CHANNEL_ID,
   stripChannelPrefix,
   getChannelConfig,
   ensureChannelConfigObject,
 } from "../src/constants.js";
 
 export {
-  PLUGIN_ID, CHANNEL_ID,
+  PLUGIN_ID, PACKAGE_NAME, CHANNEL_ID,
   stripChannelPrefix,
   getChannelConfig,
   ensureChannelConfigObject,
