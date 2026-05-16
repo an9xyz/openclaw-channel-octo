@@ -64,6 +64,10 @@ export default defineBundledChannelEntry({
     specifier: "./src/channel.js",
     exportName: "octoPlugin",
   },
+  runtime: {
+    specifier: "./src/runtime.js",
+    exportName: "setOctoRuntime",
+  },
   configSchema: loadConfigSchema(),
   registerFull(api: OpenClawPluginApi) {
     setOctoRuntime(api.runtime);
