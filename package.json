@@ -56,7 +56,7 @@
     "vitest": "^3.0.0"
   },
   "openclaw": {
-    "id": "openclaw-channel-octo",
+    "id": "octo",
     "type": "channel",
     "extensions": [
       "./index.ts"
@@ -76,8 +76,9 @@
       "blurb": "Connect OpenClaw to Octo, an open-source team collaboration platform."
     },
     "install": {
+      "clawhubSpec": "openclaw-channel-octo",
       "npmSpec": "openclaw-channel-octo",
-      "defaultChoice": "npm",
+      "defaultChoice": "clawhub",
       "minHostVersion": ">=2026.4.15"
     },
     "compat": {
@@ -88,7 +89,7 @@
     },
     "release": {
       "publishToClawHub": true,
-      "publishToNpm": true
+      "publishToNpm": false
     }
   },
   "engines": {

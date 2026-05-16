@@ -22,7 +22,7 @@ export type ResolvedOctoAccount = {
   };
 };
 
-const DEFAULT_API_URL = "http://localhost:8090";
+const DEFAULT_API_URL = "http://localhost:8090/api";
 const DEFAULT_POLL_INTERVAL_MS = 2000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30000;
 

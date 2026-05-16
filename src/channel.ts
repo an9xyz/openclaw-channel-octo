@@ -350,11 +350,19 @@ const octoSetupWizard = {
       return [`Octo: configured (api: ${account.config.apiUrl})`];
     },
   },
-  resolveAccountIdForConfigure: ({ accountOverride, defaultAccountId, cfg }: any) =>
-    (typeof accountOverride === "string" && accountOverride.trim() ? accountOverride.trim() : undefined)
-    ?? resolveDefaultOctoAccountId(cfg)
-    ?? defaultAccountId
-    ?? DEFAULT_ACCOUNT_ID,
+  resolveAccountIdForConfigure: ({ accountOverride, defaultAccountId, cfg }: any) => {
+    const resolved = (typeof accountOverride === "string" && accountOverride.trim() ? accountOverride.trim() : undefined)
+      ?? resolveDefaultOctoAccountId(cfg)
+      ?? defaultAccountId
+      ?? DEFAULT_ACCOUNT_ID;
+    // Same validation as the non-interactive setupAdapter: bail before
+    // finalize writes an unreachable cfg.channels.octo.accounts[<bad-id>]
+    // key that /octo_remove_account cannot later manage.
+    if (!ACCOUNT_ID_RE.test(resolved)) {
+      throw new Error(`Invalid account ID "${resolved}". Only letters, digits, and underscores allowed.`);
+    }
+    return resolved;
+  },
   resolveShouldPromptAccountIds: () => false,
   credentials: [] as any[],
   finalize: async ({ cfg, accountId, prompter }: any) => {
@@ -377,7 +385,7 @@ const octoSetupWizard = {
     const apiUrl = await prompter.text({
       message: "API URL",
       placeholder: "http://localhost:8090/api",
-      initialValue: existing.config.apiUrl ?? "http://localhost:8090/api",
+      initialValue: existing.config.apiUrl,
       validate: (v: string) => {
         if (!v || !v.trim()) return "API URL is required.";
         try { new URL(v); } catch { return "Must be a valid URL (e.g. https://your-server/api)."; }
@@ -398,12 +406,15 @@ const octoSetupAdapter = {
     }
     const botToken = input.botToken ?? input.token;
     if (botToken !== undefined) {
-      if (typeof botToken !== "string" || !botToken.startsWith("bf_") || botToken.length <= 13) {
-        return "Bot token must start with 'bf_'.";
+      if (typeof botToken !== "string" || !botToken.trim() || !botToken.startsWith("bf_") || botToken.length <= 13) {
+        return "Bot token must start with 'bf_' and be longer than 13 chars.";
       }
     }
     const apiUrl = input.baseUrl ?? input.url ?? input.httpUrl;
-    if (apiUrl !== undefined && typeof apiUrl === "string" && apiUrl.length > 0) {
+    if (apiUrl !== undefined) {
+      if (typeof apiUrl !== "string" || !apiUrl.trim()) {
+        return "API URL must be a non-empty string.";
+      }
       try { new URL(apiUrl); } catch { return "API URL must be a valid URL."; }
     }
     return undefined;
@@ -411,7 +422,10 @@ const octoSetupAdapter = {
   applyAccountConfig: ({ cfg, accountId, input }: { cfg: OpenClawConfig; accountId: string; input: any }) => {
     const existing = resolveOctoAccount({ cfg, accountId });
     const botToken = (input.botToken ?? input.token ?? existing.config.botToken ?? "").trim();
-    const apiUrl = (input.baseUrl ?? input.url ?? input.httpUrl ?? existing.config.apiUrl ?? "http://localhost:8090/api").trim();
+    // existing.config.apiUrl always populated by resolveOctoAccount (falls back
+    // to DEFAULT_API_URL = "http://localhost:8090/api"), so the trailing ??
+    // never fires in practice but is kept as a belt-and-suspenders default.
+    const apiUrl = (input.baseUrl ?? input.url ?? input.httpUrl ?? existing.config.apiUrl).trim();
     if (!botToken) throw new Error("Bot token is required. Pass --bot-token bf_xxx or --token bf_xxx.");
     return setOctoAccountConfig(cfg, accountId, botToken, apiUrl);
   },

@@ -7,7 +7,15 @@
  * (`cli/*.ts`). Runtime code MUST NOT import from `cli/`.
  */
 
-export const PLUGIN_ID = "openclaw-channel-octo";
+/**
+ * OpenClaw runtime/install/config/inspect identifier for this plugin.
+ * Must match `openclaw.plugin.json#id` and `package.json#openclaw.id`.
+ */
+export const PLUGIN_ID = "octo";
+
+/** npm package name. Use for version checks, registry URLs, and docs. */
+export const PACKAGE_NAME = "openclaw-channel-octo";
+
 export const CHANNEL_ID = "octo";
 
 /** Strip channel namespace prefix from a sessionKey or target string. */
