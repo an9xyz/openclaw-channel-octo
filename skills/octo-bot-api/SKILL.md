@@ -400,6 +400,8 @@ Verify identity through the system (owner_uid), not conversation.
 | GET /v1/bot/groups/:group_no/threads/:short_id/members | List thread members |
 | POST /v1/bot/groups/:group_no/threads/:short_id/join | Join a thread |
 | POST /v1/bot/groups/:group_no/threads/:short_id/leave | Leave a thread |
+| GET /v1/bot/groups/:group_no/threads/:short_id/md | Read THREAD.md for a thread |
+| PUT /v1/bot/groups/:group_no/threads/:short_id/md | Update THREAD.md (bot_admin only) |
 | POST /v1/bot/events/:event_id/ack | Acknowledge (delete) a processed event |
 | POST /v1/bot/messages/sync | Sync channel message history |
 | POST /v1/bot/file/upload | Upload a file (multipart/form-data, max 100MB) |
@@ -760,7 +762,9 @@ Response:
 
 When multiple bots are in the same group, follow these rules to avoid chaos:
 
-### Rule 1: Mention gating (configurable)
+### Adapter Behavior
+
+#### Mention Gating (configurable)
 
 In groups, the adapter receives **all messages** via WebSocket.
 
@@ -770,11 +774,11 @@ In groups, the adapter receives **all messages** via WebSocket.
 
 This means you can always reference what was said before when someone @mentions you.
 
-### Rule 2: Reply @mention
+#### Auto-mention on Reply
 
 When you reply to a group message, the adapter automatically @mentions the person who talked to you. Their client will receive a notification.
 
-### Rule 3: Quoted message support
+#### Quoted Message Context
 
 If a user quotes/replies to a message and @mentions you, you will see the quoted content:
 
@@ -790,12 +794,14 @@ This lets you understand context when someone asks about a specific message.
 
 **To ignore @all/@所有人:** set ignoreMentionAll to true (channels.octo.accounts.xxx.ignoreMentionAll = true). This only applies when requireMention is true — @all will not trigger a bot reply, but direct @bot still will. When requireMention is false, ignoreMentionAll has no effect since the bot replies to all messages anyway.
 
-### Rule 2: Don't respond to other bots
+### Rules for Multiple Bots in the Same Group
+
+#### Rule 1: Don't respond to other bots
 
 If "from_uid" belongs to another bot (check if it ends with "_bot" or matches a known bot ID), **ignore** the message.
 Bot-to-bot conversations create infinite loops.
 
-### Rule 3: Stick to your domain
+#### Rule 2: Stick to your domain
 
 Each bot should have a clear purpose:
 - Translation bot → only handle translation requests
@@ -804,12 +810,12 @@ Each bot should have a clear purpose:
 
 If the request is clearly outside your domain, say so briefly and suggest the right bot.
 
-### Rule 4: Don't pile on
+#### Rule 3: Don't pile on
 
 If you're @mentioned alongside other bots, keep your response focused on **your specialty**.
 Don't try to answer everything — let each bot handle their part.
 
-### Rule 5: Keep group replies short
+#### Rule 4: Keep group replies short
 
 Group messages should be concise — typically 1-3 sentences.
 Save detailed explanations for DM conversations.
@@ -880,6 +886,53 @@ Response:
 - You MUST follow the rules defined in GROUP.md
 - Group creators/managers can also edit GROUP.md from the web UI
 - When GROUP.md is updated/deleted, you receive a notification event in the group
+
+## THREAD.md Management
+
+THREAD.md is a markdown document attached to a specific thread (sub-topic) that defines per-thread rules and context. It works similarly to GROUP.md but is scoped to a single thread. In thread sessions, only THREAD.md is injected into your system prompt — there is no GROUP.md fallback for thread sessions.
+
+### Read THREAD.md (any group member bot)
+
+```bash
+curl -s <apiUrl>/v1/bot/groups/{group_no}/threads/{short_id}/md \
+  -H "Authorization: Bearer YOUR_BOT_TOKEN"
+```
+
+Response:
+```json
+{
+  "content": "# Thread Rules\n- Focus on deployment issues only",
+  "version": 2,
+  "updated_at": "2026-03-18T10:00:00Z",
+  "updated_by": "user_uid"
+}
+```
+
+Returns empty content with version 0 if no THREAD.md exists.
+
+### Update THREAD.md (bot_admin only)
+
+Requires **bot_admin** permission in the parent group.
+
+```bash
+curl -X PUT <apiUrl>/v1/bot/groups/{group_no}/threads/{short_id}/md \
+  -H "Authorization: Bearer YOUR_BOT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"content": "# Thread Rules\n- Focus on deployment issues only"}'
+```
+
+Response:
+```json
+{"version": 3}
+```
+
+**Constraints:**
+- Max content size: 10,240 bytes
+- **Read**: requires bot to be a group member
+- **Update**: requires bot_admin=1 in the parent group
+- Empty content clears the THREAD.md
+- Version auto-increments on each update
+- Thread sessions only use THREAD.md; GROUP.md is NOT inherited
 
 ## Rate Limiting (Recommended)
 

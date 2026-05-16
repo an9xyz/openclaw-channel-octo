@@ -11,7 +11,7 @@ OpenClaw channel plugin for **Octo**. Connects via WebSocket for real-time messa
 > migration path in a follow-up release. New users should use
 > `openclaw-channel-octo` directly.
 
-Repository: https://github.com/Mininglamp-OSS/octo-adapters
+Repository: https://github.com/Mininglamp-OSS/openclaw-channel-octo
 
 ## Prerequisites
 
