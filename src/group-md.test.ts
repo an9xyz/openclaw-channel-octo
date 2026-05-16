@@ -53,26 +53,26 @@ afterEach(() => {
 });
 
 describe("OCTO_GROUP_RE", () => {
-  it("should match dmwork group sessionKey", () => {
-    const key = "agent:myAgent:dmwork:group:g123456";
+  it("should match octo group sessionKey", () => {
+    const key = "agent:myAgent:octo:group:g123456";
     const match = OCTO_GROUP_RE.exec(key);
     expect(match).not.toBeNull();
     expect(match![1]).toBe("g123456");
   });
 
   it("should match group with complex id", () => {
-    const key = "agent:abc:dmwork:group:s1_grp_room42";
+    const key = "agent:abc:octo:group:s1_grp_room42";
     const match = OCTO_GROUP_RE.exec(key);
     expect(match).not.toBeNull();
     expect(match![1]).toBe("s1_grp_room42");
   });
 
-  it("should NOT match dmwork direct sessionKey", () => {
-    const key = "agent:myAgent:dmwork:direct:uid123";
+  it("should NOT match octo direct sessionKey", () => {
+    const key = "agent:myAgent:octo:direct:uid123";
     expect(OCTO_GROUP_RE.exec(key)).toBeNull();
   });
 
-  it("should NOT match non-dmwork sessionKey", () => {
+  it("should NOT match non-octo sessionKey", () => {
     const key = "agent:myAgent:main";
     expect(OCTO_GROUP_RE.exec(key)).toBeNull();
   });

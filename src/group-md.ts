@@ -65,8 +65,7 @@ export interface GroupMdApiResponse {
 }
 
 /** Regex to extract groupNo from OpenClaw sessionKey */
-// LEGACY-COMPAT: dual-prefix to also match historical sessions emitted with `dmwork:` namespace
-export const OCTO_GROUP_RE = /^agent:[^:]+:(?:octo|dmwork):group:(.+)$/;
+export const OCTO_GROUP_RE = /^agent:[^:]+:octo:group:(.+)$/;
 
 // --- In-memory maps ---
 

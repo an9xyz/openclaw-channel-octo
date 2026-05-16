@@ -7,17 +7,15 @@
 
 import {
   PLUGIN_ID, CHANNEL_ID,
-  LEGACY_PLUGIN_ID, LEGACY_CHANNEL_ID, VERY_LEGACY_PLUGIN_ID,
   stripChannelPrefix,
-  getChannelConfig, getChannelConfigFor,
+  getChannelConfig,
   ensureChannelConfigObject,
 } from "../src/constants.js";
 
 export {
   PLUGIN_ID, CHANNEL_ID,
-  LEGACY_PLUGIN_ID, LEGACY_CHANNEL_ID, VERY_LEGACY_PLUGIN_ID,
   stripChannelPrefix,
-  getChannelConfig, getChannelConfigFor,
+  getChannelConfig,
   ensureChannelConfigObject,
 };
 
@@ -34,12 +32,6 @@ export const RECOMMENDED_DM_SCOPE = "per-account-channel-peer";
 /** Build `channels.<CHANNEL_ID>.<...parts>` (current channel, default). */
 export function channelConfigPath(...parts: string[]): string {
   return ["channels", CHANNEL_ID, ...parts].join(".");
-}
-
-/** Migration-only: build `channels.<channelId>.<...parts>` explicitly. */
-// LEGACY-COMPAT: explicit channelId variant for migration code
-export function channelConfigPathFor(channelId: string, ...parts: string[]): string {
-  return ["channels", channelId, ...parts].join(".");
 }
 
 // ---------------------------------------------------------------------------

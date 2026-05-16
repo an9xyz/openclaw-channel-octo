@@ -4,9 +4,6 @@
  * OpenClaw channel plugin for Octo messaging platform.
  * Connects via WebSocket for real-time messaging.
  *
- * Slash commands are registered under both the new `/octo_*` names and the
- * deprecated `/dmwork_*` aliases (one release cycle for backward compat).
- *
  * Entry uses defineBundledChannelEntry — the SDK contract OpenClaw's plugin
  * loader expects (>=2026.5.x). The previous plain `{ id, name, register }`
  * object shape silently failed loader detection ("missing register/activate
@@ -35,14 +32,13 @@ import {
 import {
   PLUGIN_ID,
   CHANNEL_ID,
-  LEGACY_CHANNEL_ID,
   RECOMMENDED_DM_SCOPE,
   validateAccountId,
   channelConfigPath,
 } from "./cli/utils.js";
 
 // ---------------------------------------------------------------------------
-// Command handlers (reused by /octo_* main and /dmwork_* legacy aliases)
+// Command handlers
 // ---------------------------------------------------------------------------
 
 async function handleInfo() {
@@ -154,56 +150,35 @@ export default defineBundledChannelEntry({
     api.registerChannel({ plugin: dmworkPlugin });
 
     // -----------------------------------------------------------------------
-    // Slash command registration helper: registers /octo_<name> as the primary
-    // command and /dmwork_<name> as a deprecated alias sharing the same handler.
+    // Slash command registration helper: registers /octo_<name>.
     // -----------------------------------------------------------------------
-    const registerCommandWithAlias = (
+    const registerOctoCommand = (
       name: string,
       description: string,
       acceptsArgs: boolean,
       handler: (ctx: any) => Promise<{ text: string; isError?: boolean }>,
     ) => {
-      const octoName = `octo_${name}`;
-      const dmworkName = `dmwork_${name}`;
-
-      // Primary command
       api.registerCommand({
-        name: octoName,
+        name: `octo_${name}`,
         description,
         acceptsArgs,
         handler,
       });
-
-      // LEGACY-ALIAS: deprecated /dmwork_* alias kept for one release cycle.
-      // Logs a deprecation notice on every invocation so we can observe usage
-      // frequency before removing in 1.1.0.
-      api.registerCommand({
-        name: dmworkName,
-        description: `[DEPRECATED] Renamed to /${octoName}. ${description}`,
-        acceptsArgs,
-        async handler(ctx) {
-          console.warn(
-            `[deprecation] /${dmworkName} has been renamed to /${octoName}. ` +
-            `The old name still works but will be removed in 1.1.0.`,
-          );
-          return handler(ctx);
-        },
-      });
     };
 
-    registerCommandWithAlias(
+    registerOctoCommand(
       "info",
       "Show Octo plugin version info",
       false,
       handleInfo as any,
     );
-    registerCommandWithAlias(
+    registerOctoCommand(
       "add_account",
       "Add or update an Octo bot account. Args: <account_id> <bot_token> <api_url>",
       true,
       (ctx) => handleAddAccount(ctx, "octo_add_account"),
     );
-    registerCommandWithAlias(
+    registerOctoCommand(
       "remove_account",
       "Remove an Octo bot account. Args: <account_id>",
       true,

@@ -106,7 +106,7 @@ describe("handleAction multi-bot isolation", () => {
       action: "send" as const,
       channel: "octo",
       params: { target: "group:group-001", text: "hello" },
-      toolContext: { currentChannelId: "dmwork:group-001" },
+      toolContext: { currentChannelId: "octo:group-001" },
       cfg: {
         channels: {
           octo: {
@@ -145,7 +145,7 @@ describe("handleAction multi-bot isolation", () => {
       action: "send" as const,
       channel: "octo",
       params: { target: "group:group-001", text: "hello from A" },
-      toolContext: { currentChannelId: "dmwork:group-001" },
+      toolContext: { currentChannelId: "octo:group-001" },
       cfg: {
         channels: {
           octo: {
@@ -182,7 +182,7 @@ describe("handleAction multi-bot isolation", () => {
       action: "send" as const,
       channel: "octo",
       params: { target: "group:group-001", text: "hello" },
-      toolContext: { currentChannelId: "dmwork:group-001" },
+      toolContext: { currentChannelId: "octo:group-001" },
       cfg: {
         channels: {
           octo: {

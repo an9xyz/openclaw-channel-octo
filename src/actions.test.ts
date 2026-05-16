@@ -1436,29 +1436,6 @@ describe("handleDmworkMessageAction", () => {
     });
   });
 
-  describe("read — dmwork: prefix stripped for same-channel check", () => {
-    it("should treat dmwork:grp1 currentChannelId as same channel for grp1 target", async () => {
-      registerBotGroupIds(["grp1"]);
-      globalThis.fetch = mockFetch({
-        "/v1/bot/messages/sync": async () => jsonResponse({ messages: [] }),
-      });
-
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
-        action: "read",
-        args: { target: "group:grp1" },
-        apiUrl: "http://localhost:8090",
-        botToken: "test-token",
-        currentChannelId: "dmwork:grp1",
-      });
-
-      expect(result.ok).toBe(true);
-      const data = result.data as any;
-      // Should be treated as same channel (no wrapper)
-      expect(data.header).toBeUndefined();
-    });
-  });
-
   // -----------------------------------------------------------------------
   // search action
   // -----------------------------------------------------------------------
@@ -1845,11 +1822,9 @@ describe("resolveOutboundDmworkTarget", () => {
     expect(result.channelType).toBe(ChannelType.CommunityTopic);
   });
 
-  it("strips dmwork:/group:/channel: prefixes from threadId", async () => {
+  it("strips group:/channel: prefixes from threadId", async () => {
     const { resolveOutboundDmworkTarget } = await import("./actions.js");
     registerBotGroupIds(["grp1"]);
-    expect(resolveOutboundDmworkTarget("group:grp1", "dmwork:topicA").channelId)
-      .toBe("grp1____topicA");
     expect(resolveOutboundDmworkTarget("group:grp1", "group:topicA").channelId)
       .toBe("grp1____topicA");
     expect(resolveOutboundDmworkTarget("group:grp1", "channel:topicA").channelId)
