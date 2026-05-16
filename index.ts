@@ -16,7 +16,6 @@
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { defineBundledChannelEntry } from "openclaw/plugin-sdk/channel-entry-contract";
-import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -25,11 +24,6 @@ import { setDmworkRuntime } from "./src/runtime.js";
 import { getGroupMdForPrompt } from "./src/group-md.js";
 import { pendingInboundContext } from "./src/inbound.js";
 import {
-  inProcessConfigReader,
-  runDoctorChecks,
-  formatDoctorResult,
-} from "./cli/doctor.js";
-import {
   getOpenClawVersion,
   pluginsInspect,
   configGet,
@@ -37,9 +31,6 @@ import {
   configSet,
   configUnset,
   gatewayRestart,
-  pluginsInstall,
-  pluginsUninstall,
-  removeChannelConfigFromFile,
 } from "./cli/openclaw-cli.js";
 import {
   PLUGIN_ID,
@@ -54,16 +45,6 @@ import {
 // Command handlers (reused by /octo_* main and /dmwork_* legacy aliases)
 // ---------------------------------------------------------------------------
 
-async function handleDoctor(ctx: any) {
-  const reader = inProcessConfigReader(ctx.config);
-  const result = await runDoctorChecks({
-    reader,
-    accountId: ctx.args?.trim() || undefined,
-    inProcess: true,
-  });
-  return { text: formatDoctorResult(result) };
-}
-
 async function handleInfo() {
   const openclawVersion = getOpenClawVersion() ?? "not found";
   const inspect = pluginsInspect(PLUGIN_ID);
@@ -75,55 +56,6 @@ async function handleInfo() {
       `plugin package: ${PLUGIN_ID}`,
     ].join("\n"),
   };
-}
-
-async function handleInstall(ctx: any) {
-  const args = ctx.args?.trim() ?? "";
-  const force = args.includes("--force");
-  try {
-    const inspect = pluginsInspect(PLUGIN_ID);
-    if (inspect?.plugin && !force) {
-      return { text: `Octo plugin already installed (v${inspect.plugin.version}). Use --force to reinstall.` };
-    }
-    pluginsInstall(PLUGIN_ID, true, force);
-    gatewayRestart(true);
-    const after = pluginsInspect(PLUGIN_ID);
-    return { text: `Octo plugin installed (v${after?.plugin?.version ?? "unknown"}). Gateway restarted.` };
-  } catch (e) {
-    return { text: `Install failed: ${e instanceof Error ? e.message : String(e)}`, isError: true };
-  }
-}
-
-async function handleUpdate() {
-  try {
-    const inspect = pluginsInspect(PLUGIN_ID);
-    if (!inspect?.plugin) {
-      return { text: "Octo plugin is not installed. Use /octo_install first.", isError: true };
-    }
-    const currentVersion = inspect.plugin.version;
-    const targetVersion = execFileSync("npm", ["view", `${PLUGIN_ID}@latest`, "version"], {
-      encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
-    if (currentVersion === targetVersion) {
-      return { text: `Already up to date (v${currentVersion}).` };
-    }
-    pluginsInstall(`${PLUGIN_ID}@latest`, true, true);
-    gatewayRestart(true);
-    return { text: `Updated: v${currentVersion} -> v${targetVersion}. Gateway restarted.` };
-  } catch (e) {
-    return { text: `Update failed: ${e instanceof Error ? e.message : String(e)}`, isError: true };
-  }
-}
-
-async function handleUninstall() {
-  try {
-    removeChannelConfigFromFile(CHANNEL_ID);
-    pluginsUninstall(PLUGIN_ID, true);
-    gatewayRestart(true);
-    return { text: "Octo plugin uninstalled. All bot configs removed." };
-  } catch (e) {
-    return { text: `Uninstall failed: ${e instanceof Error ? e.message : String(e)}`, isError: true };
-  }
 }
 
 async function handleAddAccount(ctx: any, primaryCommandName: string) {
@@ -260,34 +192,10 @@ export default defineBundledChannelEntry({
     };
 
     registerCommandWithAlias(
-      "doctor",
-      "Check Octo plugin status and connectivity",
-      true,
-      handleDoctor,
-    );
-    registerCommandWithAlias(
       "info",
       "Show Octo plugin version info",
       false,
       handleInfo as any,
-    );
-    registerCommandWithAlias(
-      "install",
-      "Install or reinstall the Octo plugin",
-      true,
-      handleInstall,
-    );
-    registerCommandWithAlias(
-      "update",
-      "Update Octo plugin to latest version",
-      false,
-      handleUpdate as any,
-    );
-    registerCommandWithAlias(
-      "uninstall",
-      "Uninstall Octo plugin and remove all bot configs",
-      false,
-      handleUninstall as any,
     );
     registerCommandWithAlias(
       "add_account",
