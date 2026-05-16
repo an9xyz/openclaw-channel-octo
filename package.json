@@ -69,7 +69,7 @@
       "detailLabel": "Octo Bot",
       "docsPath": "/channels/octo",
       "markdownCapable": false,
-      "blurb": "Connect OpenClaw to Octo, a WuKongIM-based team collaboration platform."
+      "blurb": "Connect OpenClaw to Octo, an open-source team collaboration platform."
     },
     "install": {
       "npmSpec": "openclaw-channel-octo",

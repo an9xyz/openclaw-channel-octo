@@ -1,7 +1,7 @@
 {
   "id": "openclaw-channel-octo",
   "name": "Octo",
-  "description": "OpenClaw channel plugin for Octo (WuKongIM-based team collaboration platform)",
+  "description": "OpenClaw channel plugin for Octo",
   "channels": [
     "octo"
   ],
