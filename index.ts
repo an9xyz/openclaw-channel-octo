@@ -6,6 +6,10 @@
  *
  * Slash commands are registered under both the new `/octo_*` names and the
  * deprecated `/dmwork_*` aliases (one release cycle for backward compat).
+ *
+ * TODO: Migrate to defineChannelPluginEntry when the openclaw plugin-sdk
+ * exports it. The current SDK (>=2026.4.15) does not expose this API yet;
+ * the manual plugin-object pattern below remains the supported approach.
  */
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
