@@ -19,8 +19,6 @@ import { defineBundledChannelEntry } from "openclaw/plugin-sdk/channel-entry-con
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { octoPlugin } from "./src/channel.js";
-import { setOctoRuntime } from "./src/runtime.js";
 import { getGroupMdForPrompt } from "./src/group-md.js";
 import { pendingInboundContext } from "./src/inbound.js";
 
@@ -70,8 +68,10 @@ export default defineBundledChannelEntry({
   },
   configSchema: loadConfigSchema(),
   registerFull(api: OpenClawPluginApi) {
-    setOctoRuntime(api.runtime);
-    api.registerChannel({ plugin: octoPlugin });
+    // NOTE: defineBundledChannelEntry's auto-generated `register()` already
+    // calls api.registerChannel({ plugin }) and setChannelRuntime(api.runtime)
+    // in full mode (see channel-entry-contract source). Don't repeat them
+    // here — that would double-register the channel.
 
     console.log('[octo] registering before_prompt_build hook');
     api.on('before_prompt_build', (_event, ctx) => {
