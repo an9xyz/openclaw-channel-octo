@@ -287,9 +287,141 @@ const meta = {
   order: 90,
 };
 
+// ---------------------------------------------------------------------------
+// setupWizard + setup adapter — power `openclaw channels add --channel octo`.
+//
+// Without these, OpenClaw reports "octo does not have an interactive setup
+// screen yet" for the wizard path, and "Channel does not support
+// non-interactive add" for the --bot-token/--base-url CLI flag path.
+//
+// We follow feishu's "credentials: [] + collect everything in finalize"
+// pattern — simpler than writing per-credential descriptors with inspect/
+// applySet hooks, and lets us match the existing /octo_add_account UX.
+// ---------------------------------------------------------------------------
+
+const ACCOUNT_ID_RE = /^[A-Za-z0-9_]+$/;
+
+function setOctoAccountConfig(
+  cfg: OpenClawConfig,
+  accountId: string,
+  botToken: string,
+  apiUrl: string,
+): OpenClawConfig {
+  const channels = ((cfg as any).channels ?? {}) as Record<string, any>;
+  const channel = (channels[CHANNEL_ID] ?? {}) as Record<string, any>;
+  const accounts = (channel.accounts ?? {}) as Record<string, any>;
+  return {
+    ...cfg,
+    channels: {
+      ...channels,
+      [CHANNEL_ID]: {
+        ...channel,
+        enabled: true,
+        accounts: {
+          ...accounts,
+          [accountId]: {
+            ...(accounts[accountId] ?? {}),
+            enabled: true,
+            botToken,
+            apiUrl,
+          },
+        },
+      },
+    },
+  } as OpenClawConfig;
+}
+
+const octoSetupWizard = {
+  channel: CHANNEL_ID,
+  status: {
+    configuredLabel: "configured",
+    unconfiguredLabel: "needs bot token",
+    configuredHint: "configured",
+    unconfiguredHint: "needs bot token",
+    configuredScore: 2,
+    unconfiguredScore: 0,
+    resolveConfigured: ({ cfg, accountId }: { cfg: OpenClawConfig; accountId?: string }) => {
+      const account = resolveDmworkAccount({ cfg, accountId: accountId ?? DEFAULT_ACCOUNT_ID });
+      return account.configured;
+    },
+    resolveStatusLines: async ({ cfg, accountId, configured }: { cfg: OpenClawConfig; accountId?: string; configured: boolean }) => {
+      if (!configured) return ["Octo: needs bot token (bf_*)"];
+      const account = resolveDmworkAccount({ cfg, accountId: accountId ?? DEFAULT_ACCOUNT_ID });
+      return [`Octo: configured (api: ${account.config.apiUrl})`];
+    },
+  },
+  resolveAccountIdForConfigure: ({ accountOverride, defaultAccountId, cfg }: any) =>
+    (typeof accountOverride === "string" && accountOverride.trim() ? accountOverride.trim() : undefined)
+    ?? resolveDefaultDmworkAccountId(cfg)
+    ?? defaultAccountId
+    ?? DEFAULT_ACCOUNT_ID,
+  resolveShouldPromptAccountIds: () => false,
+  credentials: [] as any[],
+  finalize: async ({ cfg, accountId, prompter }: any) => {
+    const existing = resolveDmworkAccount({ cfg, accountId });
+
+    const botToken = await prompter.text({
+      message: "Bot token (bf_*)",
+      placeholder: "bf_...",
+      initialValue: existing.config.botToken ?? "",
+      sensitive: true,
+      validate: (v: string) => {
+        if (!v || !v.trim()) return "Bot token is required.";
+        if (!v.startsWith("bf_") || v.length <= 13) {
+          return "Bot token must start with 'bf_'. Create one via /newbot in Octo BotFather.";
+        }
+        return undefined;
+      },
+    });
+
+    const apiUrl = await prompter.text({
+      message: "API URL",
+      placeholder: "http://localhost:8090/api",
+      initialValue: existing.config.apiUrl ?? "http://localhost:8090/api",
+      validate: (v: string) => {
+        if (!v || !v.trim()) return "API URL is required.";
+        try { new URL(v); } catch { return "Must be a valid URL (e.g. https://your-server/api)."; }
+        return undefined;
+      },
+    });
+
+    return { cfg: setOctoAccountConfig(cfg, accountId, botToken.trim(), apiUrl.trim()) };
+  },
+};
+
+const octoSetupAdapter = {
+  resolveAccountId: ({ cfg, accountId }: { cfg: OpenClawConfig; accountId?: string }) =>
+    (accountId && accountId.trim()) || resolveDefaultDmworkAccountId(cfg) || DEFAULT_ACCOUNT_ID,
+  validateInput: ({ accountId, input }: { accountId: string; input: any }) => {
+    if (!ACCOUNT_ID_RE.test(accountId)) {
+      return `Invalid account ID "${accountId}". Only letters, digits, and underscores allowed.`;
+    }
+    const botToken = input.botToken ?? input.token;
+    if (botToken !== undefined) {
+      if (typeof botToken !== "string" || !botToken.startsWith("bf_") || botToken.length <= 13) {
+        return "Bot token must start with 'bf_'.";
+      }
+    }
+    const apiUrl = input.baseUrl ?? input.url ?? input.httpUrl;
+    if (apiUrl !== undefined && typeof apiUrl === "string" && apiUrl.length > 0) {
+      try { new URL(apiUrl); } catch { return "API URL must be a valid URL."; }
+    }
+    return undefined;
+  },
+  applyAccountConfig: ({ cfg, accountId, input }: { cfg: OpenClawConfig; accountId: string; input: any }) => {
+    const existing = resolveDmworkAccount({ cfg, accountId });
+    const botToken = (input.botToken ?? input.token ?? existing.config.botToken ?? "").trim();
+    const apiUrl = (input.baseUrl ?? input.url ?? input.httpUrl ?? existing.config.apiUrl ?? "http://localhost:8090/api").trim();
+    if (!botToken) throw new Error("Bot token is required. Pass --bot-token bf_xxx or --token bf_xxx.");
+    return setOctoAccountConfig(cfg, accountId, botToken, apiUrl);
+  },
+};
+
 export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
   id: "octo",
   meta,
+  setupWizard: octoSetupWizard as any,
+  setup: octoSetupAdapter as any,
   capabilities: {
     chatTypes: ["direct", "group"],
     media: true,
