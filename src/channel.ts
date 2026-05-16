@@ -275,10 +275,10 @@ function getAvailableActions(cfg: any): string[] {
 const meta = {
   id: "octo",
   label: "Octo",
-  selectionLabel: "Octo (WuKongIM)",
+  selectionLabel: "Octo",
   docsPath: "/channels/octo",
   docsLabel: "octo",
-  blurb: "WuKongIM gateway for Octo",
+  blurb: "Connect OpenClaw to Octo",
   order: 90,
 };
 
@@ -834,7 +834,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       let consecutiveHeartbeatFailures = 0;
       const MAX_HEARTBEAT_FAILURES = 3;
 
-      // 6. Connect WebSocket — pure real-time via WuKongIM SDK
+      // 6. Connect WebSocket — pure real-time
       const socket = new WKSocket({
         wsUrl,
         uid: credentials.robot_id,
@@ -858,7 +858,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
 
           // Defense-in-depth DM filter (kept for safety, though v0.2.28+ uses independent
           // WebSocket connections per bot so server-side routing is already correct).
-          // WuKongIM DM channel_id is typically "uid1@uid2", but may also be a plain uid
+          // DM channel_id is typically "uid1@uid2", but may also be a plain uid
           // when channel_type === 1 without '@'. The plain-uid case needs no extra filter
           // since each bot has its own WS connection.
           if (msg.channel_type === ChannelType.DM && msg.channel_id && msg.channel_id.includes("@")) {

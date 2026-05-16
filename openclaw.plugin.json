@@ -1,11 +1,16 @@
 {
   "id": "openclaw-channel-octo",
+  "name": "Octo",
+  "description": "OpenClaw channel plugin for Octo",
   "channels": [
     "octo"
   ],
   "skills": [
     "./skills"
   ],
+  "activation": {
+    "onStartup": true
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -19,9 +24,18 @@
         "properties": {
           "name": { "type": "string" },
           "enabled": { "type": "boolean" },
-          "botToken": { "type": "string" },
-          "apiUrl": { "type": "string" },
-          "wsUrl": { "type": "string" },
+          "botToken": {
+            "type": "string",
+            "uiHints": { "sensitive": true }
+          },
+          "apiUrl": {
+            "type": "string",
+            "description": "Octo server REST API base URL (e.g. https://your-server:8090/api)"
+          },
+          "wsUrl": {
+            "type": "string",
+            "description": "WebSocket endpoint. Auto-detected from apiUrl if omitted."
+          },
           "cdnUrl": { "type": "string" },
           "pollIntervalMs": { "type": "number", "minimum": 500 },
           "heartbeatIntervalMs": { "type": "number", "minimum": 5000 },
@@ -37,9 +51,18 @@
               "properties": {
                 "name": { "type": "string" },
                 "enabled": { "type": "boolean" },
-                "botToken": { "type": "string" },
-                "apiUrl": { "type": "string" },
-                "wsUrl": { "type": "string" },
+                "botToken": {
+                  "type": "string",
+                  "uiHints": { "sensitive": true }
+                },
+                "apiUrl": {
+                  "type": "string",
+                  "description": "Octo server REST API base URL (e.g. https://your-server:8090/api)"
+                },
+                "wsUrl": {
+                  "type": "string",
+                  "description": "WebSocket endpoint. Auto-detected from apiUrl if omitted."
+                },
                 "cdnUrl": { "type": "string" },
                 "pollIntervalMs": { "type": "number", "minimum": 500 },
                 "heartbeatIntervalMs": { "type": "number", "minimum": 5000 },

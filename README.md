@@ -1,31 +1,33 @@
 # openclaw-channel-octo
 
-Octo channel plugin for OpenClaw. Connects via WuKongIM WebSocket for real-time messaging.
+[![ClawHub](https://img.shields.io/badge/ClawHub-openclaw--channel--octo-blue?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0Ij48Y2lyY2xlIGN4PSIxMiIgY3k9IjEyIiByPSIxMCIgZmlsbD0id2hpdGUiLz48L3N2Zz4=)](https://clawhub.ai/plugins/openclaw-channel-octo)
 
-> **v1.0.0+**: This package was renamed from `openclaw-channel-dmwork`. Old
-> users still on `openclaw-channel-dmwork@0.6.x` will get an automatic
-> migration path in a follow-up release. New users should use
-> `openclaw-channel-octo` directly.
-
-Repository: https://github.com/Mininglamp-OSS/octo-adapters
+OpenClaw channel plugin for **Octo**. Connects via WebSocket for real-time messaging.
 
 ## Prerequisites
 
-- Node.js >= 18
+- Node.js >= 22
+  (OpenClaw >= 2026.4.15 requires Node 22; this is a platform constraint, not a plugin-level requirement.)
 - OpenClaw installed and configured (`npm i -g openclaw`)
 - A bot created via BotFather in Octo (send `/newbot` to BotFather)
 
 ## Install
 
-`install` only sets up the plugin (no bot account). Use `bind` after install
-to configure a bot account, or `quickstart` for batch creation across all
-your agents.
+Install from ClawHub:
 
 ```bash
-# 1. Install the plugin
-npx -y openclaw-channel-octo install
+openclaw plugins install clawhub:openclaw-channel-octo
+```
 
-# 2. Bind a bot to an agent
+Or install via npm:
+
+```bash
+npx -y openclaw-channel-octo install
+```
+
+After installing, bind a bot account:
+
+```bash
 npx -y openclaw-channel-octo bind \
   --bot-token bf_your_token_here \
   --api-url https://your-server.example/api \
@@ -103,14 +105,14 @@ Configuration fields per account:
 
 - `botToken` (required): Bot token from BotFather (`bf_` prefix)
 - `apiUrl` (required): Octo server API URL
-- `wsUrl` (optional): WuKongIM WebSocket URL. Auto-detected if omitted.
+- `wsUrl` (optional): WebSocket URL. Auto-detected if omitted.
 - `requireMention` (optional): Only respond when @mentioned in groups
 - `historyLimit` (optional): Group chat history message limit (default: 20)
 
 ## What it does
 
 1. Registers the bot with the Octo server via REST API
-2. Connects to WuKongIM WebSocket for real-time message receiving
+2. Connects to WebSocket for real-time message receiving
 3. Auto-reconnects on disconnection
 4. Sends a greeting to the bot owner on connect
 5. Dispatches incoming messages to OpenClaw's message handler

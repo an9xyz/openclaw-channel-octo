@@ -1,7 +1,7 @@
 {
   "name": "openclaw-channel-octo",
   "version": "1.0.0",
-  "description": "Octo channel plugin for OpenClaw via WuKongIM WebSocket",
+  "description": "Octo channel plugin for OpenClaw",
   "main": "dist/index.js",
   "bin": {
     "openclaw-channel-octo": "bin/octo.js"
@@ -21,7 +21,9 @@
   "files": [
     "bin",
     "dist",
+    "index.ts",
     "skills",
+    "setup-entry.ts",
     "openclaw.plugin.json"
   ],
   "scripts": {
@@ -59,8 +61,33 @@
     "id": "openclaw-channel-octo",
     "type": "channel",
     "extensions": [
-      "dist/index.js"
-    ]
+      "./index.ts"
+    ],
+    "setupEntry": "./setup-entry.ts",
+    "channel": {
+      "id": "octo",
+      "label": "Octo",
+      "selectionLabel": "Octo",
+      "detailLabel": "Octo Bot",
+      "docsPath": "/channels/octo",
+      "markdownCapable": false,
+      "blurb": "Connect OpenClaw to Octo, an open-source team collaboration platform."
+    },
+    "install": {
+      "npmSpec": "openclaw-channel-octo",
+      "defaultChoice": "npm",
+      "publishToClawHub": true,
+      "minHostVersion": ">=2026.4.15"
+    },
+    "compat": {
+      "pluginApi": ">=2026.4.15"
+    },
+    "build": {
+      "openclawVersion": "2026.5.4"
+    }
+  },
+  "engines": {
+    "node": ">=22"
   },
   "bundledDependencies": [
     "cos-nodejs-sdk-v5",
