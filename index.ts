@@ -4,11 +4,14 @@
  * OpenClaw channel plugin for Octo messaging platform.
  * Connects via WebSocket for real-time messaging.
  *
- * Entry uses defineBundledChannelEntry — the SDK contract OpenClaw's plugin
- * loader expects (>=2026.5.x). The previous plain `{ id, name, register }`
- * object shape silently failed loader detection ("missing register/activate
- * export") because the loader checks for the bundled-channel-entry contract
- * specifically, not any object that happens to have a `register` field.
+ * Configuration is done exclusively via OpenClaw's standard channel setup:
+ *   openclaw channels add --channel octo --bot-token bf_... --base-url ...
+ *
+ * Or interactively:
+ *   openclaw channels add --channel octo
+ *
+ * This plugin deliberately has NO slash commands that shell out to the
+ * openclaw CLI — ClawScan blocks `child_process` imports on install.
  */
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
@@ -20,90 +23,6 @@ import { octoPlugin } from "./src/channel.js";
 import { setOctoRuntime } from "./src/runtime.js";
 import { getGroupMdForPrompt } from "./src/group-md.js";
 import { pendingInboundContext } from "./src/inbound.js";
-import {
-  getOpenClawVersion,
-  pluginsInspect,
-  configGet,
-  configGetJson,
-  configSet,
-  configUnset,
-  gatewayRestart,
-} from "./cli/openclaw-cli.js";
-import {
-  PLUGIN_ID,
-  PACKAGE_NAME,
-  CHANNEL_ID,
-  RECOMMENDED_DM_SCOPE,
-  validateAccountId,
-  channelConfigPath,
-} from "./cli/utils.js";
-
-// ---------------------------------------------------------------------------
-// Command handlers
-// ---------------------------------------------------------------------------
-
-async function handleInfo() {
-  const openclawVersion = getOpenClawVersion() ?? "not found";
-  const inspect = pluginsInspect(PLUGIN_ID);
-  const installedVersion = inspect?.plugin?.version ?? "not installed";
-  return {
-    text: [
-      `${PLUGIN_ID}: ${installedVersion}`,
-      `openclaw: ${openclawVersion}`,
-      `plugin package: ${PACKAGE_NAME}`,
-    ].join("\n"),
-  };
-}
-
-async function handleAddAccount(ctx: any, primaryCommandName: string) {
-  const parts = ctx.args?.trim().split(/\s+/) ?? [];
-  if (parts.length < 3) {
-    return { text: `Usage: /${primaryCommandName} <account_id> <bot_token> <api_url>`, isError: true };
-  }
-  const [accountId, botToken, apiUrl] = parts;
-  if (!validateAccountId(accountId)) {
-    return { text: `Invalid account ID "${accountId}". Only letters, digits, and underscores allowed.`, isError: true };
-  }
-  if (!botToken.startsWith("bf_")) {
-    return { text: "Bot token must start with 'bf_'.", isError: true };
-  }
-  try {
-    const existed = Boolean(configGet(channelConfigPath("accounts", accountId, "botToken")));
-    configSet(channelConfigPath("accounts", accountId, "botToken"), botToken);
-    configSet(channelConfigPath("accounts", accountId, "apiUrl"), apiUrl);
-    const dmScope = configGet("session.dmScope");
-    if (!dmScope) {
-      configSet("session.dmScope", RECOMMENDED_DM_SCOPE);
-    }
-    gatewayRestart(true);
-    return { text: `${existed ? "Updated" : "Added"} bot account: ${accountId} (API: ${apiUrl}). Gateway restarted.` };
-  } catch (e) {
-    return { text: `Failed: ${e instanceof Error ? e.message : String(e)}`, isError: true };
-  }
-}
-
-async function handleRemoveAccount(ctx: any, primaryCommandName: string) {
-  const accountId = ctx.args?.trim();
-  if (!accountId) {
-    return { text: `Usage: /${primaryCommandName} <account_id>`, isError: true };
-  }
-  if (!validateAccountId(accountId)) {
-    return { text: `Invalid account ID "${accountId}". Only letters, digits, and underscores allowed.`, isError: true };
-  }
-  try {
-    const token = configGet(channelConfigPath("accounts", accountId, "botToken"));
-    if (!token) {
-      return { text: `Account "${accountId}" does not exist.`, isError: true };
-    }
-    configUnset(channelConfigPath("accounts", accountId));
-    gatewayRestart(true);
-    const remaining = configGetJson(channelConfigPath("accounts"));
-    const count = remaining ? Object.keys(remaining).length : 0;
-    return { text: `Removed account: ${accountId}. ${count} account(s) remaining. Gateway restarted.` };
-  } catch (e) {
-    return { text: `Failed: ${e instanceof Error ? e.message : String(e)}`, isError: true };
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Plugin entry — uses defineBundledChannelEntry contract (OpenClaw 2026.5.x+).
@@ -149,42 +68,6 @@ export default defineBundledChannelEntry({
   registerFull(api: OpenClawPluginApi) {
     setOctoRuntime(api.runtime);
     api.registerChannel({ plugin: octoPlugin });
-
-    // -----------------------------------------------------------------------
-    // Slash command registration helper: registers /octo_<name>.
-    // -----------------------------------------------------------------------
-    const registerOctoCommand = (
-      name: string,
-      description: string,
-      acceptsArgs: boolean,
-      handler: (ctx: any) => Promise<{ text: string; isError?: boolean }>,
-    ) => {
-      api.registerCommand({
-        name: `octo_${name}`,
-        description,
-        acceptsArgs,
-        handler,
-      });
-    };
-
-    registerOctoCommand(
-      "info",
-      "Show Octo plugin version info",
-      false,
-      handleInfo as any,
-    );
-    registerOctoCommand(
-      "add_account",
-      "Add or update an Octo bot account. Args: <account_id> <bot_token> <api_url>",
-      true,
-      (ctx) => handleAddAccount(ctx, "octo_add_account"),
-    );
-    registerOctoCommand(
-      "remove_account",
-      "Remove an Octo bot account. Args: <account_id>",
-      true,
-      (ctx) => handleRemoveAccount(ctx, "octo_remove_account"),
-    );
 
     console.log('[octo] registering before_prompt_build hook');
     api.on('before_prompt_build', (_event, ctx) => {
