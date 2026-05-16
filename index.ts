@@ -89,11 +89,18 @@ export default defineBundledChannelEntry({
     // /tmp/openclaw/openclaw-2026-05-17.log at 16:16:33.531.
     //
     // The contract's `runtime: {}` and `plugin: {}` fields are kept for
-    // setup-only path (defineBundledChannelSetupEntry) and for cleanly
-    // declaring intent to the SDK. The real channel + runtime wiring used
-    // at message-handling time is what we register here, which OpenClaw's
-    // channel registry treats as the authoritative entry (last writer
-    // wins).
+    // contract metadata / non-full registration paths; setup-only entry is
+    // declared separately in setup-entry.ts. The real channel + runtime
+    // wiring used at message-handling time is what we register here, which
+    // OpenClaw's channel registry treats as the authoritative entry (last
+    // writer wins).
+    //
+    // Guard: only wire runtime + channel + hooks in 'full' mode.
+    // In 'tool-discovery' or other non-full modes, running these calls
+    // would register side effects (WebSocket listener, prompt hook) that
+    // are not needed and may interfere with the host's intent.
+    if (api.registrationMode !== 'full') return;
+
     setOctoRuntime(api.runtime);
     api.registerChannel({ plugin: octoPlugin });
 
