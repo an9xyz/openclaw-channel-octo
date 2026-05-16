@@ -21,6 +21,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { getGroupMdForPrompt } from "./src/group-md.js";
 import { pendingInboundContext } from "./src/inbound.js";
+import { setOctoRuntime } from "./src/runtime.js";
+import { octoPlugin } from "./src/channel.js";
 
 // ---------------------------------------------------------------------------
 // Plugin entry — uses defineBundledChannelEntry contract (OpenClaw 2026.5.x+).
@@ -68,10 +70,32 @@ export default defineBundledChannelEntry({
   },
   configSchema: loadConfigSchema(),
   registerFull(api: OpenClawPluginApi) {
-    // NOTE: defineBundledChannelEntry's auto-generated `register()` already
-    // calls api.registerChannel({ plugin }) and setChannelRuntime(api.runtime)
-    // in full mode (see channel-entry-contract source). Don't repeat them
-    // here — that would double-register the channel.
+    // CRITICAL: both setOctoRuntime AND api.registerChannel MUST be called
+    // here, even though the contract's `runtime: {}` and `plugin: {}` fields
+    // would auto-invoke them.
+    //
+    // Why: defineBundledChannelEntry loads src/channel.js and src/runtime.js
+    // via loadBundledEntryExportSync — an SDK-internal loader cache that
+    // produces module instances DIFFERENT from what our `import` statements
+    // produce at this file's top. Under ESM ("type": "module"), those two
+    // loaders do not share the module map, so the contract's
+    // setChannelRuntime sets _runtime on the SDK-loaded instance, while
+    // src/inbound.ts reads getOctoRuntime from the ESM-static-import
+    // instance — and finds nothing.
+    //
+    // The 1.0.4 release "trusted the contract" and dropped these two
+    // manual calls; bot WebSocket connected fine but the FIRST inbound
+    // message crashed with "Octo runtime not initialized". Verified in
+    // /tmp/openclaw/openclaw-2026-05-17.log at 16:16:33.531.
+    //
+    // The contract's `runtime: {}` and `plugin: {}` fields are kept for
+    // setup-only path (defineBundledChannelSetupEntry) and for cleanly
+    // declaring intent to the SDK. The real channel + runtime wiring used
+    // at message-handling time is what we register here, which OpenClaw's
+    // channel registry treats as the authoritative entry (last writer
+    // wins).
+    setOctoRuntime(api.runtime);
+    api.registerChannel({ plugin: octoPlugin });
 
     console.log('[octo] registering before_prompt_build hook');
     api.on('before_prompt_build', (_event, ctx) => {
