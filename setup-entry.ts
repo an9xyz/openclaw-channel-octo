@@ -11,7 +11,7 @@
 export default {
   id: "openclaw-channel-octo",
   name: "Octo",
-  description: "Connect OpenClaw to Octo (WuKongIM-based team collaboration platform)",
+  description: "Connect OpenClaw to Octo",
 
   configKeys: [
     { key: "botToken", label: "Bot Token", required: true, sensitive: true },

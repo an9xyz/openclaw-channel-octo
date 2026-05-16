@@ -131,7 +131,7 @@ This makes the session key: `agent:{agentId}:{channel}:{accountId}:direct:{peerI
 The gateway auto-detects config changes and reloads the plugin — no manual restart needed.
 
 Features:
-- Instant message delivery via WuKongIM WebSocket (`<wsUrl>`)
+- Instant message delivery via WebSocket (`<wsUrl>`)
 - Real-time online/offline status (users see bot as "online")
 - Auto-reconnect on disconnection
 - Full OpenClaw plugin integration
@@ -209,7 +209,7 @@ DM and group events have different formats. Getting this wrong means replying to
 
 **Reply target:** use `from_uid` as `channel_id`, set `channel_type = 1`.
 
-**Note (Space mode):** In Space-enabled deployments, the underlying WuKongIM channel_id uses `s{spaceId}_{uid}` format. If you use the OpenClaw adapter, this is handled automatically. If you use the events API directly, `from_uid` remains the bare UID — use it as-is for sendMessage.
+**Note (Space mode):** In Space-enabled deployments, the underlying channel_id uses `s{spaceId}_{uid}` format. If you use the OpenClaw adapter, this is handled automatically. If you use the events API directly, `from_uid` remains the bare UID — use it as-is for sendMessage.
 
 ### Group Event (channel_id and channel_type are PRESENT)
 

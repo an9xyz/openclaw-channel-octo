@@ -2,7 +2,7 @@
  * openclaw-channel-octo
  *
  * OpenClaw channel plugin for Octo messaging platform.
- * Connects via WuKongIM WebSocket for real-time messaging.
+ * Connects via WebSocket for real-time messaging.
  *
  * Slash commands are registered under both the new `/octo_*` names and the
  * deprecated `/dmwork_*` aliases (one release cycle for backward compat).
@@ -178,7 +178,7 @@ const plugin: {
 } = {
   id: "openclaw-channel-octo",
   name: "Octo",
-  description: "OpenClaw Octo channel plugin via WuKongIM WebSocket",
+  description: "OpenClaw Octo channel plugin",
   register(api) {
     setDmworkRuntime(api.runtime);
     api.registerChannel({ plugin: dmworkPlugin });

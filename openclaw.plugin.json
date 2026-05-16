@@ -34,7 +34,7 @@
           },
           "wsUrl": {
             "type": "string",
-            "description": "WuKongIM WebSocket endpoint. Auto-detected from apiUrl if omitted."
+            "description": "WebSocket endpoint. Auto-detected from apiUrl if omitted."
           },
           "cdnUrl": { "type": "string" },
           "pollIntervalMs": { "type": "number", "minimum": 500 },
@@ -61,7 +61,7 @@
                 },
                 "wsUrl": {
                   "type": "string",
-                  "description": "WuKongIM WebSocket endpoint. Auto-detected from apiUrl if omitted."
+                  "description": "WebSocket endpoint. Auto-detected from apiUrl if omitted."
                 },
                 "cdnUrl": { "type": "string" },
                 "pollIntervalMs": { "type": "number", "minimum": 500 },
