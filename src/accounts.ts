@@ -1,13 +1,9 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
-import type { DmworkConfig } from "./config-schema.js";
+import type { OctoConfig } from "./config-schema.js";
 import { getChannelConfig } from "./constants.js";
 
-export type DmworkAccountConfig = DmworkConfig & {
-  accounts?: Record<string, DmworkConfig | undefined>;
-};
-
-export type ResolvedDmworkAccount = {
+export type ResolvedOctoAccount = {
   accountId: string;
   name?: string;
   enabled: boolean;
@@ -30,8 +26,8 @@ const DEFAULT_API_URL = "http://localhost:8090";
 const DEFAULT_POLL_INTERVAL_MS = 2000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30000;
 
-export function listDmworkAccountIds(cfg: OpenClawConfig): string[] {
-  const channel = getChannelConfig<DmworkAccountConfig>(cfg);
+export function listOctoAccountIds(cfg: OpenClawConfig): string[] {
+  const channel = getChannelConfig<OctoConfig>(cfg);
   const accountIds = Object.keys(channel.accounts ?? {});
   if (accountIds.length > 0) {
     return accountIds;
@@ -39,8 +35,8 @@ export function listDmworkAccountIds(cfg: OpenClawConfig): string[] {
   return [DEFAULT_ACCOUNT_ID];
 }
 
-export function resolveDefaultDmworkAccountId(cfg: OpenClawConfig): string | null {
-  const channel = getChannelConfig<DmworkAccountConfig>(cfg);
+export function resolveDefaultOctoAccountId(cfg: OpenClawConfig): string | null {
+  const channel = getChannelConfig<OctoConfig>(cfg);
   const accountIds = Object.keys(channel.accounts ?? {});
   // Single account or legacy config (no accounts map): safe to default
   if (accountIds.length <= 1) {
@@ -50,12 +46,12 @@ export function resolveDefaultDmworkAccountId(cfg: OpenClawConfig): string | nul
   return null;
 }
 
-export function resolveDmworkAccount(params: {
+export function resolveOctoAccount(params: {
   cfg: OpenClawConfig;
   accountId?: string | null;
-}): ResolvedDmworkAccount {
+}): ResolvedOctoAccount {
   const accountId = params.accountId ?? DEFAULT_ACCOUNT_ID;
-  const channel = getChannelConfig<DmworkAccountConfig>(params.cfg);
+  const channel = getChannelConfig<OctoConfig>(params.cfg);
   const accountConfig = channel.accounts?.[accountId] ?? channel;
 
   const botToken = accountConfig.botToken ?? channel.botToken;

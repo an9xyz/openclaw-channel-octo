@@ -29,7 +29,7 @@ export const MENTION_PATTERN =
 /**
  * 匹配 @[uid:displayName] 格式（adapter↔LLM 内部使用）。
  *
- * uid 字符集：[\w.\-]+ — 覆盖 dmwork 已知的所有 uid 格式
+ * uid 字符集：[\w.\-]+ — 覆盖 Octo 已知的所有 uid 格式
  * name 字符集：[^\]\n]+ — 禁止方括号和换行，其余字符均允许
  */
 export const STRUCTURED_MENTION_PATTERN = /@\[([\w.\-]+):([^\]\n]+)\]/g;
@@ -133,7 +133,7 @@ export function convertStructuredMentions(
     // negatives that are worse than the low risk of hallucinated uids.
     // Note: if the LLM hallucinates a uid that happens to be a real (but
     // unintended) user, that user receives one unexpected notification.
-    // This risk is negligible given dmwork uids are random 32-char hex hashes.
+    // This risk is negligible given Octo uids are random 32-char hex hashes.
     entities.push({
       uid: m.uid,
       offset: newOffset,

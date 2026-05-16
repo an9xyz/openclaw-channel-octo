@@ -13,6 +13,6 @@ export default defineBundledChannelSetupEntry({
   importMetaUrl: import.meta.url,
   plugin: {
     specifier: "./src/channel.js",
-    exportName: "dmworkPlugin",
+    exportName: "octoPlugin",
   },
 });

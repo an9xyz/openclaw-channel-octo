@@ -71,25 +71,16 @@ After installation, these commands are available inside OpenClaw:
 
 | Command | Args | Description |
 |---|---|---|
-| `/octo_doctor` | `[<account_id>]` | Check plugin status and connectivity. Pass an account id to check a specific bot only. |
 | `/octo_info` | none | Show Octo plugin version info. |
-| `/octo_install` | `[--force]` | Install the Octo plugin. Pass `--force` to reinstall when already present. |
-| `/octo_update` | none | Update Octo plugin to the latest published version. |
-| `/octo_uninstall` | none | Uninstall the Octo plugin and remove all bot configs. |
 | `/octo_add_account` | `<account_id> <bot_token> <api_url>` | Add or update an Octo bot account. |
 | `/octo_remove_account` | `<account_id>` | Remove an Octo bot account. |
 
 Example:
 
 ```
-/octo_doctor                                          # check all accounts
-/octo_doctor my_bot                                   # check one specific account
 /octo_add_account my_bot bf_xxx https://im.example.com/api    # add a bot
 /octo_remove_account my_bot                           # remove a bot
 ```
-
-The legacy `/dmwork_*` aliases keep working for one release cycle and emit a
-deprecation hint on every invocation. Prefer the `/octo_*` names.
 
 ## Configuration
 
@@ -139,7 +130,7 @@ The `index.ts` exports a standard OpenClaw plugin object. When loaded by OpenCla
 - `register(api)` is called automatically
 - `api.runtime` is injected for logging and lifecycle management
 - `api.registerChannel()` registers the Octo channel plugin
-- `api.registerCommand()` registers 7 `/octo_*` slash commands (each with a deprecated `/dmwork_*` alias)
+- `api.registerCommand()` registers `/octo_*` slash commands
 - Configuration is read from `channels.octo` in OpenClaw's config
 
 The plugin uses the `ChannelPlugin` SDK interface with support for:

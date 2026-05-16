@@ -5,33 +5,33 @@ import type {
 } from "openclaw/plugin-sdk";
 import type { ChannelOutboundContext } from "openclaw/plugin-sdk/channel-contract";
 import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
-import { DmworkConfigJsonSchema } from "./config-schema.js";
+import { OctoConfigJsonSchema } from "./config-schema.js";
 import { CHANNEL_ID, stripChannelPrefix } from "./constants.js";
 import {
-  listDmworkAccountIds,
-  resolveDefaultDmworkAccountId,
-  resolveDmworkAccount,
-  type ResolvedDmworkAccount,
+  listOctoAccountIds,
+  resolveDefaultOctoAccountId,
+  resolveOctoAccount,
+  type ResolvedOctoAccount,
 } from "./accounts.js";
 import { registerBot, sendMessage, sendHeartbeat, sendMediaMessage, inferContentType, ensureTextCharset, fetchBotGroups, getGroupMd, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS } from "./api-fetch.js";
 import { PLUGIN_VERSION } from "./version.js";
-import { getDmworkRuntime } from "./runtime.js";
+import { getOctoRuntime } from "./runtime.js";
 
 /** Get OpenClaw host version from PluginRuntime.version (provided by SDK). */
 function getAgentVersion(): string {
   try {
-    return getDmworkRuntime().version ?? "";
+    return getOctoRuntime().version ?? "";
   } catch {
     return "";
   }
 }
 import { WKSocket } from "./socket.js";
-import { handleInboundMessage, type DmworkStatusSink, sanitizeFilename } from "./inbound.js";
+import { handleInboundMessage, type OctoStatusSink, sanitizeFilename } from "./inbound.js";
 import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "./types.js";
 import { buildEntitiesFromFallback, parseStructuredMentions, convertStructuredMentions } from "./mention-utils.js";
 import type { MentionEntity } from "./types.js";
-import { handleDmworkMessageAction, parseTarget, resolveOutboundDmworkTarget, normalizeOutboundChannelPrefix, extractInlineMentionUids } from "./actions.js";
-import { createDmworkManagementTools } from "./agent-tools.js";
+import { handleOctoMessageAction, parseTarget, resolveOutboundOctoTarget, normalizeOutboundChannelPrefix, extractInlineMentionUids } from "./actions.js";
+import { createOctoManagementTools } from "./agent-tools.js";
 import { getOrCreateGroupMdCache, registerBotGroupIds, getKnownGroupIds, writeGroupMdToDisk } from "./group-md.js";
 import { registerOwnerUid } from "./owner-registry.js";
 import { preloadGroupMemberCache, getGroupMembersFromCache } from "./member-cache.js";
@@ -263,9 +263,9 @@ export function resolveOutboundAccountId(ctxTo: string, fallbackAccountId: strin
 /** Shared check: return available actions if at least one account is configured, else empty. */
 function getAvailableActions(cfg: any): string[] {
   try {
-    const ids = listDmworkAccountIds(cfg);
+    const ids = listOctoAccountIds(cfg);
     const hasConfigured = ids.some((id) => {
-      const acct = resolveDmworkAccount({ cfg, accountId: id });
+      const acct = resolveOctoAccount({ cfg, accountId: id });
       return acct.enabled && acct.configured && !!acct.config.botToken;
     });
     if (!hasConfigured) return [];
@@ -341,24 +341,24 @@ const octoSetupWizard = {
     configuredScore: 2,
     unconfiguredScore: 0,
     resolveConfigured: ({ cfg, accountId }: { cfg: OpenClawConfig; accountId?: string }) => {
-      const account = resolveDmworkAccount({ cfg, accountId: accountId ?? DEFAULT_ACCOUNT_ID });
+      const account = resolveOctoAccount({ cfg, accountId: accountId ?? DEFAULT_ACCOUNT_ID });
       return account.configured;
     },
     resolveStatusLines: async ({ cfg, accountId, configured }: { cfg: OpenClawConfig; accountId?: string; configured: boolean }) => {
       if (!configured) return ["Octo: needs bot token (bf_*)"];
-      const account = resolveDmworkAccount({ cfg, accountId: accountId ?? DEFAULT_ACCOUNT_ID });
+      const account = resolveOctoAccount({ cfg, accountId: accountId ?? DEFAULT_ACCOUNT_ID });
       return [`Octo: configured (api: ${account.config.apiUrl})`];
     },
   },
   resolveAccountIdForConfigure: ({ accountOverride, defaultAccountId, cfg }: any) =>
     (typeof accountOverride === "string" && accountOverride.trim() ? accountOverride.trim() : undefined)
-    ?? resolveDefaultDmworkAccountId(cfg)
+    ?? resolveDefaultOctoAccountId(cfg)
     ?? defaultAccountId
     ?? DEFAULT_ACCOUNT_ID,
   resolveShouldPromptAccountIds: () => false,
   credentials: [] as any[],
   finalize: async ({ cfg, accountId, prompter }: any) => {
-    const existing = resolveDmworkAccount({ cfg, accountId });
+    const existing = resolveOctoAccount({ cfg, accountId });
 
     const botToken = await prompter.text({
       message: "Bot token (bf_*)",
@@ -391,7 +391,7 @@ const octoSetupWizard = {
 
 const octoSetupAdapter = {
   resolveAccountId: ({ cfg, accountId }: { cfg: OpenClawConfig; accountId?: string }) =>
-    (accountId && accountId.trim()) || resolveDefaultDmworkAccountId(cfg) || DEFAULT_ACCOUNT_ID,
+    (accountId && accountId.trim()) || resolveDefaultOctoAccountId(cfg) || DEFAULT_ACCOUNT_ID,
   validateInput: ({ accountId, input }: { accountId: string; input: any }) => {
     if (!ACCOUNT_ID_RE.test(accountId)) {
       return `Invalid account ID "${accountId}". Only letters, digits, and underscores allowed.`;
@@ -409,7 +409,7 @@ const octoSetupAdapter = {
     return undefined;
   },
   applyAccountConfig: ({ cfg, accountId, input }: { cfg: OpenClawConfig; accountId: string; input: any }) => {
-    const existing = resolveDmworkAccount({ cfg, accountId });
+    const existing = resolveOctoAccount({ cfg, accountId });
     const botToken = (input.botToken ?? input.token ?? existing.config.botToken ?? "").trim();
     const apiUrl = (input.baseUrl ?? input.url ?? input.httpUrl ?? existing.config.apiUrl ?? "http://localhost:8090/api").trim();
     if (!botToken) throw new Error("Bot token is required. Pass --bot-token bf_xxx or --token bf_xxx.");
@@ -417,7 +417,7 @@ const octoSetupAdapter = {
   },
 };
 
-export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
+export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
   id: "octo",
   meta,
   setupWizard: octoSetupWizard as any,
@@ -464,7 +464,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           }
         }
       }
-      const account = resolveDmworkAccount({
+      const account = resolveOctoAccount({
         cfg: ctx.cfg,
         accountId,
       });
@@ -474,7 +474,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       const memberMap = getOrCreateMemberMap(accountId);
       const uidToNameMap = getOrCreateUidToNameMap(accountId);
       const groupMdCache = getOrCreateGroupMdCache(accountId);
-      return handleDmworkMessageAction({
+      return handleOctoMessageAction({
         action: ctx.action,
         args: ctx.params ?? {},
         apiUrl: account.config.apiUrl,
@@ -490,12 +490,12 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       });
     },
   } as any, // TODO: remove when SDK types support this
-  agentTools: (params: { cfg?: any }) => createDmworkManagementTools(params),
+  agentTools: (params: { cfg?: any }) => createOctoManagementTools(params),
   agentPrompt: {
     messageToolHints: ({ cfg, accountId }: { cfg: any; accountId?: string | null }) => {
       if (!accountId) return [];
       return [
-        `IMPORTANT: Your Octo accountId is "${accountId}". You MUST always pass accountId: "${accountId}" when using the octo_management tool. Do NOT use any other accountId. (Legacy alias dmwork_management is also accepted but deprecated.)`,
+        `IMPORTANT: Your Octo accountId is "${accountId}". You MUST always pass accountId: "${accountId}" when using the octo_management tool. Do NOT use any other accountId.`,
         `For sending messages: if the target is a group, use target="group:<groupId>". If the target is a specific user (1v1 direct message), use target="user:<userId>". If sending to the current conversation, no prefix is needed.`,
         `For threads/sub-topics: if you are explicitly targeting a thread, the target MUST be the full "group:<group_no>____<short_id>" (four underscores) — do not send just the parent "group:<group_no>" or the reply will land in the parent group instead of the thread. The same rule applies to file uploads.`,
         `For reading message history: use action="read" with target="user:<uid>" to read DM history, or target="group:<groupId>" to read group message history. Cross-channel queries require the requester to be a participant of the target channel.`,
@@ -503,11 +503,11 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       ];
     },
   },
-  configSchema: DmworkConfigJsonSchema,
+  configSchema: OctoConfigJsonSchema,
   config: {
-    listAccountIds: (cfg) => listDmworkAccountIds(cfg),
-    resolveAccount: (cfg, accountId) => resolveDmworkAccount({ cfg, accountId }),
-    defaultAccountId: (cfg) => resolveDefaultDmworkAccountId(cfg) ?? listDmworkAccountIds(cfg)[0] ?? DEFAULT_ACCOUNT_ID,
+    listAccountIds: (cfg) => listOctoAccountIds(cfg),
+    resolveAccount: (cfg, accountId) => resolveOctoAccount({ cfg, accountId }),
+    defaultAccountId: (cfg) => resolveDefaultOctoAccountId(cfg) ?? listOctoAccountIds(cfg)[0] ?? DEFAULT_ACCOUNT_ID,
     isEnabled: (account) => account.enabled,
     isConfigured: (account) => account.configured,
     describeAccount: (account) => ({
@@ -535,7 +535,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         ctx.to,
         ctx.accountId ?? DEFAULT_ACCOUNT_ID,
       );
-      const account = resolveDmworkAccount({
+      const account = resolveOctoAccount({
         cfg: ctx.cfg as OpenClawConfig,
         accountId,
       });
@@ -553,7 +553,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       // shared extractor so both prefix forms propagate UIDs consistently.
       const mentionUids: string[] = extractInlineMentionUids(ctx.to);
 
-      const { channelId, channelType } = resolveOutboundDmworkTarget(ctx.to, ctx.threadId);
+      const { channelId, channelType } = resolveOutboundOctoTarget(ctx.to, ctx.threadId);
 
       let mentionEntities: MentionEntity[] = [];
       let finalContent = content;
@@ -612,7 +612,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         ctx.to,
         ctx.accountId ?? DEFAULT_ACCOUNT_ID,
       );
-      const account = resolveDmworkAccount({
+      const account = resolveOctoAccount({
         cfg: ctx.cfg as OpenClawConfig,
         accountId,
       });
@@ -714,7 +714,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
 
         // 3. Resolve target — merge framework-provided threadId into
         // CommunityTopic (channel_type=5) when ctx.to is a bare group.
-        const { channelId, channelType } = resolveOutboundDmworkTarget(ctx.to, ctx.threadId);
+        const { channelId, channelType } = resolveOutboundOctoTarget(ctx.to, ctx.threadId);
 
         // 4. Determine message type and send
         const msgType = contentType.startsWith("image/")
@@ -795,7 +795,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       }
 
       const log = ctx.log;
-      const statusSink: DmworkStatusSink = (patch) =>
+      const statusSink: OctoStatusSink = (patch) =>
         ctx.setStatus({ accountId: account.accountId, ...patch });
 
       log?.info?.(`[${account.accountId}] registering Octo bot...`);

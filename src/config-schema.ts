@@ -1,6 +1,6 @@
 // Plain config types — no external dependencies
 
-export interface DmworkAccountConfig {
+export interface OctoAccountConfig {
   name?: string;
   enabled?: boolean;
   botToken?: string;
@@ -16,7 +16,7 @@ export interface DmworkAccountConfig {
   historyPromptTemplate?: string;  // Template for group history context injection
 }
 
-export interface DmworkConfig {
+export interface OctoConfig {
   name?: string;
   enabled?: boolean;
   botToken?: string;
@@ -30,7 +30,7 @@ export interface DmworkConfig {
   botUid?: string;
   historyLimit?: number;  // 群聊历史消息条数限制（默认20）
   historyPromptTemplate?: string;  // Template for group history context injection
-  accounts?: Record<string, DmworkAccountConfig | undefined>;
+  accounts?: Record<string, OctoAccountConfig | undefined>;
 }
 
 // Default English template for history prompt (supports {messages}, {count} placeholders)
@@ -38,7 +38,7 @@ export const DEFAULT_HISTORY_PROMPT_TEMPLATE =
   "[Group Chat History] Below are messages from others since your last reply (sender is user ID, body is message content):\n```json\n{messages}\n```\nPlease respond to the current @mention based on this context.\n\n";
 
 // JSON Schema for OpenClaw plugin config validation
-export const DmworkConfigJsonSchema = {
+export const OctoConfigJsonSchema = {
   schema: {
     type: "object" as const,
     properties: {

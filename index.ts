@@ -16,8 +16,8 @@ import { defineBundledChannelEntry } from "openclaw/plugin-sdk/channel-entry-con
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { dmworkPlugin } from "./src/channel.js";
-import { setDmworkRuntime } from "./src/runtime.js";
+import { octoPlugin } from "./src/channel.js";
+import { setOctoRuntime } from "./src/runtime.js";
 import { getGroupMdForPrompt } from "./src/group-md.js";
 import { pendingInboundContext } from "./src/inbound.js";
 import {
@@ -142,12 +142,12 @@ export default defineBundledChannelEntry({
   importMetaUrl: import.meta.url,
   plugin: {
     specifier: "./src/channel.js",
-    exportName: "dmworkPlugin",
+    exportName: "octoPlugin",
   },
   configSchema: loadConfigSchema(),
   registerFull(api: OpenClawPluginApi) {
-    setDmworkRuntime(api.runtime);
-    api.registerChannel({ plugin: dmworkPlugin });
+    setOctoRuntime(api.runtime);
+    api.registerChannel({ plugin: octoPlugin });
 
     // -----------------------------------------------------------------------
     // Slash command registration helper: registers /octo_<name>.

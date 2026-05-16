@@ -235,7 +235,7 @@ describe("getGroupMdForPrompt", () => {
 
   it("should return null for non-group sessionKey", () => {
     registerGroupAccount(groupNo, accountId, "testAgent");
-    expect(getGroupMdForPrompt({ sessionKey: "agent:a1:dmwork:direct:uid1", agentId })).toBeNull();
+    expect(getGroupMdForPrompt({ sessionKey: "agent:a1:octo:direct:uid1", agentId })).toBeNull();
   });
 
   it("should return null when sessionKey is undefined", () => {

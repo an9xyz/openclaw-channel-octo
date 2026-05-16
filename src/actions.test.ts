@@ -37,7 +37,7 @@ function jsonResponse(data: unknown, status = 200): Response {
   });
 }
 
-describe("handleDmworkMessageAction", () => {
+describe("handleOctoMessageAction", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     _clearOwnerRegistry();
@@ -65,8 +65,8 @@ describe("handleDmworkMessageAction", () => {
         },
       });
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "send",
         args: { target: "group:chan123", message: "Hello group" },
         apiUrl: "http://localhost:8090",
@@ -90,8 +90,8 @@ describe("handleDmworkMessageAction", () => {
         },
       });
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "send",
         args: { target: "user:uid456", message: "Hello user" },
         apiUrl: "http://localhost:8090",
@@ -114,8 +114,8 @@ describe("handleDmworkMessageAction", () => {
         },
       });
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "send",
         args: { target: "some_uid", message: "Hello" },
         apiUrl: "http://localhost:8090",
@@ -143,8 +143,8 @@ describe("handleDmworkMessageAction", () => {
         ["bob", "uid_bob"],
       ]);
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "send",
         args: { target: "group:grp1", message: "Hello @陈皮皮 and @bob!" },
         apiUrl: "http://localhost:8090",
@@ -175,8 +175,8 @@ describe("handleDmworkMessageAction", () => {
         ["uid_bob", "bob"],
       ]);
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "send",
         args: { target: "group:grp1", message: "Hello @[uid_chen:陈皮皮] and @[uid_bob:bob]!" },
         apiUrl: "http://localhost:8090",
@@ -207,8 +207,8 @@ describe("handleDmworkMessageAction", () => {
         },
       });
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "send",
         args: { target: "group:grp1", message: "Attention @all please read" },
         apiUrl: "http://localhost:8090",
@@ -230,8 +230,8 @@ describe("handleDmworkMessageAction", () => {
         },
       });
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "send",
         args: { target: "group:grp1", message: "大家注意 @所有人 请查收" },
         apiUrl: "http://localhost:8090",
@@ -259,8 +259,8 @@ describe("handleDmworkMessageAction", () => {
         ["uid_alice", "alice"],
       ]);
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "send",
         args: { target: "group:grp1", message: "Hey @[uid_chen:陈皮皮] and @alice!" },
         apiUrl: "http://localhost:8090",
@@ -291,8 +291,8 @@ describe("handleDmworkMessageAction", () => {
         },
       });
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "send",
         args: { target: "group:grp1", message: "Hello @[uid_chen:陈皮皮]!" },
         apiUrl: "http://localhost:8090",
@@ -321,8 +321,8 @@ describe("handleDmworkMessageAction", () => {
       ]);
       // uid_unknown is NOT in uidToNameMap
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "send",
         args: { target: "group:grp1", message: "Hello @[uid_unknown:Ghost] and @[uid_bob:bob]!" },
         apiUrl: "http://localhost:8090",
@@ -353,8 +353,8 @@ describe("handleDmworkMessageAction", () => {
 
       const memberMap = new Map<string, string>(); // empty
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "send",
         args: { target: "group:grp1", message: "Hello @unknown_user" },
         apiUrl: "http://localhost:8090",
@@ -374,8 +374,8 @@ describe("handleDmworkMessageAction", () => {
       const uploadSpy = vi.mocked(uploadAndSendMedia);
       uploadSpy.mockClear();
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "send",
         args: { target: "user:uid1", mediaUrl: "https://example.com/image.png" },
         apiUrl: "http://localhost:8090",
@@ -407,8 +407,8 @@ describe("handleDmworkMessageAction", () => {
         },
       });
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "send",
         args: {
           target: "group:grp1",
@@ -427,8 +427,8 @@ describe("handleDmworkMessageAction", () => {
 
   describe("send — missing target", () => {
     it("should return error when target is missing", async () => {
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "send",
         args: { message: "Hello" },
         apiUrl: "http://localhost:8090",
@@ -442,8 +442,8 @@ describe("handleDmworkMessageAction", () => {
 
   describe("send — missing message and media", () => {
     it("should return error when both message and media are missing", async () => {
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "send",
         args: { target: "user:uid1" },
         apiUrl: "http://localhost:8090",
@@ -469,8 +469,8 @@ describe("handleDmworkMessageAction", () => {
       });
       const logWarn = vi.fn();
       const logInfo = vi.fn();
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      await handleOctoMessageAction({
         action: "send",
         args: { target: "group:grp1", message: "hi" },
         apiUrl: "http://localhost:8090",
@@ -491,8 +491,8 @@ describe("handleDmworkMessageAction", () => {
         "/v1/bot/sendMessage": async () => jsonResponse({ message_id: 1, message_seq: 1 }),
       });
       const logInfo = vi.fn();
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      await handleOctoMessageAction({
         action: "send",
         args: { target: "group:grp1", message: "hi" },
         apiUrl: "http://localhost:8090",
@@ -510,8 +510,8 @@ describe("handleDmworkMessageAction", () => {
       });
       const logWarn = vi.fn();
       const logInfo = vi.fn();
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      await handleOctoMessageAction({
         action: "send",
         args: { target: "group:otherGroup", message: "hi" },
         apiUrl: "http://localhost:8090",
@@ -529,8 +529,8 @@ describe("handleDmworkMessageAction", () => {
         "/v1/bot/sendMessage": async () => jsonResponse({ message_id: 1, message_seq: 1 }),
       });
       const logWarn = vi.fn();
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      await handleOctoMessageAction({
         action: "send",
         args: { target: "group:grp1____topicA", message: "hi" },
         apiUrl: "http://localhost:8090",
@@ -547,8 +547,8 @@ describe("handleDmworkMessageAction", () => {
         "/v1/bot/sendMessage": async () => jsonResponse({ message_id: 1, message_seq: 1 }),
       });
       const logWarn = vi.fn();
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      await handleOctoMessageAction({
         action: "send",
         args: { target: "group:grp1", message: "hi" },
         apiUrl: "http://localhost:8090",
@@ -568,8 +568,8 @@ describe("handleDmworkMessageAction", () => {
           return jsonResponse({ message_id: 1, message_seq: 1 });
         },
       });
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "send",
         args: { target: "group:grp1", message: "hi" },
         apiUrl: "http://localhost:8090",
@@ -583,7 +583,7 @@ describe("handleDmworkMessageAction", () => {
   });
 
   // -----------------------------------------------------------------------
-  // send — threadId routing via resolveOutboundDmworkTarget
+  // send — threadId routing via resolveOutboundOctoTarget
   // -----------------------------------------------------------------------
   describe("send — threadId routing", () => {
     it("routes to CommunityTopic when threadId is provided", async () => {
@@ -596,8 +596,8 @@ describe("handleDmworkMessageAction", () => {
         },
       });
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "send",
         args: { target: "group:grp1", message: "thread msg" },
         apiUrl: "http://localhost:8090",
@@ -620,8 +620,8 @@ describe("handleDmworkMessageAction", () => {
         },
       });
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "send",
         args: { target: "group:grp1", message: "parent msg" },
         apiUrl: "http://localhost:8090",
@@ -641,8 +641,8 @@ describe("handleDmworkMessageAction", () => {
       const logWarn = vi.fn();
       const logInfo = vi.fn();
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      await handleOctoMessageAction({
         action: "send",
         args: { target: "group:grp1", message: "hi from thread" },
         apiUrl: "http://localhost:8090",
@@ -662,8 +662,8 @@ describe("handleDmworkMessageAction", () => {
       const uploadSpy = vi.mocked(uploadAndSendMedia);
       uploadSpy.mockClear();
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "send",
         args: { target: "group:grp1", mediaUrl: "https://example.com/file.png" },
         apiUrl: "http://localhost:8090",
@@ -689,8 +689,8 @@ describe("handleDmworkMessageAction", () => {
         },
       });
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "send",
         args: { target: "group:otherGroup", message: "cross-group msg" },
         apiUrl: "http://localhost:8090",
@@ -714,8 +714,8 @@ describe("handleDmworkMessageAction", () => {
         },
       });
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "send",
         args: { target: "group:grp1", message: "same-group msg" },
         apiUrl: "http://localhost:8090",
@@ -757,8 +757,8 @@ describe("handleDmworkMessageAction", () => {
         "/v1/bot/messages/sync": async () => jsonResponse(fakeMessages),
       });
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "read",
         args: { target: "group:grp1" },
         apiUrl: "http://localhost:8090",
@@ -789,8 +789,8 @@ describe("handleDmworkMessageAction", () => {
         },
       });
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      await handleOctoMessageAction({
         action: "read",
         args: { target: "group:grp1", limit: 200 },
         apiUrl: "http://localhost:8090",
@@ -823,8 +823,8 @@ describe("handleDmworkMessageAction", () => {
 
       const uidToNameMap = new Map([["uid_chen", "陈皮皮"]]);
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "read",
         args: { target: "group:grp1" },
         apiUrl: "http://localhost:8090",
@@ -842,8 +842,8 @@ describe("handleDmworkMessageAction", () => {
 
   describe("read — missing target", () => {
     it("should return error when target is missing", async () => {
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "read",
         args: {},
         apiUrl: "http://localhost:8090",
@@ -869,8 +869,8 @@ describe("handleDmworkMessageAction", () => {
         "/members": async () => jsonResponse(fakeMembers),
       });
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "member-info",
         args: { target: "group:grp1" },
         apiUrl: "http://localhost:8090",
@@ -887,8 +887,8 @@ describe("handleDmworkMessageAction", () => {
 
   describe("member-info — missing target", () => {
     it("should return error when target is missing", async () => {
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "member-info",
         args: {},
         apiUrl: "http://localhost:8090",
@@ -914,8 +914,8 @@ describe("handleDmworkMessageAction", () => {
         "/v1/bot/groups": async () => jsonResponse(fakeGroups),
       });
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "channel-list",
         args: {},
         apiUrl: "http://localhost:8090",
@@ -941,8 +941,8 @@ describe("handleDmworkMessageAction", () => {
         "/v1/bot/groups/grp1": async () => jsonResponse(fakeInfo),
       });
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "channel-info",
         args: { target: "group:grp1" },
         apiUrl: "http://localhost:8090",
@@ -959,8 +959,8 @@ describe("handleDmworkMessageAction", () => {
 
   describe("channel-info — missing target", () => {
     it("should return error when target is missing", async () => {
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "channel-info",
         args: {},
         apiUrl: "http://localhost:8090",
@@ -977,8 +977,8 @@ describe("handleDmworkMessageAction", () => {
   // -----------------------------------------------------------------------
   describe("unknown action", () => {
     it("should return error for unknown action", async () => {
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "nonexistent",
         args: {},
         apiUrl: "http://localhost:8090",
@@ -992,8 +992,8 @@ describe("handleDmworkMessageAction", () => {
 
   describe("missing botToken", () => {
     it("should return error when botToken is empty", async () => {
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "send",
         args: { target: "user:uid1", message: "hello" },
         apiUrl: "http://localhost:8090",
@@ -1014,8 +1014,8 @@ describe("handleDmworkMessageAction", () => {
         ["grp1", { content: "# Group Rules\nBe nice.", version: 3 }],
       ]);
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "group-md-read",
         args: { target: "group:grp1" },
         apiUrl: "http://localhost:8090",
@@ -1045,8 +1045,8 @@ describe("handleDmworkMessageAction", () => {
 
       const groupMdCache = new Map<string, { content: string; version: number }>();
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "group-md-read",
         args: { target: "group:grp1" },
         apiUrl: "http://localhost:8090",
@@ -1066,8 +1066,8 @@ describe("handleDmworkMessageAction", () => {
 
   describe("group-md-read — missing target", () => {
     it("should return error when target is missing", async () => {
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "group-md-read",
         args: {},
         apiUrl: "http://localhost:8090",
@@ -1095,8 +1095,8 @@ describe("handleDmworkMessageAction", () => {
 
       const groupMdCache = new Map<string, { content: string; version: number }>();
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "group-md-update",
         args: { target: "group:grp1", content: "# Updated Rules" },
         apiUrl: "http://localhost:8090",
@@ -1115,8 +1115,8 @@ describe("handleDmworkMessageAction", () => {
 
   describe("group-md-update — missing target", () => {
     it("should return error when target is missing", async () => {
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "group-md-update",
         args: { content: "some content" },
         apiUrl: "http://localhost:8090",
@@ -1130,8 +1130,8 @@ describe("handleDmworkMessageAction", () => {
 
   describe("group-md-update — missing content", () => {
     it("should return error when content is missing", async () => {
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "group-md-update",
         args: { target: "group:grp1" },
         apiUrl: "http://localhost:8090",
@@ -1163,8 +1163,8 @@ describe("handleDmworkMessageAction", () => {
         "/v1/bot/messages/sync": async () => jsonResponse(fakeMessages),
       });
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "read",
         args: { target: "user:user-abc" },
         apiUrl: "http://localhost:8090",
@@ -1186,8 +1186,8 @@ describe("handleDmworkMessageAction", () => {
 
   describe("read — cross-channel DM (unauthorized)", () => {
     it("should deny non-owner reading another user's DM", async () => {
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "read",
         args: { target: "user:someone-else" },
         apiUrl: "http://localhost:8090",
@@ -1224,8 +1224,8 @@ describe("handleDmworkMessageAction", () => {
         "/v1/bot/messages/sync": async () => jsonResponse(fakeMessages),
       });
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "read",
         args: { target: "group:target-grp" },
         apiUrl: "http://localhost:8090",
@@ -1248,8 +1248,8 @@ describe("handleDmworkMessageAction", () => {
         { uid: "user-xyz", name: "Bob" },
       ]);
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "read",
         args: { target: "group:target-grp" },
         apiUrl: "http://localhost:8090",
@@ -1266,8 +1266,8 @@ describe("handleDmworkMessageAction", () => {
 
   describe("read — cross-channel missing requesterSenderId", () => {
     it("should deny when requester is unknown", async () => {
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "read",
         args: { target: "user:someone" },
         apiUrl: "http://localhost:8090",
@@ -1300,8 +1300,8 @@ describe("handleDmworkMessageAction", () => {
         "/v1/bot/messages/sync": async () => jsonResponse(fakeMessages),
       });
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "read",
         args: { target: "user:someone-else" },
         apiUrl: "http://localhost:8090",
@@ -1327,8 +1327,8 @@ describe("handleDmworkMessageAction", () => {
         },
       });
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      await handleOctoMessageAction({
         action: "read",
         args: { target: "group:target-grp", limit: 200 },
         apiUrl: "http://localhost:8090",
@@ -1368,8 +1368,8 @@ describe("handleDmworkMessageAction", () => {
         "/v1/bot/messages/sync": async () => jsonResponse(fakeMessages),
       });
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "read",
         args: { target: "group:grp1", limit: 2 },
         apiUrl: "http://localhost:8090",
@@ -1413,8 +1413,8 @@ describe("handleDmworkMessageAction", () => {
         "/v1/bot/messages/sync": async () => jsonResponse(fakeMessages),
       });
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "read",
         args: { target: "group:grp1" },
         apiUrl: "http://localhost:8090",
@@ -1449,8 +1449,8 @@ describe("handleDmworkMessageAction", () => {
         { uid: "user-abc", name: "Alice" },
       ], "Support");
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "search",
         args: { query: "shared-groups" },
         apiUrl: "http://localhost:8090",
@@ -1472,8 +1472,8 @@ describe("handleDmworkMessageAction", () => {
         { uid: "user-abc", name: "Alice" },
       ], "Dev Team");
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "search",
         args: {},
         apiUrl: "http://localhost:8090",
@@ -1490,8 +1490,8 @@ describe("handleDmworkMessageAction", () => {
 
   describe("search — missing requesterSenderId", () => {
     it("should return error when requester is unknown", async () => {
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "search",
         args: { query: "shared-groups" },
         apiUrl: "http://localhost:8090",
@@ -1506,8 +1506,8 @@ describe("handleDmworkMessageAction", () => {
 
   describe("search — unsupported query", () => {
     it("should return error for unsupported query type", async () => {
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "search",
         args: { query: "keyword-search" },
         apiUrl: "http://localhost:8090",
@@ -1534,8 +1534,8 @@ describe("handleDmworkMessageAction", () => {
           ]),
       });
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "search",
         args: { query: "shared-groups" },
         apiUrl: "http://localhost:8090",
@@ -1559,8 +1559,8 @@ describe("handleDmworkMessageAction", () => {
     it("should NOT treat user:grp1 as same-channel when currentChannelId is grp1 (group)", async () => {
       registerBotGroupIds(["grp1"]);
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "read",
         args: { target: "user:grp1" },
         apiUrl: "http://localhost:8090",
@@ -1586,8 +1586,8 @@ describe("handleDmworkMessageAction", () => {
         "/v1/bot/messages/sync": async () => jsonResponse({ messages: [] }),
       });
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "read",
         args: { target: "group:uid1" },
         apiUrl: "http://localhost:8090",
@@ -1617,8 +1617,8 @@ describe("handleDmworkMessageAction", () => {
         },
       });
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "search",
         args: { query: "shared-groups" },
         apiUrl: "http://localhost:8090",
@@ -1649,8 +1649,8 @@ describe("handleDmworkMessageAction", () => {
           ]),
       });
 
-      const { handleDmworkMessageAction } = await import("./actions.js");
-      const result = await handleDmworkMessageAction({
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
         action: "search",
         args: { query: "shared-groups" },
         apiUrl: "http://localhost:8090",
@@ -1723,17 +1723,17 @@ describe("parseTarget", () => {
     expect(result.channelType).toBe(ChannelType.DM);
   });
 
-  it("should strip dmwork: prefix from bare ID", async () => {
+  it("should strip octo: prefix from bare ID", async () => {
     const { parseTarget } = await import("./actions.js");
-    const result = parseTarget("dmwork:someId");
+    const result = parseTarget("octo:someId");
     expect(result.channelId).toBe("someId");
     expect(result.channelType).toBe(ChannelType.DM);
   });
 
-  it("should strip dmwork: prefix and detect group via knownGroupIds", async () => {
+  it("should strip octo: prefix and detect group via knownGroupIds", async () => {
     const { parseTarget } = await import("./actions.js");
     const knownGroups = new Set(["grpZ"]);
-    const result = parseTarget("dmwork:grpZ", undefined, knownGroups);
+    const result = parseTarget("octo:grpZ", undefined, knownGroups);
     expect(result.channelId).toBe("grpZ");
     expect(result.channelType).toBe(ChannelType.Group);
   });
@@ -1758,7 +1758,7 @@ describe("parseTarget", () => {
   });
 });
 
-describe("resolveOutboundDmworkTarget", () => {
+describe("resolveOutboundOctoTarget", () => {
   // Regression guard for the thread cross-channel bug: OpenClaw passes thread
   // replies as `to: "group:<group_no>"` plus a separate `threadId: "<short_id>"`,
   // and callers used to run only parseTarget which collapsed the routing back
@@ -1766,68 +1766,68 @@ describe("resolveOutboundDmworkTarget", () => {
   // the CommunityTopic channel_id (channel_type=5).
 
   it("merges threadId into CommunityTopic channel_id", async () => {
-    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    const { resolveOutboundOctoTarget } = await import("./actions.js");
     registerBotGroupIds(["grp1"]);
-    const result = resolveOutboundDmworkTarget("group:grp1", "topicA");
+    const result = resolveOutboundOctoTarget("group:grp1", "topicA");
     expect(result.channelId).toBe("grp1____topicA");
     expect(result.channelType).toBe(ChannelType.CommunityTopic);
   });
 
   it("accepts numeric threadId", async () => {
-    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    const { resolveOutboundOctoTarget } = await import("./actions.js");
     registerBotGroupIds(["grp1"]);
-    const result = resolveOutboundDmworkTarget("group:grp1", 2052674378482585600);
+    const result = resolveOutboundOctoTarget("group:grp1", 2052674378482585600);
     expect(result.channelId).toBe("grp1____2052674378482585600");
     expect(result.channelType).toBe(ChannelType.CommunityTopic);
   });
 
   it("passes through an already-synthesised thread channel_id untouched", async () => {
-    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    const { resolveOutboundOctoTarget } = await import("./actions.js");
     registerBotGroupIds(["grp1"]);
-    const result = resolveOutboundDmworkTarget("group:grp1____topicA");
+    const result = resolveOutboundOctoTarget("group:grp1____topicA");
     expect(result.channelId).toBe("grp1____topicA");
     expect(result.channelType).toBe(ChannelType.CommunityTopic);
   });
 
   it("does not re-merge threadId when ctx.to already carries ____", async () => {
-    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    const { resolveOutboundOctoTarget } = await import("./actions.js");
     registerBotGroupIds(["grp1"]);
     // Caller gave both — ctx.to wins (already fully specified). Don't concat again.
-    const result = resolveOutboundDmworkTarget("group:grp1____topicA", "topicB");
+    const result = resolveOutboundOctoTarget("group:grp1____topicA", "topicB");
     expect(result.channelId).toBe("grp1____topicA");
     expect(result.channelType).toBe(ChannelType.CommunityTopic);
   });
 
   it("leaves DM targets alone even when threadId is accidentally provided", async () => {
-    const { resolveOutboundDmworkTarget } = await import("./actions.js");
-    const result = resolveOutboundDmworkTarget("user:uid123", "stray");
+    const { resolveOutboundOctoTarget } = await import("./actions.js");
+    const result = resolveOutboundOctoTarget("user:uid123", "stray");
     expect(result.channelId).toBe("uid123");
     expect(result.channelType).toBe(ChannelType.DM);
   });
 
   it("returns parent group unchanged when threadId is null/undefined/empty", async () => {
-    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    const { resolveOutboundOctoTarget } = await import("./actions.js");
     registerBotGroupIds(["grp1"]);
-    expect(resolveOutboundDmworkTarget("group:grp1").channelType).toBe(ChannelType.Group);
-    expect(resolveOutboundDmworkTarget("group:grp1", null).channelType).toBe(ChannelType.Group);
-    expect(resolveOutboundDmworkTarget("group:grp1", undefined).channelType).toBe(ChannelType.Group);
-    expect(resolveOutboundDmworkTarget("group:grp1", "").channelType).toBe(ChannelType.Group);
+    expect(resolveOutboundOctoTarget("group:grp1").channelType).toBe(ChannelType.Group);
+    expect(resolveOutboundOctoTarget("group:grp1", null).channelType).toBe(ChannelType.Group);
+    expect(resolveOutboundOctoTarget("group:grp1", undefined).channelType).toBe(ChannelType.Group);
+    expect(resolveOutboundOctoTarget("group:grp1", "").channelType).toBe(ChannelType.Group);
   });
 
   it("strips inline mention-UID suffix before parsing", async () => {
-    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    const { resolveOutboundOctoTarget } = await import("./actions.js");
     registerBotGroupIds(["grp1"]);
-    const result = resolveOutboundDmworkTarget("group:grp1@uid1,uid2", "topicA");
+    const result = resolveOutboundOctoTarget("group:grp1@uid1,uid2", "topicA");
     expect(result.channelId).toBe("grp1____topicA");
     expect(result.channelType).toBe(ChannelType.CommunityTopic);
   });
 
   it("strips group:/channel: prefixes from threadId", async () => {
-    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    const { resolveOutboundOctoTarget } = await import("./actions.js");
     registerBotGroupIds(["grp1"]);
-    expect(resolveOutboundDmworkTarget("group:grp1", "group:topicA").channelId)
+    expect(resolveOutboundOctoTarget("group:grp1", "group:topicA").channelId)
       .toBe("grp1____topicA");
-    expect(resolveOutboundDmworkTarget("group:grp1", "channel:topicA").channelId)
+    expect(resolveOutboundOctoTarget("group:grp1", "channel:topicA").channelId)
       .toBe("grp1____topicA");
   });
 
@@ -1838,33 +1838,33 @@ describe("resolveOutboundDmworkTarget", () => {
   // silently skipped.
 
   it("normalises channel:<id> prefix to group-type target", async () => {
-    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    const { resolveOutboundOctoTarget } = await import("./actions.js");
     registerBotGroupIds(["grp1"]);
-    const result = resolveOutboundDmworkTarget("channel:grp1");
+    const result = resolveOutboundOctoTarget("channel:grp1");
     expect(result.channelId).toBe("grp1");
     expect(result.channelType).toBe(ChannelType.Group);
   });
 
   it("merges threadId into a channel:<id> target", async () => {
-    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    const { resolveOutboundOctoTarget } = await import("./actions.js");
     registerBotGroupIds(["grp1"]);
-    const result = resolveOutboundDmworkTarget("channel:grp1", "topicA");
+    const result = resolveOutboundOctoTarget("channel:grp1", "topicA");
     expect(result.channelId).toBe("grp1____topicA");
     expect(result.channelType).toBe(ChannelType.CommunityTopic);
   });
 
   it("passes through a channel:<group>____<short> target as CommunityTopic", async () => {
-    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    const { resolveOutboundOctoTarget } = await import("./actions.js");
     registerBotGroupIds(["grp1"]);
-    const result = resolveOutboundDmworkTarget("channel:grp1____topicA");
+    const result = resolveOutboundOctoTarget("channel:grp1____topicA");
     expect(result.channelId).toBe("grp1____topicA");
     expect(result.channelType).toBe(ChannelType.CommunityTopic);
   });
 
   it("strips inline mention-UID suffix on channel:<id>@uid1,uid2 form", async () => {
-    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    const { resolveOutboundOctoTarget } = await import("./actions.js");
     registerBotGroupIds(["grp1"]);
-    const result = resolveOutboundDmworkTarget("channel:grp1@uid1,uid2", "topicA");
+    const result = resolveOutboundOctoTarget("channel:grp1@uid1,uid2", "topicA");
     expect(result.channelId).toBe("grp1____topicA");
     expect(result.channelType).toBe(ChannelType.CommunityTopic);
   });
@@ -1876,29 +1876,29 @@ describe("resolveOutboundDmworkTarget", () => {
   // threadId could route a reply out of the originally targeted group entirely.
 
   it("accepts threadId that already includes ____ when its parent matches ctx.to", async () => {
-    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    const { resolveOutboundOctoTarget } = await import("./actions.js");
     registerBotGroupIds(["grp1"]);
     // Redundant but consistent shape: threadId = "grp1____topicA", ctx.to = grp1.
-    const result = resolveOutboundDmworkTarget("group:grp1", "grp1____topicA");
+    const result = resolveOutboundOctoTarget("group:grp1", "grp1____topicA");
     expect(result.channelId).toBe("grp1____topicA");
     expect(result.channelType).toBe(ChannelType.CommunityTopic);
   });
 
   it("ignores threadId when its ____ parent disagrees with ctx.to (cross-channel guard)", async () => {
-    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    const { resolveOutboundOctoTarget } = await import("./actions.js");
     registerBotGroupIds(["grp1"]);
     // threadId points at otherGrp____topic, but ctx.to says grp1 — conflict.
     // Fall back to the ctx.to parent group; do NOT silently route to otherGrp.
-    const result = resolveOutboundDmworkTarget("group:grp1", "otherGrp____topic");
+    const result = resolveOutboundOctoTarget("group:grp1", "otherGrp____topic");
     expect(result.channelId).toBe("grp1");
     expect(result.channelType).toBe(ChannelType.Group);
   });
 
   it("ignores threadId starting with bare ____ (no parent)", async () => {
-    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    const { resolveOutboundOctoTarget } = await import("./actions.js");
     registerBotGroupIds(["grp1"]);
     // "____topic" split on ____ yields empty parent — still a mismatch with grp1.
-    const result = resolveOutboundDmworkTarget("group:grp1", "____topic");
+    const result = resolveOutboundOctoTarget("group:grp1", "____topic");
     expect(result.channelId).toBe("grp1");
     expect(result.channelType).toBe(ChannelType.Group);
   });
