@@ -34,7 +34,7 @@ openclaw channels add --channel octo \
 Interactive (prompts for token and API URL):
 
 ```bash
-openclaw channels add --channel octo
+openclaw channels add
 ```
 
 After the account is written, restart the gateway (`openclaw gateway run --force`)

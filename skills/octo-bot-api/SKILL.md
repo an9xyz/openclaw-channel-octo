@@ -75,7 +75,7 @@ openclaw channels add --channel octo \
   --http-url <apiUrl>
 ```
 
-Or run `openclaw channels add --channel octo` with no flags to walk
+Or run `openclaw channels add` (no flags, pick "octo" from the channel menu) to walk
 through the interactive setup wizard.
 
 ### Multi-Agent Setup Guide
