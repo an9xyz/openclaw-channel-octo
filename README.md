@@ -1,6 +1,6 @@
 # openclaw-channel-octo
 
-[![ClawHub](https://img.shields.io/badge/ClawHub-openclaw--channel--octo-blue?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0Ij48Y2lyY2xlIGN4PSIxMiIgY3k9IjEyIiByPSIxMCIgZmlsbD0id2hpdGUiLz48L3N2Zz4=)](https://clawhub.ai/plugins/openclaw-channel-octo)
+[![ClawHub](https://img.shields.io/badge/ClawHub-octo-blue?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0Ij48Y2lyY2xlIGN4PSIxMiIgY3k9IjEyIiByPSIxMCIgZmlsbD0id2hpdGUiLz48L3N2Zz4=)](https://clawhub.ai/plugins/octo)
 
 OpenClaw channel plugin for **Octo**. Connects via WebSocket for real-time messaging.
 
@@ -15,18 +15,8 @@ OpenClaw channel plugin for **Octo**. Connects via WebSocket for real-time messa
 This plugin is published exclusively on ClawHub for fresh installs:
 
 ```bash
-openclaw plugins install clawhub:openclaw-channel-octo
+openclaw plugins install clawhub:octo
 ```
-
-> **Note for existing dmwork users:** This repo is the ClawHub-tailored build
-> for new installs. If you are upgrading from `openclaw-channel-dmwork`, use
-> the migration package instead:
-> ```bash
-> npx -y openclaw-channel-octo@latest install
-> ```
-> That command pulls the `octo-adapters` npm release, which runs the
-> dmwork → octo channel-config / bindings / workspace-dir migration before
-> installing the new plugin.
 
 ## Configure a bot account
 
@@ -38,7 +28,7 @@ Non-interactive (recommended for scripts and CI):
 openclaw channels add --channel octo \
   --account my_bot \
   --bot-token bf_your_token_here \
-  --base-url https://your-server.example/api
+  --http-url https://your-server.example/api
 ```
 
 Interactive (prompts for token and API URL):
@@ -47,24 +37,9 @@ Interactive (prompts for token and API URL):
 openclaw channels add --channel octo
 ```
 
-After the account is written, restart the gateway (`openclaw gateway restart`)
+After the account is written, restart the gateway (`openclaw gateway run --force`)
 or wait for the next auto-reload — the plugin watches `channels.octo` and
 reconnects on changes.
-
-## Slash commands inside OpenClaw
-
-| Command | Args | Description |
-|---|---|---|
-| `/octo_info` | none | Show plugin and OpenClaw versions. |
-| `/octo_add_account` | `<account_id> <bot_token> <api_url>` | Add or update a bot account from inside an agent conversation. |
-| `/octo_remove_account` | `<account_id>` | Remove a bot account. |
-
-Example:
-
-```
-/octo_add_account my_bot bf_xxx https://im.example.com/api
-/octo_remove_account my_bot
-```
 
 ## Configuration
 

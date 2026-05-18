@@ -64,7 +64,7 @@ Install the pre-built adapter for instant message delivery, real-time online sta
 
 **Install plugin from ClawHub:**
 ```bash
-openclaw plugins install clawhub:openclaw-channel-octo
+openclaw plugins install clawhub:octo
 ```
 
 **Add a bot account (non-interactive, scriptable):**
@@ -72,27 +72,11 @@ openclaw plugins install clawhub:openclaw-channel-octo
 openclaw channels add --channel octo \
   --account <robot_id> \
   --bot-token YOUR_BOT_TOKEN \
-  --base-url <apiUrl>
+  --http-url <apiUrl>
 ```
 
 Or run `openclaw channels add --channel octo` with no flags to walk
 through the interactive setup wizard.
-
-**Add a second bot from inside an agent conversation:**
-```
-/octo_add_account <robot_id> YOUR_BOT_TOKEN <apiUrl>
-```
-
-The slash command writes to `~/.openclaw/openclaw.json` under
-`channels.octo.accounts.<robot_id>` and restarts the gateway.
-
-> **Migrating from `openclaw-channel-dmwork`?** Use the legacy migration
-> package which still ships on npm and runs the dmwork → octo channel
-> config / bindings / workspace-dir migration before installing the
-> ClawHub build:
-> ```bash
-> npx -y openclaw-channel-octo@latest install
-> ```
 
 ### Multi-Agent Setup Guide
 
