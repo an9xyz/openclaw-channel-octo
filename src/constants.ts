@@ -13,8 +13,6 @@
  */
 export const PLUGIN_ID = "octo";
 
-/** npm package name. Use for version checks, registry URLs, and docs. */
-export const PACKAGE_NAME = "openclaw-channel-octo";
 
 export const CHANNEL_ID = "octo";
 

@@ -75,7 +75,7 @@
       "blurb": "Connect OpenClaw to Octo, an open-source team collaboration platform."
     },
     "install": {
-      "clawhubSpec": "openclaw-channel-octo",
+      "clawhubSpec": "clawhub:octo",
       "defaultChoice": "clawhub",
       "minHostVersion": ">=2026.4.15"
     },

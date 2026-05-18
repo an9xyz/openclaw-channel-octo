@@ -82,7 +82,7 @@ through the interactive setup wizard.
 
 When one owner creates multiple bots (e.g. via BotFather /newbot), each bot can be connected to a separate AI Agent. Each bot gets its own accountId in the OpenClaw config with independent settings.
 
-Example: an owner creates bot-translator, bot-coder, and bot-assistant — each backed by a different OpenClaw agent configuration.
+Example: an owner creates bot_translator, bot_coder, and bot_assistant — each backed by a different OpenClaw agent configuration.
 
 ```json
 {
@@ -90,17 +90,17 @@ Example: an owner creates bot-translator, bot-coder, and bot-assistant — each 
     "octo": {
       "apiUrl": "<apiUrl>",
       "accounts": {
-        "bot-translator": {
+        "bot_translator": {
           "botToken": "TOKEN_TRANSLATOR",
           "agentModel": "claude-sonnet-4-6",
           "systemPrompt": "You are a professional translator."
         },
-        "bot-coder": {
+        "bot_coder": {
           "botToken": "TOKEN_CODER",
           "agentModel": "claude-sonnet-4-6",
           "systemPrompt": "You are a code review assistant."
         },
-        "bot-assistant": {
+        "bot_assistant": {
           "botToken": "TOKEN_ASSISTANT",
           "agentModel": "claude-sonnet-4-6",
           "systemPrompt": "You are a general-purpose assistant."
@@ -135,7 +135,7 @@ Features:
 - Auto-reconnect on disconnection
 - Full OpenClaw plugin integration
 
-Source & docs: https://www.npmjs.com/package/openclaw-channel-octo
+Source & docs: https://clawhub.ai/plugins/octo
 
 ## Step 3: Send Messages
 

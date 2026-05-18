@@ -30,11 +30,12 @@ All notable changes to this project will be documented in this file.
 
 ### Removed
 - runtime 模块移除 `child_process` 依赖，通过 OpenClaw ClawScan install gate
+- 删除残留的 plugin self-management slash commands（`/octo_info`, `/octo_add_account`, `/octo_remove_account`）—— OpenClaw 已有 `channels add` / `plugins install` 等标准命令覆盖
 
 ## [1.0.1] - 2026-05-16
 
 ### Removed
-- 删除 npm CLI entry 与 plugin self-management slash commands（`/octo_info`, `/octo_add_account`, `/octo_remove_account`）—— OpenClaw 已有 `channels add` / `plugins install` 等标准命令覆盖这些场景
+- 删除 npm CLI entry —— OpenClaw 已有 `plugins install` 等标准命令覆盖
 
 ### Changed
 - 修正 npm artifact 与 ClawHub 元数据一致性问题；移除过期的 npm-only update check；清理 stale skill 文档（codex review round 2 反馈）

@@ -85,7 +85,6 @@ Configuration fields per account:
 `index.ts` is a standard OpenClaw plugin entry. When loaded:
 
 - `api.registerChannel(octoPlugin)` registers the Octo channel runtime
-- `api.registerCommand()` registers the three `/octo_*` slash commands above
 - The bundled `setupEntry` exposes `defineBundledChannelSetupEntry(...)` so
   `openclaw channels add` works without first enabling the plugin
 - `setupWizard` + `setup` adapters on `octoPlugin` cover both interactive and
