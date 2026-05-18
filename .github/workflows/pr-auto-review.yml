@@ -1,0 +1,191 @@
+name: PR Auto Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main]
+
+concurrency:
+  group: pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  auto-review:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OCTO_BOT_TOKEN: ${{ secrets.OCTO_BOT_TOKEN }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_TITLE: ${{ github.event.pull_request.title }}
+      PR_URL: ${{ github.event.pull_request.html_url }}
+      PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get PR diff
+        run: |
+          gh pr diff $PR_NUMBER --repo Mininglamp-OSS/openclaw-channel-octo > /tmp/pr_diff.txt
+
+      - name: Get PR metadata
+        run: |
+          gh pr view $PR_NUMBER --repo Mininglamp-OSS/openclaw-channel-octo --json body --jq '.body' > /tmp/pr_body.txt
+
+      - name: Install dependencies
+        run: pip install anthropic
+
+      - name: Run AI review
+        continue-on-error: true
+        run: |
+          python3 - <<'PYEOF'
+          import os, json, anthropic
+
+          with open('/tmp/pr_diff.txt', 'r') as f:
+              diff = f.read()
+          with open('/tmp/pr_body.txt', 'r') as f:
+              pr_body = f.read()
+
+          pr_title = os.environ.get('PR_TITLE', '')
+          pr_author = os.environ.get('PR_AUTHOR', '')
+
+          if len(diff) > 80000:
+              diff = diff[:80000] + '\n... (truncated)'
+
+          prompt = f'''You are a senior code reviewer. Review the following pull request diff thoroughly.
+
+          PR Title: {pr_title}
+          PR Author: {pr_author}
+          PR Description: {pr_body}
+
+          Diff:
+          {diff}
+
+          Review the diff for:
+          1. Correctness: logic errors, edge cases, null/undefined handling
+          2. Security: hardcoded secrets/tokens, injection vulnerabilities, unsafe ops
+          3. Breaking changes: API/schema/config changes that affect callers
+          4. Test coverage: are new code paths covered by tests?
+          5. Code style: naming, structure, duplication
+
+          Severity classification:
+          - P0: Critical (security vulnerability, data loss risk, crash/panic)
+          - P1: Major (logic error, unhandled breaking change, missing critical validation)
+          - P2: Minor (style issue, naming, suggestion for improvement)
+
+          Respond ONLY with valid JSON:
+          {{
+            "state": "APPROVED" | "REQUEST_CHANGES" | "COMMENT",
+            "summary": "brief review summary in Chinese (2-3 sentences)",
+            "issues": [
+              {{"file": "filename", "line": 0, "severity": "P0|P1|P2", "issue": "description in Chinese"}}
+            ]
+          }}
+
+          State rules:
+          - APPROVED: zero P0/P1 issues
+          - REQUEST_CHANGES: one or more P0/P1 issues
+          - COMMENT: only P2 issues present
+          '''
+
+          client = anthropic.Anthropic()
+          msg = client.messages.create(
+              model='claude-opus-4-6',
+              max_tokens=4096,
+              messages=[{'role': 'user', 'content': prompt}]
+          )
+
+          text = msg.content[0].text.strip()
+          # strip markdown code fences if present
+          if text.startswith('```'):
+              lines = text.split('\n')
+              text = '\n'.join(lines[1:])
+              if text.endswith('```'):
+                  text = text[:-3].strip()
+
+          result = json.loads(text)
+
+          # enforce state based on issues
+          p01 = any(i.get('severity') in ('P0', 'P1') for i in result.get('issues', []))
+          p2only = result.get('issues') and not p01
+          if p01:
+              result['state'] = 'REQUEST_CHANGES'
+          elif p2only:
+              result['state'] = 'COMMENT'
+          else:
+              result['state'] = 'APPROVED'
+
+          with open('/tmp/review_result.json', 'w') as f:
+              json.dump(result, f, ensure_ascii=False, indent=2)
+          print(json.dumps(result, ensure_ascii=False, indent=2))
+          PYEOF
+
+      - name: Submit GitHub PR review
+        continue-on-error: true
+        run: |
+          [ -f /tmp/review_result.json ] || { echo "No review result, skipping"; exit 0; }
+
+          STATE=$(jq -r '.state' /tmp/review_result.json)
+          SUMMARY=$(jq -r '.summary' /tmp/review_result.json)
+          ISSUES=$(jq -r '.issues[] | "- [\(.severity)] \(.file):\(.line) \(.issue)"' /tmp/review_result.json 2>/dev/null || true)
+
+          BODY="## 🤖 AI Code Review
+
+**结论**: ${STATE}
+
+### 摘要
+${SUMMARY}"
+
+          if [ -n "$ISSUES" ]; then
+            BODY="${BODY}
+
+### 问题列表
+${ISSUES}"
+          fi
+
+          case "$STATE" in
+            APPROVED)        REVIEW_FLAG="--approve" ;;
+            REQUEST_CHANGES) REVIEW_FLAG="--request-changes" ;;
+            *)               REVIEW_FLAG="--comment" ;;
+          esac
+
+          gh pr review $PR_NUMBER \
+            --repo Mininglamp-OSS/openclaw-channel-octo \
+            $REVIEW_FLAG \
+            --body "$BODY"
+
+      - name: Notify Octo thread
+        continue-on-error: true
+        run: |
+          [ -f /tmp/review_result.json ] || { echo "No review result, skipping"; exit 0; }
+
+          STATE=$(jq -r '.state' /tmp/review_result.json)
+          SUMMARY=$(jq -r '.summary' /tmp/review_result.json)
+
+          VERDICT_EMOJI="✅"
+          [ "$STATE" = "REQUEST_CHANGES" ] && VERDICT_EMOJI="🚫"
+          [ "$STATE" = "COMMENT" ] && VERDICT_EMOJI="💬"
+
+          ISSUES_TEXT=$(jq -r '.issues[] | "• [\(.severity)] \(.file):\(.line) \(.issue)"' \
+            /tmp/review_result.json 2>/dev/null || echo "无问题")
+
+          MSG="${VERDICT_EMOJI} [Auto-Review] PR #${PR_NUMBER}: ${PR_TITLE}
+结论: ${STATE}
+
+摘要: ${SUMMARY}
+
+主要问题:
+${ISSUES_TEXT}
+
+🔗 ${PR_URL}"
+
+          curl -sf -X POST "https://im.deepminer.com.cn/api/v1/bot/sendMessage" \
+            -H "Authorization: Bearer ${OCTO_BOT_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg cid "44b4689527b048cfa05b56964021b3de____2055503367437815808" \
+              --arg msg "$MSG" \
+              '{channel_id: $cid, channel_type: 5, payload: {type: 1, content: $msg}}')" \
+          || echo "Octo notification failed (non-fatal)"
