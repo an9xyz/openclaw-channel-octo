@@ -8,18 +8,12 @@
  *
  * Operations: list-groups, group-info, group-members, group-md-read, group-md-update,
  * thread management, voice-context, etc.
- *
- * Backwards compatibility: this factory returns TWO tool objects with
- * identical schemas and execute() — `octo_management` (the new main name)
- * and `dmwork_management` (a deprecated alias kept for one release cycle so
- * LLM prompts cached with the old name keep working). Both share the same
- * execute closure; the alias logs a deprecation hint on each invocation.
  */
 
 import {
-  listDmworkAccountIds,
-  resolveDmworkAccount,
-  resolveDefaultDmworkAccountId,
+  listOctoAccountIds,
+  resolveOctoAccount,
+  resolveDefaultOctoAccountId,
 } from "./accounts.js";
 import {
   fetchBotGroups,
@@ -68,7 +62,7 @@ type LogSink = {
 // Tool factory
 // ---------------------------------------------------------------------------
 
-export function createDmworkManagementTools(params: {
+export function createOctoManagementTools(params: {
   cfg?: OpenClawConfig;
 }): any[] {
   const cfg = params.cfg;
@@ -76,9 +70,9 @@ export function createDmworkManagementTools(params: {
 
   // Check if any account is configured
   try {
-    const ids = listDmworkAccountIds(cfg);
+    const ids = listOctoAccountIds(cfg);
     const hasConfigured = ids.some((id) => {
-      const acct = resolveDmworkAccount({ cfg, accountId: id });
+      const acct = resolveOctoAccount({ cfg, accountId: id });
       return acct.enabled && acct.configured && !!acct.config.botToken;
     });
     if (!hasConfigured) return [];
@@ -86,13 +80,7 @@ export function createDmworkManagementTools(params: {
     return [];
   }
 
-  // Build a tool object given its registered name + an optional onInvoke
-  // hook (used by the dmwork alias to log a deprecation marker). Schema and
-  // execute() are otherwise identical between the two registrations.
-  const buildTool = (
-    name: string,
-    onInvoke: (action: string) => void = () => {},
-  ) => ({
+  const buildTool = (name: string) => ({
     name,
     label: "Octo Management",
     description:
@@ -194,7 +182,6 @@ export function createDmworkManagementTools(params: {
       args: Record<string, unknown>,
     ): Promise<ToolResult> => {
       const action = args.action as string;
-      onInvoke(action);
       const groupId = (args.groupId ?? args.group_id ?? args.target) as
         | string
         | undefined;
@@ -208,7 +195,7 @@ export function createDmworkManagementTools(params: {
           ? rawAccountId
           : undefined;
 
-      const knownIds = listDmworkAccountIds(cfg);
+      const knownIds = listOctoAccountIds(cfg);
 
       // Account routing:
       //   - Single-account: force-route to the only configured account,
@@ -247,7 +234,7 @@ export function createDmworkManagementTools(params: {
           accountId = matches[0];
         }
       } else {
-        const defaultId = resolveDefaultDmworkAccountId(cfg);
+        const defaultId = resolveDefaultOctoAccountId(cfg);
         if (defaultId) {
           accountId = defaultId;
         } else {
@@ -257,7 +244,7 @@ export function createDmworkManagementTools(params: {
         }
       }
 
-      const account = resolveDmworkAccount({ cfg, accountId });
+      const account = resolveOctoAccount({ cfg, accountId });
 
       if (!account.config.botToken) {
         return makeError("Octo botToken is not configured for this account");
@@ -505,20 +492,7 @@ export function createDmworkManagementTools(params: {
   });
 
   return [
-    // Main tool: octo_management (the rebranded canonical name).
     buildTool("octo_management"),
-    // LEGACY-ALIAS: dmwork_management is kept for one release cycle so
-    // any agent prompts cached with the old tool name keep working through
-    // the rebrand. The alias shares the same execute closure; on each
-    // invocation it logs a deprecation marker so we can observe usage
-    // frequency before removal in 1.1.0.
-    buildTool("dmwork_management", (action) => {
-      console.warn(
-        `[deprecation] agent tool "dmwork_management" has been renamed to "octo_management". ` +
-        `Action invoked via legacy alias: ${action}. ` +
-        `The alias will be removed in 1.1.0.`,
-      );
-    }),
   ];
 }
 

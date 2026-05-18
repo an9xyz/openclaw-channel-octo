@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("./accounts.js", () => ({
-  listDmworkAccountIds: vi.fn(),
-  resolveDmworkAccount: vi.fn(),
-  resolveDefaultDmworkAccountId: vi.fn(),
+  listOctoAccountIds: vi.fn(),
+  resolveOctoAccount: vi.fn(),
+  resolveDefaultOctoAccountId: vi.fn(),
 }));
 
 vi.mock("./api-fetch.js", () => ({
@@ -24,11 +24,11 @@ vi.mock("./group-md.js", () => ({
   broadcastThreadMdUpdate: vi.fn(),
 }));
 
-import { createDmworkManagementTools } from "./agent-tools.js";
+import { createOctoManagementTools } from "./agent-tools.js";
 import {
-  listDmworkAccountIds,
-  resolveDmworkAccount,
-  resolveDefaultDmworkAccountId,
+  listOctoAccountIds,
+  resolveOctoAccount,
+  resolveDefaultOctoAccountId,
 } from "./accounts.js";
 import {
   fetchBotGroups,
@@ -45,7 +45,7 @@ import {
 import { broadcastGroupMdUpdate, broadcastThreadMdUpdate } from "./group-md.js";
 
 // Minimal config stub — mocked account functions don't inspect it
-const mockCfg = { channels: { dmwork: { botToken: "tok-secret" } } } as any;
+const mockCfg = { channels: { octo: { botToken: "tok-secret" } } } as any;
 
 function setupMocks(overrides?: {
   enabled?: boolean;
@@ -60,9 +60,9 @@ function setupMocks(overrides?: {
     apiUrl = "http://api.test",
   } = overrides ?? {};
 
-  vi.mocked(listDmworkAccountIds).mockReturnValue(["default"]);
-  vi.mocked(resolveDefaultDmworkAccountId).mockReturnValue("default");
-  vi.mocked(resolveDmworkAccount).mockReturnValue({
+  vi.mocked(listOctoAccountIds).mockReturnValue(["default"]);
+  vi.mocked(resolveDefaultOctoAccountId).mockReturnValue("default");
+  vi.mocked(resolveOctoAccount).mockReturnValue({
     accountId: "default",
     enabled,
     configured,
@@ -77,9 +77,8 @@ function setupMocks(overrides?: {
 
 /** Create tool and return its execute function */
 function getExecute() {
-  const tools = createDmworkManagementTools({ cfg: mockCfg });
-  // Phase A: factory returns [octo_management (primary), dmwork_management (alias)]
-  expect(tools).toHaveLength(2);
+  const tools = createOctoManagementTools({ cfg: mockCfg });
+  expect(tools).toHaveLength(1);
   expect(tools[0].name).toBe("octo_management");
   return tools[0].execute as (
     id: string,
@@ -93,7 +92,7 @@ function parseText(result: { content: { text: string }[] }): any {
 
 // ---------------------------------------------------------------------------
 
-describe("createDmworkManagementTools", () => {
+describe("createOctoManagementTools", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     setupMocks();
@@ -104,54 +103,36 @@ describe("createDmworkManagementTools", () => {
   // -----------------------------------------------------------------------
   describe("tool creation", () => {
     it("returns empty array when cfg is undefined", () => {
-      expect(createDmworkManagementTools({ cfg: undefined })).toEqual([]);
+      expect(createOctoManagementTools({ cfg: undefined })).toEqual([]);
     });
 
     it("returns empty array when no account has botToken", () => {
       setupMocks({ botToken: "" });
-      expect(createDmworkManagementTools({ cfg: mockCfg })).toEqual([]);
+      expect(createOctoManagementTools({ cfg: mockCfg })).toEqual([]);
     });
 
     it("returns empty array when account is disabled", () => {
       setupMocks({ enabled: false });
-      expect(createDmworkManagementTools({ cfg: mockCfg })).toEqual([]);
+      expect(createOctoManagementTools({ cfg: mockCfg })).toEqual([]);
     });
 
     it("returns empty array when account is not configured", () => {
       setupMocks({ configured: false });
-      expect(createDmworkManagementTools({ cfg: mockCfg })).toEqual([]);
+      expect(createOctoManagementTools({ cfg: mockCfg })).toEqual([]);
     });
 
-    it("returns empty array when listDmworkAccountIds throws", () => {
-      vi.mocked(listDmworkAccountIds).mockImplementation(() => {
+    it("returns empty array when listOctoAccountIds throws", () => {
+      vi.mocked(listOctoAccountIds).mockImplementation(() => {
         throw new Error("bad config");
       });
-      expect(createDmworkManagementTools({ cfg: mockCfg })).toEqual([]);
+      expect(createOctoManagementTools({ cfg: mockCfg })).toEqual([]);
     });
 
-    it("returns octo_management as primary tool plus dmwork_management alias", () => {
-      const tools = createDmworkManagementTools({ cfg: mockCfg });
-      expect(tools).toHaveLength(2);
+    it("returns octo_management as the only tool", () => {
+      const tools = createOctoManagementTools({ cfg: mockCfg });
+      expect(tools).toHaveLength(1);
       expect(tools[0].name).toBe("octo_management");
-      expect(tools[1].name).toBe("dmwork_management");
-      // Both share the same execute closure (so they handle every action identically)
       expect(typeof tools[0].execute).toBe("function");
-      expect(typeof tools[1].execute).toBe("function");
-    });
-
-    it("dmwork_management alias logs a deprecation warning on invocation", async () => {
-      const tools = createDmworkManagementTools({ cfg: mockCfg });
-      const dmworkAlias = tools.find((t: any) => t.name === "dmwork_management")!;
-      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-      // list-groups is the simplest action that doesn't need fetchBotGroups mock
-      // setup specific to this test — but we still need to mock it.
-      vi.mocked(fetchBotGroups).mockResolvedValue([]);
-      await dmworkAlias.execute("call-1", { action: "list-groups" });
-      expect(warnSpy).toHaveBeenCalled();
-      const msg = warnSpy.mock.calls[0]?.[0] ?? "";
-      expect(String(msg)).toContain("[deprecation]");
-      expect(String(msg)).toContain("octo_management");
-      warnSpy.mockRestore();
     });
   });
 
@@ -312,8 +293,8 @@ describe("createDmworkManagementTools", () => {
   // -----------------------------------------------------------------------
   describe("accountId resolution", () => {
     it("uses provided accountId", async () => {
-      vi.mocked(listDmworkAccountIds).mockReturnValue(["default", "acct2"]);
-      vi.mocked(resolveDmworkAccount).mockImplementation(({ accountId }: any) => ({
+      vi.mocked(listOctoAccountIds).mockReturnValue(["default", "acct2"]);
+      vi.mocked(resolveOctoAccount).mockImplementation(({ accountId }: any) => ({
         accountId: accountId ?? "default",
         enabled: true,
         configured: true,
@@ -334,9 +315,9 @@ describe("createDmworkManagementTools", () => {
     });
 
     it("single-account: force-routes to the only configured account", async () => {
-      // Default mock setup has listDmworkAccountIds returning a single "test-account".
+      // Default mock setup has listOctoAccountIds returning a single "test-account".
       // No accountId passed — the single-account branch short-circuits directly to
-      // knownIds[0], bypassing resolveDefaultDmworkAccountId.
+      // knownIds[0], bypassing resolveDefaultOctoAccountId.
       vi.mocked(fetchBotGroups).mockResolvedValue([]);
       const execute = getExecute();
       await execute("tc", { action: "list-groups" });
@@ -360,11 +341,11 @@ describe("createDmworkManagementTools", () => {
     });
 
     it("case-insensitive accountId match normalises to the real config key", async () => {
-      vi.mocked(listDmworkAccountIds).mockReturnValue([
+      vi.mocked(listOctoAccountIds).mockReturnValue([
         "27lZl4QjPzh72d10c8c_bot",
         "other_bot",
       ]);
-      vi.mocked(resolveDmworkAccount).mockImplementation(({ accountId }: any) => ({
+      vi.mocked(resolveOctoAccount).mockImplementation(({ accountId }: any) => ({
         accountId,
         enabled: true,
         configured: true,
@@ -389,8 +370,8 @@ describe("createDmworkManagementTools", () => {
       // Pathological but legal: two accountIds differ only in casing.
       // Passing the exact one must hit the exact one, not whichever the
       // lowercase collapse happens to find first.
-      vi.mocked(listDmworkAccountIds).mockReturnValue(["BotA", "bota"]);
-      vi.mocked(resolveDmworkAccount).mockImplementation(({ accountId }: any) => ({
+      vi.mocked(listOctoAccountIds).mockReturnValue(["BotA", "bota"]);
+      vi.mocked(resolveOctoAccount).mockImplementation(({ accountId }: any) => ({
         accountId,
         enabled: true,
         configured: true,
@@ -411,7 +392,7 @@ describe("createDmworkManagementTools", () => {
     });
 
     it("case-fold ambiguity (no exact match) is rejected, not silently resolved", async () => {
-      vi.mocked(listDmworkAccountIds).mockReturnValue(["BotA", "bota"]);
+      vi.mocked(listOctoAccountIds).mockReturnValue(["BotA", "bota"]);
       const execute = getExecute();
       // Neither exact; lowercased collapses to same key hitting both.
       const result = await execute("tc", { action: "list-groups", accountId: "BOTA" });
@@ -423,7 +404,7 @@ describe("createDmworkManagementTools", () => {
     });
 
     it("multi-account: unresolvable accountId returns error with available options", async () => {
-      vi.mocked(listDmworkAccountIds).mockReturnValue(["bot-a", "bot-b"]);
+      vi.mocked(listOctoAccountIds).mockReturnValue(["bot-a", "bot-b"]);
       const execute = getExecute();
       const result = await execute("tc", {
         action: "list-groups",
@@ -436,8 +417,8 @@ describe("createDmworkManagementTools", () => {
     });
 
     it("multi-account: no accountId and no default returns error with available options", async () => {
-      vi.mocked(listDmworkAccountIds).mockReturnValue(["bot-a", "bot-b"]);
-      vi.mocked(resolveDefaultDmworkAccountId).mockReturnValue(null as any);
+      vi.mocked(listOctoAccountIds).mockReturnValue(["bot-a", "bot-b"]);
+      vi.mocked(resolveDefaultOctoAccountId).mockReturnValue(null as any);
       const execute = getExecute();
       const result = await execute("tc", { action: "list-groups" });
       const data = parseText(result);
@@ -449,8 +430,8 @@ describe("createDmworkManagementTools", () => {
     });
 
     it('multi-account: accountId="default" alias behaves as unspecified → error when no default resolvable', async () => {
-      vi.mocked(listDmworkAccountIds).mockReturnValue(["bot-a", "bot-b"]);
-      vi.mocked(resolveDefaultDmworkAccountId).mockReturnValue(null as any);
+      vi.mocked(listOctoAccountIds).mockReturnValue(["bot-a", "bot-b"]);
+      vi.mocked(resolveDefaultOctoAccountId).mockReturnValue(null as any);
       const execute = getExecute();
       const result = await execute("tc", { action: "list-groups", accountId: "default" });
       const data = parseText(result);
@@ -459,8 +440,8 @@ describe("createDmworkManagementTools", () => {
     });
 
     it("resolves correct account in multi-account setup", async () => {
-      vi.mocked(listDmworkAccountIds).mockReturnValue(["primary", "secondary"]);
-      vi.mocked(resolveDmworkAccount).mockImplementation(({ accountId }: any) => {
+      vi.mocked(listOctoAccountIds).mockReturnValue(["primary", "secondary"]);
+      vi.mocked(resolveOctoAccount).mockImplementation(({ accountId }: any) => {
         if (accountId === "secondary") {
           return {
             accountId: "secondary",
@@ -519,7 +500,7 @@ describe("createDmworkManagementTools", () => {
   // -----------------------------------------------------------------------
   describe("token security", () => {
     it("tool schema does not contain botToken", () => {
-      const tools = createDmworkManagementTools({ cfg: mockCfg });
+      const tools = createOctoManagementTools({ cfg: mockCfg });
       const schema = JSON.stringify(tools[0].parameters);
       expect(schema).not.toContain("botToken");
     });
@@ -533,7 +514,7 @@ describe("createDmworkManagementTools", () => {
     it("error results do not leak botToken", async () => {
       const execute = getExecute();
       // After tool creation, change mock so execute sees no botToken
-      vi.mocked(resolveDmworkAccount).mockReturnValue({
+      vi.mocked(resolveOctoAccount).mockReturnValue({
         accountId: "default",
         enabled: true,
         configured: true,
@@ -556,7 +537,7 @@ describe("createDmworkManagementTools", () => {
     // -- Schema tests --
 
     it("tool schema includes voice-context-* actions", () => {
-      const tools = createDmworkManagementTools({ cfg: mockCfg });
+      const tools = createOctoManagementTools({ cfg: mockCfg });
       const schema = tools[0].parameters;
       const actionEnum = schema.properties.action.enum;
       expect(actionEnum).toContain("voice-context-read");
@@ -565,13 +546,13 @@ describe("createDmworkManagementTools", () => {
     });
 
     it("tool description mentions voice correction context", () => {
-      const tools = createDmworkManagementTools({ cfg: mockCfg });
+      const tools = createOctoManagementTools({ cfg: mockCfg });
       expect(tools[0].description).toContain("voice correction context");
     });
 
     // Token leak prevention
     it("tool schema does not contain botToken", () => {
-      const tools = createDmworkManagementTools({ cfg: mockCfg });
+      const tools = createOctoManagementTools({ cfg: mockCfg });
       const schema = JSON.stringify(tools[0].parameters);
       expect(schema).not.toContain("botToken");
       expect(schema).not.toContain("tok-secret");
@@ -737,8 +718,8 @@ describe("createDmworkManagementTools", () => {
     // Multi-account tests
 
     it("voice-context-read uses specified accountId", async () => {
-      vi.mocked(listDmworkAccountIds).mockReturnValue(["primary", "secondary"]);
-      vi.mocked(resolveDmworkAccount).mockImplementation(({ accountId }: any) => {
+      vi.mocked(listOctoAccountIds).mockReturnValue(["primary", "secondary"]);
+      vi.mocked(resolveOctoAccount).mockImplementation(({ accountId }: any) => {
         if (accountId === "secondary") {
           return {
             accountId: "secondary",
@@ -783,8 +764,8 @@ describe("createDmworkManagementTools", () => {
     });
 
     it("voice-context-update uses specified accountId", async () => {
-      vi.mocked(listDmworkAccountIds).mockReturnValue(["primary", "secondary"]);
-      vi.mocked(resolveDmworkAccount).mockImplementation(({ accountId }: any) => {
+      vi.mocked(listOctoAccountIds).mockReturnValue(["primary", "secondary"]);
+      vi.mocked(resolveOctoAccount).mockImplementation(({ accountId }: any) => {
         if (accountId === "secondary") {
           return {
             accountId: "secondary",
@@ -827,8 +808,8 @@ describe("createDmworkManagementTools", () => {
     });
 
     it("voice-context-delete uses specified accountId", async () => {
-      vi.mocked(listDmworkAccountIds).mockReturnValue(["primary", "secondary"]);
-      vi.mocked(resolveDmworkAccount).mockImplementation(({ accountId }: any) => {
+      vi.mocked(listOctoAccountIds).mockReturnValue(["primary", "secondary"]);
+      vi.mocked(resolveOctoAccount).mockImplementation(({ accountId }: any) => {
         if (accountId === "secondary") {
           return {
             accountId: "secondary",
@@ -870,7 +851,7 @@ describe("createDmworkManagementTools", () => {
 
     // Token not leaked on multi-account calls
     it("multi-account results do not leak secondary botToken", async () => {
-      vi.mocked(resolveDmworkAccount).mockReturnValue({
+      vi.mocked(resolveOctoAccount).mockReturnValue({
         accountId: "secondary",
         enabled: true,
         configured: true,
@@ -899,7 +880,7 @@ describe("createDmworkManagementTools", () => {
     // -- strict accountId validation --
 
     it("voice-context-read with non-existent accountId returns error", async () => {
-      vi.mocked(listDmworkAccountIds).mockReturnValue(["primary", "secondary"]);
+      vi.mocked(listOctoAccountIds).mockReturnValue(["primary", "secondary"]);
       const execute = getExecute();
 
       const result = await execute("tc", {
@@ -914,7 +895,7 @@ describe("createDmworkManagementTools", () => {
     });
 
     it("voice-context-update with non-existent accountId returns error", async () => {
-      vi.mocked(listDmworkAccountIds).mockReturnValue(["primary", "secondary"]);
+      vi.mocked(listOctoAccountIds).mockReturnValue(["primary", "secondary"]);
       const execute = getExecute();
 
       const result = await execute("tc", {
@@ -930,7 +911,7 @@ describe("createDmworkManagementTools", () => {
     });
 
     it("voice-context-delete with non-existent accountId returns error", async () => {
-      vi.mocked(listDmworkAccountIds).mockReturnValue(["primary", "secondary"]);
+      vi.mocked(listOctoAccountIds).mockReturnValue(["primary", "secondary"]);
       const execute = getExecute();
 
       const result = await execute("tc", {
@@ -949,7 +930,7 @@ describe("createDmworkManagementTools", () => {
     it("returns error when botToken is not configured", async () => {
       const execute = getExecute();
       // After tool creation, change mock so execute sees no botToken
-      vi.mocked(resolveDmworkAccount).mockReturnValue({
+      vi.mocked(resolveOctoAccount).mockReturnValue({
         accountId: "no-token",
         enabled: true,
         configured: true,

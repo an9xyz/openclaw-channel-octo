@@ -1,4 +1,4 @@
-/** Octo Bot API types (legacy DMWorkGroupConfig type name kept for internal use) */
+/** Octo Bot API types. */
 
 export interface BotRegisterReq {
   name?: string;
@@ -129,12 +129,6 @@ export enum MessageType {
   Card = 7,
   File = 8,
   MultipleForward = 11,
-}
-
-/** Plugin config */
-export interface DMWorkGroupConfig {
-  requireMention?: boolean;
-  enabled?: boolean;
 }
 
 /** Minimal logger interface used across modules. */

@@ -63,12 +63,12 @@ describe("registerGroupToAccount + resolveAccountForGroup", () => {
 
 // Mock dependencies that handleAction calls
 vi.mock("./actions.js", () => ({
-  handleDmworkMessageAction: vi.fn(async () => ({ ok: true })),
+  handleOctoMessageAction: vi.fn(async () => ({ ok: true })),
   parseTarget: vi.fn(() => ({ channelId: "test", channelType: 2 })),
 }));
 
 vi.mock("./agent-tools.js", () => ({
-  createDmworkManagementTools: vi.fn(() => []),
+  createOctoManagementTools: vi.fn(() => []),
 }));
 
 vi.mock("./group-md.js", () => ({
@@ -95,8 +95,8 @@ vi.mock("./api-fetch.js", () => ({
 
 describe("handleAction multi-bot isolation", () => {
   it("single bot — corrects wrong accountId to the sole owner", async () => {
-    const { dmworkPlugin, registerGroupToAccount } = await import("./channel.js");
-    const { handleDmworkMessageAction } = await import("./actions.js");
+    const { octoPlugin, registerGroupToAccount } = await import("./channel.js");
+    const { handleOctoMessageAction } = await import("./actions.js");
 
     // Only botA is in group-001
     registerGroupToAccount("group-001", "botA");
@@ -106,7 +106,7 @@ describe("handleAction multi-bot isolation", () => {
       action: "send" as const,
       channel: "octo",
       params: { target: "group:group-001", text: "hello" },
-      toolContext: { currentChannelId: "dmwork:group-001" },
+      toolContext: { currentChannelId: "octo:group-001" },
       cfg: {
         channels: {
           octo: {
@@ -120,10 +120,10 @@ describe("handleAction multi-bot isolation", () => {
       log: { info: vi.fn() },
     };
 
-    await dmworkPlugin.actions!.handleAction!(ctx as any);
+    await octoPlugin.actions!.handleAction!(ctx as any);
 
-    // handleDmworkMessageAction should have been called with botA's token
-    expect(handleDmworkMessageAction).toHaveBeenCalledWith(
+    // handleOctoMessageAction should have been called with botA's token
+    expect(handleOctoMessageAction).toHaveBeenCalledWith(
       expect.objectContaining({ botToken: "tokenA" }),
     );
     // Correction log should have fired
@@ -133,8 +133,8 @@ describe("handleAction multi-bot isolation", () => {
   });
 
   it("multi-bot same group — does NOT override ctx.accountId", async () => {
-    const { dmworkPlugin, registerGroupToAccount } = await import("./channel.js");
-    const { handleDmworkMessageAction } = await import("./actions.js");
+    const { octoPlugin, registerGroupToAccount } = await import("./channel.js");
+    const { handleOctoMessageAction } = await import("./actions.js");
 
     // Both botA and botB are in group-001
     registerGroupToAccount("group-001", "botA");
@@ -145,7 +145,7 @@ describe("handleAction multi-bot isolation", () => {
       action: "send" as const,
       channel: "octo",
       params: { target: "group:group-001", text: "hello from A" },
-      toolContext: { currentChannelId: "dmwork:group-001" },
+      toolContext: { currentChannelId: "octo:group-001" },
       cfg: {
         channels: {
           octo: {
@@ -159,10 +159,10 @@ describe("handleAction multi-bot isolation", () => {
       log: { info: vi.fn() },
     };
 
-    await dmworkPlugin.actions!.handleAction!(ctx as any);
+    await octoPlugin.actions!.handleAction!(ctx as any);
 
     // Should use botA's token (the caller's original accountId), NOT botB's
-    expect(handleDmworkMessageAction).toHaveBeenCalledWith(
+    expect(handleOctoMessageAction).toHaveBeenCalledWith(
       expect.objectContaining({ botToken: "tokenA" }),
     );
     // No correction log should have fired
@@ -172,8 +172,8 @@ describe("handleAction multi-bot isolation", () => {
   });
 
   it("single bot — correct accountId is not re-corrected", async () => {
-    const { dmworkPlugin, registerGroupToAccount } = await import("./channel.js");
-    const { handleDmworkMessageAction } = await import("./actions.js");
+    const { octoPlugin, registerGroupToAccount } = await import("./channel.js");
+    const { handleOctoMessageAction } = await import("./actions.js");
 
     registerGroupToAccount("group-001", "botA");
 
@@ -182,7 +182,7 @@ describe("handleAction multi-bot isolation", () => {
       action: "send" as const,
       channel: "octo",
       params: { target: "group:group-001", text: "hello" },
-      toolContext: { currentChannelId: "dmwork:group-001" },
+      toolContext: { currentChannelId: "octo:group-001" },
       cfg: {
         channels: {
           octo: {
@@ -195,9 +195,9 @@ describe("handleAction multi-bot isolation", () => {
       log: { info: vi.fn() },
     };
 
-    await dmworkPlugin.actions!.handleAction!(ctx as any);
+    await octoPlugin.actions!.handleAction!(ctx as any);
 
-    expect(handleDmworkMessageAction).toHaveBeenCalledWith(
+    expect(handleOctoMessageAction).toHaveBeenCalledWith(
       expect.objectContaining({ botToken: "tokenA" }),
     );
     // No correction needed

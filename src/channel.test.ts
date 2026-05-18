@@ -3,7 +3,7 @@ import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
 
 // Mock api-fetch so outbound adapter wiring tests (below) can observe the
 // final sendMessage / sendMediaMessage arguments without actually hitting
-// DMWork. Real implementations still ship in the bundle — this is test-only.
+// Octo. Real implementations still ship in the bundle — this is test-only.
 vi.mock("./api-fetch.js", async () => {
   return {
     sendMessage: vi.fn().mockResolvedValue(undefined),
@@ -115,45 +115,45 @@ describe("ensureCleanupTimer singleton pattern", () => {
     // Fresh import - timer should be created lazily now (not at module load)
     // Since we changed to lazy initialization, no timer at import time
     vi.resetModules();
-    const { dmworkPlugin } = await import("./channel.js");
+    const { octoPlugin } = await import("./channel.js");
 
     // At this point, no timer should have been created yet
     // Timer is created when startAccount is called
-    expect(dmworkPlugin).toBeDefined();
-    expect(dmworkPlugin.id).toBe("octo");
+    expect(octoPlugin).toBeDefined();
+    expect(octoPlugin.id).toBe("octo");
   });
 
   it("should expose ensureCleanupTimer via gateway.startAccount pattern", async () => {
     vi.resetModules();
-    const { dmworkPlugin } = await import("./channel.js");
+    const { octoPlugin } = await import("./channel.js");
 
     // The gateway.startAccount method should exist and call ensureCleanupTimer
-    expect(dmworkPlugin.gateway?.startAccount).toBeDefined();
-    expect(typeof dmworkPlugin.gateway?.startAccount).toBe("function");
+    expect(octoPlugin.gateway?.startAccount).toBeDefined();
+    expect(typeof octoPlugin.gateway?.startAccount).toBe("function");
   });
 });
 
-describe("dmworkPlugin structure", () => {
+describe("octoPlugin structure", () => {
   it("should have correct plugin id and meta", async () => {
-    const { dmworkPlugin } = await import("./channel.js");
+    const { octoPlugin } = await import("./channel.js");
 
-    expect(dmworkPlugin.id).toBe("octo");
-    expect(dmworkPlugin.meta.id).toBe("octo");
-    expect(dmworkPlugin.meta.label).toBe("Octo");
+    expect(octoPlugin.id).toBe("octo");
+    expect(octoPlugin.meta.id).toBe("octo");
+    expect(octoPlugin.meta.label).toBe("Octo");
   });
 
   it("should have gateway.startAccount defined", async () => {
-    const { dmworkPlugin } = await import("./channel.js");
+    const { octoPlugin } = await import("./channel.js");
 
-    expect(dmworkPlugin.gateway).toBeDefined();
-    expect(dmworkPlugin.gateway?.startAccount).toBeDefined();
+    expect(octoPlugin.gateway).toBeDefined();
+    expect(octoPlugin.gateway?.startAccount).toBeDefined();
   });
 
   it("should support direct and group chat types", async () => {
-    const { dmworkPlugin } = await import("./channel.js");
+    const { octoPlugin } = await import("./channel.js");
 
-    expect(dmworkPlugin.capabilities?.chatTypes).toContain("direct");
-    expect(dmworkPlugin.capabilities?.chatTypes).toContain("group");
+    expect(octoPlugin.capabilities?.chatTypes).toContain("direct");
+    expect(octoPlugin.capabilities?.chatTypes).toContain("group");
   });
 });
 
@@ -433,7 +433,7 @@ describe("sendText v2 mention processing logic", () => {
 
 // ─── outbound adapter wiring (thread cross-channel regression) ──────────────
 // These exercise the full sendText / sendMedia adapter path — not just the
-// resolveOutboundDmworkTarget helper — to pin down that ctx.threadId is
+// resolveOutboundOctoTarget helper — to pin down that ctx.threadId is
 // correctly wired from framework input all the way to sendMessage /
 // sendMediaMessage. Motivated by the bug where OpenClaw passed
 // to="group:<group_no>" + threadId="<short>" and files silently landed in
@@ -457,10 +457,10 @@ describe("outbound.sendText — threadId wiring", () => {
   });
 
   it("merges ctx.threadId into the group target as CommunityTopic (type=5)", async () => {
-    const { dmworkPlugin } = await import("./channel.js");
+    const { octoPlugin } = await import("./channel.js");
     const { sendMessage } = await import("./api-fetch.js");
 
-    await dmworkPlugin.outbound!.sendText!({
+    await octoPlugin.outbound!.sendText!({
       cfg,
       to: "group:grp1",
       threadId: "topicA",
@@ -476,10 +476,10 @@ describe("outbound.sendText — threadId wiring", () => {
   });
 
   it("leaves a parent-group target (no threadId) as Group (type=2)", async () => {
-    const { dmworkPlugin } = await import("./channel.js");
+    const { octoPlugin } = await import("./channel.js");
     const { sendMessage } = await import("./api-fetch.js");
 
-    await dmworkPlugin.outbound!.sendText!({
+    await octoPlugin.outbound!.sendText!({
       cfg,
       to: "group:grp1",
       text: "parent group reply",
@@ -493,10 +493,10 @@ describe("outbound.sendText — threadId wiring", () => {
   });
 
   it("accepts channel:<id> alias + threadId and routes to CommunityTopic", async () => {
-    const { dmworkPlugin } = await import("./channel.js");
+    const { octoPlugin } = await import("./channel.js");
     const { sendMessage } = await import("./api-fetch.js");
 
-    await dmworkPlugin.outbound!.sendText!({
+    await octoPlugin.outbound!.sendText!({
       cfg,
       to: "channel:grp1",
       threadId: "topicA",
@@ -531,10 +531,10 @@ describe("outbound.sendMedia — threadId wiring", () => {
   });
 
   it("merges ctx.threadId into the group target as CommunityTopic (type=5)", async () => {
-    const { dmworkPlugin } = await import("./channel.js");
+    const { octoPlugin } = await import("./channel.js");
     const { sendMediaMessage } = await import("./api-fetch.js");
 
-    await dmworkPlugin.outbound!.sendMedia!({
+    await octoPlugin.outbound!.sendMedia!({
       cfg,
       to: "group:grp1",
       threadId: "topicA",
@@ -551,10 +551,10 @@ describe("outbound.sendMedia — threadId wiring", () => {
   });
 
   it("leaves a parent-group target (no threadId) as Group (type=2)", async () => {
-    const { dmworkPlugin } = await import("./channel.js");
+    const { octoPlugin } = await import("./channel.js");
     const { sendMediaMessage } = await import("./api-fetch.js");
 
-    await dmworkPlugin.outbound!.sendMedia!({
+    await octoPlugin.outbound!.sendMedia!({
       cfg,
       to: "group:grp1",
       text: "",
@@ -569,10 +569,10 @@ describe("outbound.sendMedia — threadId wiring", () => {
   });
 
   it("accepts channel:<id> alias + threadId and routes to CommunityTopic", async () => {
-    const { dmworkPlugin } = await import("./channel.js");
+    const { octoPlugin } = await import("./channel.js");
     const { sendMediaMessage } = await import("./api-fetch.js");
 
-    await dmworkPlugin.outbound!.sendMedia!({
+    await octoPlugin.outbound!.sendMedia!({
       cfg,
       to: "channel:grp1",
       threadId: "topicA",
@@ -588,10 +588,10 @@ describe("outbound.sendMedia — threadId wiring", () => {
   });
 
   it("preserves an already-synthesised channel_id even if threadId is also passed", async () => {
-    const { dmworkPlugin } = await import("./channel.js");
+    const { octoPlugin } = await import("./channel.js");
     const { sendMediaMessage } = await import("./api-fetch.js");
 
-    await dmworkPlugin.outbound!.sendMedia!({
+    await octoPlugin.outbound!.sendMedia!({
       cfg,
       to: "group:grp1____topicA",
       threadId: "different",
@@ -612,8 +612,8 @@ describe("outbound.sendMedia — threadId wiring", () => {
 // These close the gap the review flagged: resolveOutboundAccountId's behaviour
 // is covered in isolation, but the outbound adapters (sendText/sendMedia) also
 // have to actually USE the corrected accountId's botToken when calling the
-// DMWork API. Without these tests, a regression in the wiring (e.g. passing
-// the original ctx.accountId to resolveDmworkAccount instead of the corrected
+// Octo API. Without these tests, a regression in the wiring (e.g. passing
+// the original ctx.accountId to resolveOctoAccount instead of the corrected
 // one) would go undetected.
 
 describe("outbound sendText/sendMedia — accountId correction threads through to API", () => {
@@ -638,13 +638,13 @@ describe("outbound sendText/sendMedia — accountId correction threads through t
   });
 
   it("sendText corrects to the group-owning bot's token when group has a single owner, even if a different accountId is passed", async () => {
-    const { dmworkPlugin, registerGroupToAccount } = await import("./channel.js");
+    const { octoPlugin, registerGroupToAccount } = await import("./channel.js");
     const { sendMessage } = await import("./api-fetch.js");
 
     // Group grp1 belongs to bot-b only; caller passed bot-a.
     registerGroupToAccount("grp1", "bot-b");
 
-    await dmworkPlugin.outbound!.sendText!({
+    await octoPlugin.outbound!.sendText!({
       cfg: cfgWithTwoBots,
       to: "group:grp1",
       text: "hi",
@@ -657,12 +657,12 @@ describe("outbound sendText/sendMedia — accountId correction threads through t
   });
 
   it("sendMedia corrects to the group-owning bot's token", async () => {
-    const { dmworkPlugin, registerGroupToAccount } = await import("./channel.js");
+    const { octoPlugin, registerGroupToAccount } = await import("./channel.js");
     const { sendMediaMessage } = await import("./api-fetch.js");
 
     registerGroupToAccount("grp1", "bot-b");
 
-    await dmworkPlugin.outbound!.sendMedia!({
+    await octoPlugin.outbound!.sendMedia!({
       cfg: cfgWithTwoBots,
       to: "group:grp1",
       text: "",
@@ -676,14 +676,14 @@ describe("outbound sendText/sendMedia — accountId correction threads through t
   });
 
   it("sendText respects explicit accountId when group is shared by multiple bots (no single owner)", async () => {
-    const { dmworkPlugin, registerGroupToAccount } = await import("./channel.js");
+    const { octoPlugin, registerGroupToAccount } = await import("./channel.js");
     const { sendMessage } = await import("./api-fetch.js");
 
     // Shared group — resolveAccountForGroup returns undefined for ambiguity.
     registerGroupToAccount("grp1", "bot-a");
     registerGroupToAccount("grp1", "bot-b");
 
-    await dmworkPlugin.outbound!.sendText!({
+    await octoPlugin.outbound!.sendText!({
       cfg: cfgWithTwoBots,
       to: "group:grp1",
       text: "hi",
@@ -696,12 +696,12 @@ describe("outbound sendText/sendMedia — accountId correction threads through t
   });
 
   it("sendText corrects through the channel:<id> prefix alias too", async () => {
-    const { dmworkPlugin, registerGroupToAccount } = await import("./channel.js");
+    const { octoPlugin, registerGroupToAccount } = await import("./channel.js");
     const { sendMessage } = await import("./api-fetch.js");
 
     registerGroupToAccount("grp1", "bot-b");
 
-    await dmworkPlugin.outbound!.sendText!({
+    await octoPlugin.outbound!.sendText!({
       cfg: cfgWithTwoBots,
       to: "channel:grp1",
       text: "hi",

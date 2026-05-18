@@ -66,11 +66,9 @@ export function parseTarget(
   if (target.startsWith("user:"))
     return { channelId: target.slice(5), channelType: ChannelType.DM };
 
-  // Strip channel-namespace prefix if present (octo: new, dmwork: legacy)
-  // LEGACY-COMPAT: dmwork: kept to interop with sessions emitted before rebrand
+  // Strip octo: channel-namespace prefix if present
   let bareId = target;
   if (bareId.startsWith("octo:")) bareId = bareId.slice(5);
-  else if (bareId.startsWith("dmwork:")) bareId = bareId.slice(7);
 
   // Thread channel ID (groupNo____shortId)
   if (bareId.includes(THREAD_SEP)) {
@@ -88,8 +86,6 @@ function stripGroupPrefix(raw: string): string {
   if (raw.startsWith("channel:")) return raw.slice(8);
   if (raw.startsWith("g-")) return raw.slice(2);
   if (raw.startsWith("octo:")) return raw.slice(5);
-  // LEGACY-COMPAT: dmwork: prefix kept to support legacy sessionKey/target strings
-  if (raw.startsWith("dmwork:")) return raw.slice(7);
   return raw;
 }
 
@@ -138,7 +134,7 @@ export function extractInlineMentionUids(ctxTo: string): string[] {
  * Idempotent: if ctx.to already carries `____` (caller synthesised the thread id
  * themselves), the threadId merge is skipped.
  */
-export function resolveOutboundDmworkTarget(
+export function resolveOutboundOctoTarget(
   ctxTo: string,
   threadId?: string | number | null,
 ): { channelId: string; channelType: ChannelType } {
@@ -212,7 +208,7 @@ function resolveGroupId(
   return undefined;
 }
 
-export async function handleDmworkMessageAction(params: {
+export async function handleOctoMessageAction(params: {
   action: string;
   args: Record<string, unknown>;
   apiUrl: string;
@@ -252,7 +248,6 @@ export async function handleDmworkMessageAction(params: {
       return handleGroupMdUpdate({ args, apiUrl, botToken, groupMdCache, currentChannelId, log });
     // 群管理操作（create-group/update-group/add-members/remove-members）
     // 统一通过 octo_management tool 入口，不走 message action
-    // (legacy alias dmwork_management is also accepted, see agent-tools.ts)
     default:
       return { ok: false, error: `Unknown action: ${action}` };
   }
@@ -307,7 +302,7 @@ async function handleSend(params: {
     }
   }
 
-  const { channelId, channelType } = resolveOutboundDmworkTarget(target, effectiveThreadId);
+  const { channelId, channelType } = resolveOutboundOctoTarget(target, effectiveThreadId);
 
   // UX warning for a specific foot-gun on the message-tool path (#232 review):
   // the agent is replying inside a sub-topic (session's currentChannelId carries

@@ -62,28 +62,27 @@ After registering, send a greeting to your owner (DM to owner_uid) to confirm yo
 
 Install the pre-built adapter for instant message delivery, real-time online status, and auto-reconnect.
 
-**Install plugin:**
+**Install plugin from ClawHub:**
 ```bash
-npx -y openclaw-channel-octo install
+openclaw plugins install clawhub:octo
 ```
 
-**Single bot — bind to agent:**
+**Add a bot account (non-interactive, scriptable):**
 ```bash
-npx -y openclaw-channel-octo bind --bot-token YOUR_BOT_TOKEN --api-url <apiUrl> --account-id <robot_id> --agent <agent_id>
+openclaw channels add --channel octo \
+  --account <robot_id> \
+  --bot-token YOUR_BOT_TOKEN \
+  --http-url <apiUrl>
 ```
 
-**All agents — one-click setup:**
-```bash
-npx -y openclaw-channel-octo quickstart --api-key uk_YOUR_KEY --api-url <apiUrl>
-```
-
-The CLI automatically writes `~/.openclaw/openclaw.json` config and agent bindings. No manual config editing needed.
+Or run `openclaw channels add --channel octo` with no flags to walk
+through the interactive setup wizard.
 
 ### Multi-Agent Setup Guide
 
 When one owner creates multiple bots (e.g. via BotFather /newbot), each bot can be connected to a separate AI Agent. Each bot gets its own accountId in the OpenClaw config with independent settings.
 
-Example: an owner creates bot-translator, bot-coder, and bot-assistant — each backed by a different OpenClaw agent configuration.
+Example: an owner creates bot_translator, bot_coder, and bot_assistant — each backed by a different OpenClaw agent configuration.
 
 ```json
 {
@@ -91,17 +90,17 @@ Example: an owner creates bot-translator, bot-coder, and bot-assistant — each 
     "octo": {
       "apiUrl": "<apiUrl>",
       "accounts": {
-        "bot-translator": {
+        "bot_translator": {
           "botToken": "TOKEN_TRANSLATOR",
           "agentModel": "claude-sonnet-4-6",
           "systemPrompt": "You are a professional translator."
         },
-        "bot-coder": {
+        "bot_coder": {
           "botToken": "TOKEN_CODER",
           "agentModel": "claude-sonnet-4-6",
           "systemPrompt": "You are a code review assistant."
         },
-        "bot-assistant": {
+        "bot_assistant": {
           "botToken": "TOKEN_ASSISTANT",
           "agentModel": "claude-sonnet-4-6",
           "systemPrompt": "You are a general-purpose assistant."
@@ -136,7 +135,7 @@ Features:
 - Auto-reconnect on disconnection
 - Full OpenClaw plugin integration
 
-Source & docs: https://www.npmjs.com/package/openclaw-channel-octo
+Source & docs: https://clawhub.ai/plugins/octo
 
 ## Step 3: Send Messages
 
@@ -960,8 +959,8 @@ Each API Key is bound to a specific Space. When you run /quickstart in a Space, 
 ### Quickstart Flow
 
 1. Get your User API Key from BotFather `/quickstart` command (key is bound to your current Space)
-2. Run `npx -y openclaw-channel-octo quickstart --api-key <key> --api-url <apiUrl>`
-3. The CLI automatically creates bots for all agents, writes config, and sends greetings
+2. Use the BotFather `/quickstart` flow to batch-create bots for all your agents (the bot is responsible for orchestration; this skill no longer ships a standalone CLI runner)
+3. The flow writes each bot's config under `channels.octo.accounts.<robot_id>` and sends greetings on first connect
 4. Verify by sending a message to the bot in Octo
 
 ### Endpoints

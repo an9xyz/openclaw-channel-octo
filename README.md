@@ -1,95 +1,45 @@
 # openclaw-channel-octo
 
-[![ClawHub](https://img.shields.io/badge/ClawHub-openclaw--channel--octo-blue?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0Ij48Y2lyY2xlIGN4PSIxMiIgY3k9IjEyIiByPSIxMCIgZmlsbD0id2hpdGUiLz48L3N2Zz4=)](https://clawhub.ai/plugins/openclaw-channel-octo)
+[![ClawHub](https://img.shields.io/badge/ClawHub-octo-blue?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0Ij48Y2lyY2xlIGN4PSIxMiIgY3k9IjEyIiByPSIxMCIgZmlsbD0id2hpdGUiLz48L3N2Zz4=)](https://clawhub.ai/plugins/octo)
 
 OpenClaw channel plugin for **Octo**. Connects via WebSocket for real-time messaging.
 
 ## Prerequisites
 
-- Node.js >= 22
-  (OpenClaw >= 2026.4.15 requires Node 22; this is a platform constraint, not a plugin-level requirement.)
+- Node.js >= 22 (OpenClaw >= 2026.4.15 requires Node 22)
 - OpenClaw installed and configured (`npm i -g openclaw`)
 - A bot created via BotFather in Octo (send `/newbot` to BotFather)
 
 ## Install
 
-Install from ClawHub:
+This plugin is published exclusively on ClawHub for fresh installs:
 
 ```bash
-openclaw plugins install clawhub:openclaw-channel-octo
+openclaw plugins install clawhub:octo
 ```
 
-Or install via npm:
+## Configure a bot account
+
+After installing, use OpenClaw's standard `channels add` flow.
+
+Non-interactive (recommended for scripts and CI):
 
 ```bash
-npx -y openclaw-channel-octo install
-```
-
-After installing, bind a bot account:
-
-```bash
-npx -y openclaw-channel-octo bind \
+openclaw channels add --channel octo \
+  --account my_bot \
   --bot-token bf_your_token_here \
-  --api-url https://your-server.example/api \
-  --account-id my_bot \
-  --agent your_agent_id
+  --http-url https://your-server.example/api
 ```
 
-`install` flags:
-
-- `--force`: reinstall even if already installed
-- `--dev`: install the `@dev` dist-tag instead of `@latest`
-
-## CLI Commands
+Interactive (prompts for token and API URL):
 
 ```bash
-# Install/update the plugin (no bot config)
-npx -y openclaw-channel-octo install
-
-# Bind a bot to an agent (writes channels.octo + bindings(channel=octo))
-npx -y openclaw-channel-octo bind --bot-token <T> --api-url <U> --account-id <ID> --agent <agent>
-
-# Batch-create one bot per agent and bind them all
-npx -y openclaw-channel-octo quickstart --api-key <user-api-key> --api-url <U>
-
-# Update the plugin to the latest version
-npx -y openclaw-channel-octo update
-
-# Diagnose plugin health
-npx -y openclaw-channel-octo doctor
-
-# Uninstall (removes plugin + all bot configs under channels.octo)
-npx -y openclaw-channel-octo uninstall
-
-# Remove a single bot account (only touches channels.octo)
-npx -y openclaw-channel-octo remove-account --account-id my_bot
+openclaw channels add --channel octo
 ```
 
-### OpenClaw internal commands
-
-After installation, these commands are available inside OpenClaw:
-
-| Command | Args | Description |
-|---|---|---|
-| `/octo_doctor` | `[<account_id>]` | Check plugin status and connectivity. Pass an account id to check a specific bot only. |
-| `/octo_info` | none | Show Octo plugin version info. |
-| `/octo_install` | `[--force]` | Install the Octo plugin. Pass `--force` to reinstall when already present. |
-| `/octo_update` | none | Update Octo plugin to the latest published version. |
-| `/octo_uninstall` | none | Uninstall the Octo plugin and remove all bot configs. |
-| `/octo_add_account` | `<account_id> <bot_token> <api_url>` | Add or update an Octo bot account. |
-| `/octo_remove_account` | `<account_id>` | Remove an Octo bot account. |
-
-Example:
-
-```
-/octo_doctor                                          # check all accounts
-/octo_doctor my_bot                                   # check one specific account
-/octo_add_account my_bot bf_xxx https://im.example.com/api    # add a bot
-/octo_remove_account my_bot                           # remove a bot
-```
-
-The legacy `/dmwork_*` aliases keep working for one release cycle and emit a
-deprecation hint on every invocation. Prefer the `/octo_*` names.
+After the account is written, restart the gateway (`openclaw gateway run --force`)
+or wait for the next auto-reload — the plugin watches `channels.octo` and
+reconnects on changes.
 
 ## Configuration
 
@@ -99,15 +49,12 @@ Bot accounts are stored in `~/.openclaw/openclaw.json` under `channels.octo.acco
 {
   "channels": {
     "octo": {
-      "apiUrl": "http://your-server:8090",
+      "enabled": true,
       "accounts": {
         "my_bot": {
+          "enabled": true,
           "botToken": "bf_your_token_here",
-          "apiUrl": "http://your-server:8090"
-        },
-        "another_bot": {
-          "botToken": "bf_another_token",
-          "apiUrl": "https://im.example.com/api"
+          "apiUrl": "https://your-server.example/api"
         }
       }
     }
@@ -118,8 +65,9 @@ Bot accounts are stored in `~/.openclaw/openclaw.json` under `channels.octo.acco
 Configuration fields per account:
 
 - `botToken` (required): Bot token from BotFather (`bf_` prefix)
-- `apiUrl` (required): Octo server API URL
-- `wsUrl` (optional): WebSocket URL. Auto-detected if omitted.
+- `apiUrl` (required): Octo server REST API base URL (e.g. `https://your-server/api`). The default `http://localhost:8090/api` only works for a local Octo dev server with the standard `/api` mount.
+- `wsUrl` (optional): WebSocket URL. Auto-detected from `apiUrl` if omitted.
+- `cdnUrl` (optional): CDN base URL for media files
 - `requireMention` (optional): Only respond when @mentioned in groups
 - `historyLimit` (optional): Group chat history message limit (default: 20)
 
@@ -130,23 +78,21 @@ Configuration fields per account:
 3. Auto-reconnects on disconnection
 4. Sends a greeting to the bot owner on connect
 5. Dispatches incoming messages to OpenClaw's message handler
-6. Supports streaming responses (start/send/end), typing indicators, and read receipts
+6. Supports typing indicators and read receipts
 
-## As an OpenClaw Plugin
+## Architecture
 
-The `index.ts` exports a standard OpenClaw plugin object. When loaded by OpenClaw:
+`index.ts` is a standard OpenClaw plugin entry. When loaded:
 
-- `register(api)` is called automatically
-- `api.runtime` is injected for logging and lifecycle management
-- `api.registerChannel()` registers the Octo channel plugin
-- `api.registerCommand()` registers 7 `/octo_*` slash commands (each with a deprecated `/dmwork_*` alias)
-- Configuration is read from `channels.octo` in OpenClaw's config
-
-The plugin uses the `ChannelPlugin` SDK interface with support for:
-- Direct messages and group chats
-- Multi-account configuration via `channels.octo.accounts`
-- Config hot-reload on `channels.octo` prefix changes
+- `api.registerChannel(octoPlugin)` registers the Octo channel runtime
+- The bundled `setupEntry` exposes `defineBundledChannelSetupEntry(...)` so
+  `openclaw channels add` works without first enabling the plugin
+- `setupWizard` + `setup` adapters on `octoPlugin` cover both interactive and
+  CLI-flag setup paths
+- Configuration is read from `channels.octo` in OpenClaw's config; the plugin
+  hot-reloads when that block changes
 
 ## Disconnect
 
-To disconnect the bot, send `/disconnect` to BotFather in Octo. This invalidates the current IM token and kicks the WebSocket connection.
+To disconnect a bot, send `/disconnect` to BotFather in Octo. This invalidates
+the IM token and kicks the WebSocket connection.

@@ -2,10 +2,10 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import type { ChannelLogSink } from "openclaw/plugin-sdk/channel-contract";
 import { DEFAULT_GROUP_HISTORY_LIMIT } from "openclaw/plugin-sdk/reply-history";
 import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson, sendMediaMessage, inferContentType, ensureTextCharset, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS, fetchUserInfo } from "./api-fetch.js";
-import type { ResolvedDmworkAccount } from "./accounts.js";
+import type { ResolvedOctoAccount } from "./accounts.js";
 import type { BotMessage } from "./types.js";
 import { ChannelType, MessageType } from "./types.js";
-import { getDmworkRuntime } from "./runtime.js";
+import { getOctoRuntime } from "./runtime.js";
 import { DEFAULT_HISTORY_PROMPT_TEMPLATE } from "./config-schema.js";
 import { CHANNEL_ID } from "./constants.js";
 import {
@@ -30,7 +30,7 @@ import { randomUUID } from "node:crypto";
 // handleInboundMessage writes here; the hook reads and clears per sessionKey.
 export const pendingInboundContext = new Map<string, { historyPrefix: string; memberListPrefix: string }>();
 
-export type DmworkStatusSink = (patch: {
+export type OctoStatusSink = (patch: {
   lastInboundAt?: number;
   lastOutboundAt?: number;
   lastError?: string | null;
@@ -950,7 +950,7 @@ export function resolveCommandAuthorized(isGroup: boolean, isOwnerUser: boolean,
 }
 
 export async function handleInboundMessage(params: {
-  account: ResolvedDmworkAccount;
+  account: ResolvedOctoAccount;
   message: BotMessage;
   botUid: string;
   groupHistories: Map<string, any[]>;
@@ -959,7 +959,7 @@ export async function handleInboundMessage(params: {
   groupCacheTimestamps: Map<string, number>;  // groupId -> lastFetchedAt
   groupMdCache?: Map<string, { content: string; version: number }>;
   log?: ChannelLogSink;
-  statusSink?: DmworkStatusSink;
+  statusSink?: OctoStatusSink;
 }) {
   const { account, message, botUid, groupHistories, memberMap, uidToNameMap, groupCacheTimestamps, groupMdCache, log, statusSink } = params;
 
@@ -1029,7 +1029,7 @@ export async function handleInboundMessage(params: {
     // Resolve agentId from route/account (same pattern as group events below)
     let threadAgentId = "";
     try {
-      const _core = getDmworkRuntime();
+      const _core = getOctoRuntime();
       const _cfg = _core.config.loadConfig() as OpenClawConfig;
       const _route = _core.channel.routing.resolveAgentRoute({
         cfg: _cfg, channel: CHANNEL_ID, accountId: account.accountId,
@@ -1064,7 +1064,7 @@ export async function handleInboundMessage(params: {
     const parentGroupNo = extractParentGroupNo(message.channel_id);
     // Resolve agentId for the group→account mapping
     try {
-      const _core = getDmworkRuntime();
+      const _core = getOctoRuntime();
       const _cfg = _core.config.loadConfig() as OpenClawConfig;
       const _route = _core.channel.routing.resolveAgentRoute({
         cfg: _cfg, channel: CHANNEL_ID, accountId: account.accountId,
@@ -1347,7 +1347,7 @@ export async function handleInboundMessage(params: {
     log?.info?.(`octo: [MENTION] 历史滑动窗口 | session=${sessionId} | 队列保留`);
   }
 
-  const core = getDmworkRuntime();
+  const core = getOctoRuntime();
   if (!core?.channel?.reply?.dispatchReplyWithBufferedBlockDispatcher) {
     log?.error?.(`octo: OpenClaw runtime missing required functions. Available: config=${!!core?.config}, channel=${!!core?.channel}, reply=${!!core?.channel?.reply}, routing=${!!core?.channel?.routing}, session=${!!core?.channel?.session}`);
     log?.error?.(`octo: reply methods: ${core?.channel?.reply ? Object.keys(core.channel.reply).join(",") : "N/A"}`);

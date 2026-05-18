@@ -1120,7 +1120,7 @@ describe("pendingInboundContext", () => {
   });
 
   it("should store and retrieve context by sessionKey", () => {
-    const key = "dmwork:group:test123";
+    const key = "octo:group:test123";
     pendingInboundContext.set(key, {
       historyPrefix: "history...",
       memberListPrefix: "members...",
@@ -1132,7 +1132,7 @@ describe("pendingInboundContext", () => {
   });
 
   it("should allow delete after read (consume-once pattern)", () => {
-    const key = "dmwork:group:consume";
+    const key = "octo:group:consume";
     pendingInboundContext.set(key, {
       historyPrefix: "h",
       memberListPrefix: "m",
@@ -1151,7 +1151,7 @@ describe("pendingInboundContext", () => {
   });
 
   it("should overwrite on repeated set for same key", () => {
-    const key = "dmwork:group:overwrite";
+    const key = "octo:group:overwrite";
     pendingInboundContext.set(key, { historyPrefix: "old", memberListPrefix: "" });
     pendingInboundContext.set(key, { historyPrefix: "new", memberListPrefix: "ml" });
     expect(pendingInboundContext.get(key)?.historyPrefix).toBe("new");
