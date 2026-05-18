@@ -266,11 +266,11 @@ const meta = {
 //
 // Without these, OpenClaw reports "octo does not have an interactive setup
 // screen yet" for the wizard path, and "Channel does not support
-// non-interactive add" for the --bot-token/--base-url CLI flag path.
+// non-interactive add" for the --bot-token/--http-url CLI flag path.
 //
 // We follow feishu's "credentials: [] + collect everything in finalize"
 // pattern — simpler than writing per-credential descriptors with inspect/
-// applySet hooks, and lets us match the existing /octo_add_account UX.
+// applySet hooks, and lets us match the OpenClaw `channels add --channel octo` UX.
 // ---------------------------------------------------------------------------
 
 const ACCOUNT_ID_RE = /^[A-Za-z0-9_]+$/;
@@ -331,7 +331,7 @@ const octoSetupWizard = {
       ?? DEFAULT_ACCOUNT_ID;
     // Same validation as the non-interactive setupAdapter: bail before
     // finalize writes an unreachable cfg.channels.octo.accounts[<bad-id>]
-    // key that /octo_remove_account cannot later manage.
+    // key that `openclaw channels remove` cannot later target.
     if (!ACCOUNT_ID_RE.test(resolved)) {
       throw new Error(`Invalid account ID "${resolved}". Only letters, digits, and underscores allowed.`);
     }

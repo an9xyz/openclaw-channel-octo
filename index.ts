@@ -5,7 +5,7 @@
  * Connects via WebSocket for real-time messaging.
  *
  * Configuration is done exclusively via OpenClaw's standard channel setup:
- *   openclaw channels add --channel octo --bot-token bf_... --base-url ...
+ *   openclaw channels add --channel octo --bot-token bf_... --http-url ...
  *
  * Or interactively:
  *   openclaw channels add --channel octo

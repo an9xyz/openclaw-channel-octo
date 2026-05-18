@@ -35,7 +35,7 @@ All notable changes to this project will be documented in this file.
 ## [1.0.1] - 2026-05-16
 
 ### Removed
-- 删除 npm CLI entry —— OpenClaw 已有 `plugins install` 等标准命令覆盖
+- 删除 npm CLI entry 与 4 条 plugin self-management slash commands（`/octo_install`, `/octo_update`, `/octo_uninstall`, `/octo_doctor`）—— OpenClaw 已有 `plugins install` / `channels add` 等标准命令覆盖
 
 ### Changed
 - 修正 npm artifact 与 ClawHub 元数据一致性问题；移除过期的 npm-only update check；清理 stale skill 文档（codex review round 2 反馈）
