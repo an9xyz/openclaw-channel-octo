@@ -1,12 +1,14 @@
 name: Publish ClawHub
 
-# Triggered on tag push (v1.0.8, v2.0.0-rc.1) or manual workflow_dispatch (dry-run only).
+# Triggered on tag push (v1.0.8, v2.0.0-rc.1) or manual workflow_dispatch.
+# workflow_dispatch is dry-run ONLY (forced server-side) — real publish requires a tag push from main.
 #
 # Auth: GitHub Actions OIDC trusted publishing (no secrets).
 #   See: https://clawhub.ai → octo → Trusted publisher (configured for this repo+workflow+environment)
 #
 # Sequence:
-#   1. verify  — checkout, install, type-check, test, build, version sanity, changelog presence, npm pack
+#   1. verify  — checkout (full history), tag-on-main check, version sanity, CHANGELOG presence,
+#                release-not-exists check, install/type-check/test/build, npm pack
 #   2. publish — environment=production (required reviewer gate); OIDC publish to ClawHub + GitHub Release
 #
 # To publish a real version:
@@ -21,17 +23,12 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to publish (no leading v), e.g. 1.0.8"
+        description: "Version to dry-run (no leading v), e.g. 1.0.8 — manual dispatch is ALWAYS dry-run"
         required: true
         type: string
-      dry_run:
-        description: "Dry-run (skip ClawHub upload + GitHub Release; default true for dispatch)"
-        required: false
-        type: boolean
-        default: true
 
 permissions:
-  contents: write   # gh release create
+  contents: write   # gh release create + git fetch
   id-token: write   # ClawHub OIDC
 
 concurrency:
@@ -47,6 +44,9 @@ jobs:
       dry_run: ${{ steps.resolve.outputs.dry_run }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Need full history so we can verify the tagged commit is reachable from origin/main.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -56,9 +56,10 @@ jobs:
       - name: resolve version + dry_run
         id: resolve
         run: |
+          # workflow_dispatch is ALWAYS dry-run (real publish requires tag from main).
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             VERSION="${{ inputs.version }}"
-            DRY_RUN="${{ inputs.dry_run }}"
+            DRY_RUN="true"
           else
             VERSION="${GITHUB_REF_NAME#v}"
             DRY_RUN="false"
@@ -68,6 +69,17 @@ jobs:
             echo "dry_run=$DRY_RUN"
           } >> "$GITHUB_OUTPUT"
           echo "[verify] version=$VERSION dry_run=$DRY_RUN event=${{ github.event_name }}"
+
+      - name: assert tag commit is reachable from origin/main
+        if: github.event_name == 'push'
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Tag commit $GITHUB_SHA is NOT reachable from origin/main."
+            echo "::error::Only tags pushed from a commit already merged to main may publish."
+            exit 1
+          fi
+          echo "[verify] tag commit confirmed reachable from origin/main"
 
       - name: assert package.json version matches
         run: |
@@ -79,6 +91,17 @@ jobs:
 
       - name: assert CHANGELOG section exists
         run: ./scripts/extract-changelog.sh "${{ steps.resolve.outputs.version }}" > /dev/null
+
+      - name: assert GitHub Release does not yet exist
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            echo "::error::GitHub Release ${{ github.ref_name }} already exists. Did you re-tag without bumping version?"
+            exit 1
+          fi
+          echo "[verify] no pre-existing release for ${{ github.ref_name }}"
 
       - run: npm ci
 
@@ -134,7 +157,7 @@ jobs:
             DRY="--dry-run"
             echo "[publish] DRY RUN — no upload"
           fi
-          # Use the source ref for tag pushes; for workflow_dispatch fall back to the dispatch ref (branch).
+          # Source ref: tag for tag pushes; branch for workflow_dispatch (always dry-run anyway).
           SOURCE_REF="${{ github.ref_name }}"
           clawhub package publish \
             --family code-plugin \

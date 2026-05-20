@@ -30,9 +30,9 @@ awk -v ver="$VERSION" '
   in_section { print }
 ' "$CHANGELOG" > "$tmp"
 
-if [ ! -s "$tmp" ]; then
-  echo "extract-changelog: no section for version '$VERSION' in $CHANGELOG" >&2
-  echo "  → add a '## [$VERSION] - YYYY-MM-DD' section before tagging" >&2
+if ! grep -q '[^[:space:]]' "$tmp"; then
+  echo "extract-changelog: no non-empty section for '$VERSION' in $CHANGELOG" >&2
+  echo "  → add a '## [$VERSION] - YYYY-MM-DD' section with content before tagging" >&2
   exit 1
 fi
 
