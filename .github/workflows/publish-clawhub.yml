@@ -55,20 +55,29 @@ jobs:
 
       - name: resolve version + dry_run
         id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
+          # Read inputs/event from env (NOT ${{ ... }} interpolation) to avoid shell injection.
           # workflow_dispatch is ALWAYS dry-run (real publish requires tag from main).
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ inputs.version }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_VERSION"
             DRY_RUN="true"
           else
             VERSION="${GITHUB_REF_NAME#v}"
             DRY_RUN="false"
           fi
+          # SemVer validation (rejects anything that could embed shell metacharacters).
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid version '$VERSION'. Expected SemVer like 1.0.8 or 2.0.0-rc.1"
+            exit 1
+          fi
           {
             echo "version=$VERSION"
             echo "dry_run=$DRY_RUN"
           } >> "$GITHUB_OUTPUT"
-          echo "[verify] version=$VERSION dry_run=$DRY_RUN event=${{ github.event_name }}"
+          echo "[verify] version=$VERSION dry_run=$DRY_RUN event=$EVENT_NAME"
 
       - name: assert tag commit is reachable from origin/main
         if: github.event_name == 'push'
