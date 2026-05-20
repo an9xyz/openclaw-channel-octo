@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.8] - 2026-05-20
+
+### Changed
+- 启用 GitHub Actions 自动发版流程（PR #9 / #10）：推 `v*.*.*` tag 到 `main` 后自动跑 `verify → npm pack → clawhub package publish + GitHub Release`，不再依赖本地 `clawhub` CLI 手工 publish。
+
+### Internal
+- 相对 1.0.7 没有运行时 / plugin 代码改动；本版本主要用于验证自动发版链路。
+
 ## [1.0.7] - 2026-05-18
 
 ### Fixed
