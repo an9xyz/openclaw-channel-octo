@@ -65,7 +65,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
-          # Read inputs/event from env (NOT ${{ ... }} interpolation) to avoid shell injection.
+          # Read inputs/event from env (NOT GHA expression interpolation) to avoid shell injection.
           # workflow_dispatch is ALWAYS dry-run (real publish requires tag from main).
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             VERSION="$INPUT_VERSION"
