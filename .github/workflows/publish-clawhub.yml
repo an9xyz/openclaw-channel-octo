@@ -1,0 +1,204 @@
+name: Publish ClawHub
+
+# Triggered on tag push (v1.0.8, v2.0.0-rc.1) or manual workflow_dispatch.
+# workflow_dispatch is dry-run ONLY (forced server-side) — real publish requires a tag push from main.
+#
+# Auth:
+#   - clawhub CLI auto-tries GitHub Actions OIDC trusted publishing first.
+#   - If ClawHub does not yet have a trusted-publisher config for `octo` (the web
+#     UI does not yet expose this — as of 2026-05), the CLI falls back to the
+#     stored long-lived token written by `clawhub auth login --token`.
+#   - We populate that token from the `CLAWHUB_TOKEN` repo secret in the publish job.
+#   - Once a trusted publisher is configured on ClawHub, the OIDC path wins and
+#     the PAT login becomes a no-op — no workflow change needed.
+#
+# Sequence:
+#   1. verify  — checkout (full history), tag-on-main check, version sanity, CHANGELOG presence,
+#                release-not-exists check, install/type-check/test/build, npm pack
+#   2. publish — OIDC publish (or PAT fallback) to ClawHub + GitHub Release
+#
+# To publish a real version:
+#   1. Bump package.json version + add a CHANGELOG.md section for that version
+#   2. Commit + merge to main
+#   3. git tag v1.0.8 && git push origin v1.0.8
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to dry-run (no leading v), e.g. 1.0.8 — manual dispatch is ALWAYS dry-run"
+        required: true
+        type: string
+
+permissions:
+  contents: write   # gh release create + git fetch
+  id-token: write   # ClawHub OIDC
+
+concurrency:
+  group: publish-clawhub-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      dry_run: ${{ steps.resolve.outputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need full history so we can verify the tagged commit is reachable from origin/main.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: resolve version + dry_run
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          # Read inputs/event from env (NOT ${{ ... }} interpolation) to avoid shell injection.
+          # workflow_dispatch is ALWAYS dry-run (real publish requires tag from main).
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_VERSION"
+            DRY_RUN="true"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+            DRY_RUN="false"
+          fi
+          # SemVer validation (rejects anything that could embed shell metacharacters).
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid version '$VERSION'. Expected SemVer like 1.0.8 or 2.0.0-rc.1"
+            exit 1
+          fi
+          {
+            echo "version=$VERSION"
+            echo "dry_run=$DRY_RUN"
+          } >> "$GITHUB_OUTPUT"
+          echo "[verify] version=$VERSION dry_run=$DRY_RUN event=$EVENT_NAME"
+
+      - name: assert tag commit is reachable from origin/main
+        if: github.event_name == 'push'
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Tag commit $GITHUB_SHA is NOT reachable from origin/main."
+            echo "::error::Only tags pushed from a commit already merged to main may publish."
+            exit 1
+          fi
+          echo "[verify] tag commit confirmed reachable from origin/main"
+
+      - name: assert package.json version matches
+        run: |
+          PKG_VER=$(node -p "require('./package.json').version")
+          if [ "${{ steps.resolve.outputs.version }}" != "$PKG_VER" ]; then
+            echo "::error::Resolved version (${{ steps.resolve.outputs.version }}) != package.json version ($PKG_VER). Bump package.json before tagging."
+            exit 1
+          fi
+
+      - name: assert CHANGELOG section exists
+        run: ./scripts/extract-changelog.sh "${{ steps.resolve.outputs.version }}" > /dev/null
+
+      - name: assert GitHub Release does not yet exist
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            echo "::error::GitHub Release ${{ github.ref_name }} already exists. Did you re-tag without bumping version?"
+            exit 1
+          fi
+          echo "[verify] no pre-existing release for ${{ github.ref_name }}"
+
+      - run: npm ci
+
+      - run: npm run type-check
+
+      - run: npm test
+
+      - run: npm run build
+
+      - name: verify build artifacts
+        run: |
+          test -f dist/index.js || (echo "::error::dist/index.js missing" && exit 1)
+          test -f dist/setup-entry.js || (echo "::error::dist/setup-entry.js missing" && exit 1)
+
+      - run: npm pack
+
+      - name: upload tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: clawpack
+          path: octo-*.tgz
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: download tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: clawpack
+
+      - name: install clawhub CLI
+        run: npm i -g clawhub@latest
+
+      - name: clawhub auth login (PAT fallback)
+        # CLI prefers OIDC trusted publishing when available, but ClawHub web UI
+        # does not yet expose trusted-publisher configuration. Until it does, the
+        # CLI auto-falls back to a stored long-lived token. Once trusted-publisher
+        # is configured for `octo`, this step is a no-op (OIDC path is taken first).
+        env:
+          CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
+        run: clawhub auth login --no-browser --token "$CLAWHUB_TOKEN"
+
+      - name: extract changelog notes
+        run: ./scripts/extract-changelog.sh "${{ needs.verify.outputs.version }}" > /tmp/notes.md
+
+      - name: publish to ClawHub (OIDC, falls back to PAT)
+        run: |
+          set -euo pipefail
+          DRY=""
+          if [ "${{ needs.verify.outputs.dry_run }}" = "true" ]; then
+            DRY="--dry-run"
+            echo "[publish] DRY RUN — no upload"
+          fi
+          # Source ref: tag for tag pushes; branch for workflow_dispatch (always dry-run anyway).
+          SOURCE_REF="${{ github.ref_name }}"
+          clawhub package publish \
+            --family code-plugin \
+            --version "${{ needs.verify.outputs.version }}" \
+            --source-repo "${{ github.repository }}" \
+            --source-commit "${{ github.sha }}" \
+            --source-ref "$SOURCE_REF" \
+            --changelog "$(cat /tmp/notes.md)" \
+            --json \
+            $DRY \
+            octo-*.tgz
+
+      - name: create GitHub Release
+        if: github.event_name == 'push' && needs.verify.outputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --notes-file /tmp/notes.md \
+            octo-*.tgz
