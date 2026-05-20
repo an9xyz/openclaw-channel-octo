@@ -15,7 +15,7 @@ name: Publish ClawHub
 # Sequence:
 #   1. verify  — checkout (full history), tag-on-main check, version sanity, CHANGELOG presence,
 #                release-not-exists check, install/type-check/test/build, npm pack
-#   2. publish — environment=production (required reviewer gate); OIDC publish to ClawHub + GitHub Release
+#   2. publish — OIDC publish (or PAT fallback) to ClawHub + GitHub Release
 #
 # To publish a real version:
 #   1. Bump package.json version + add a CHANGELOG.md section for that version
@@ -142,10 +142,9 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: publish (production)
+    name: publish
     needs: verify
     runs-on: ubuntu-latest
-    environment: production
     steps:
       - uses: actions/checkout@v4
 
