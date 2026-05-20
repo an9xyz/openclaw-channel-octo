@@ -3,8 +3,14 @@ name: Publish ClawHub
 # Triggered on tag push (v1.0.8, v2.0.0-rc.1) or manual workflow_dispatch.
 # workflow_dispatch is dry-run ONLY (forced server-side) — real publish requires a tag push from main.
 #
-# Auth: GitHub Actions OIDC trusted publishing (no secrets).
-#   See: https://clawhub.ai → octo → Trusted publisher (configured for this repo+workflow+environment)
+# Auth:
+#   - clawhub CLI auto-tries GitHub Actions OIDC trusted publishing first.
+#   - If ClawHub does not yet have a trusted-publisher config for `octo` (the web
+#     UI does not yet expose this — as of 2026-05), the CLI falls back to the
+#     stored long-lived token written by `clawhub auth login --token`.
+#   - We populate that token from the `CLAWHUB_TOKEN` repo secret in the publish job.
+#   - Once a trusted publisher is configured on ClawHub, the OIDC path wins and
+#     the PAT login becomes a no-op — no workflow change needed.
 #
 # Sequence:
 #   1. verify  — checkout (full history), tag-on-main check, version sanity, CHANGELOG presence,
@@ -155,10 +161,19 @@ jobs:
       - name: install clawhub CLI
         run: npm i -g clawhub@latest
 
+      - name: clawhub auth login (PAT fallback)
+        # CLI prefers OIDC trusted publishing when available, but ClawHub web UI
+        # does not yet expose trusted-publisher configuration. Until it does, the
+        # CLI auto-falls back to a stored long-lived token. Once trusted-publisher
+        # is configured for `octo`, this step is a no-op (OIDC path is taken first).
+        env:
+          CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
+        run: clawhub auth login --no-browser --token "$CLAWHUB_TOKEN"
+
       - name: extract changelog notes
         run: ./scripts/extract-changelog.sh "${{ needs.verify.outputs.version }}" > /tmp/notes.md
 
-      - name: publish to ClawHub (OIDC)
+      - name: publish to ClawHub (OIDC, falls back to PAT)
         run: |
           set -euo pipefail
           DRY=""
