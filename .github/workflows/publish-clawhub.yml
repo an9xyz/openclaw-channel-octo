@@ -107,16 +107,19 @@ jobs:
       - name: assert CHANGELOG section exists
         run: ./scripts/extract-changelog.sh "${{ steps.resolve.outputs.version }}" > /dev/null
 
-      - name: assert GitHub Release does not yet exist
+      - name: clean up draft release if exists (release-drafter race)
         if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
-            echo "::error::GitHub Release ${{ github.ref_name }} already exists. Did you re-tag without bumping version?"
+          if gh release view "${{ github.ref_name }}" --json isDraft --jq '.isDraft' 2>/dev/null | grep -q true; then
+            echo "[verify] deleting draft release ${{ github.ref_name }} (created by release-drafter)"
+            gh release delete "${{ github.ref_name }}" --yes
+          elif gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            echo "::error::GitHub Release ${{ github.ref_name }} already exists (not a draft). Did you re-tag without bumping version?"
             exit 1
           fi
-          echo "[verify] no pre-existing release for ${{ github.ref_name }}"
+          echo "[verify] no conflicting release for ${{ github.ref_name }}"
 
       - run: npm ci
 
