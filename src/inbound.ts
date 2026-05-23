@@ -6,7 +6,6 @@ import type { ResolvedOctoAccount } from "./accounts.js";
 import type { BotMessage } from "./types.js";
 import { ChannelType, MessageType } from "./types.js";
 import { getOctoRuntime } from "./runtime.js";
-import { DEFAULT_HISTORY_PROMPT_TEMPLATE } from "./config-schema.js";
 import { CHANNEL_ID } from "./constants.js";
 import {
   extractMentionMatches,
@@ -18,7 +17,7 @@ import {
   convertStructuredMentions,
   buildEntitiesFromFallback,
 } from "./mention-utils.js";
-import type { MentionPayload, MentionEntity } from "./types.js";
+import type { MentionPayload, MentionEntity, SendMessageResult } from "./types.js";
 import { registerGroupAccount, ensureGroupMd, handleGroupMdEvent, broadcastGroupMdUpdate, extractParentGroupNo, extractThreadShortId, ensureThreadMd, handleThreadMdEvent } from "./group-md.js";
 import { isOwner } from "./owner-registry.js";
 import { createWriteStream } from "node:fs";
@@ -29,6 +28,42 @@ import { randomUUID } from "node:crypto";
 // Pending inbound context for before_prompt_build hook injection.
 // handleInboundMessage writes here; the hook reads and clears per sessionKey.
 export const pendingInboundContext = new Map<string, { historyPrefix: string; memberListPrefix: string }>();
+
+// Per-(account, session) registry. The before_prompt_build hook receives
+// ctx.sessionKey but not ctx.accountId, so we record on every inbound message
+// (right next to pendingInboundContext.set) the fact that some accountId has
+// been seen on a given sessionKey. Persona-prompt injection (GH
+// octo-adapters#68) depends on this — without it, getPersonaPromptForSession
+// can never be called with the correct accountId from the hook.
+//
+// 🔴 Multi-account isolation (PR#69 R3, Jerry-Xin):
+// The map is keyed by the COMPOSITE `${accountId}:${sessionKey}`, NOT by
+// `sessionKey` alone. Two distinct bot accounts (e.g. a persona clone and a
+// regular bot, or two persona clones) running on the same OpenClaw node can
+// legitimately share the same `sessionKey` — OpenClaw routes per-account but
+// the resulting session keys can collide. Keying only by `sessionKey` means
+// the second account's inbound `.set` overwrites the first, and the hook
+// then attaches the wrong account's persona prompt — a cross-account
+// identity leak.
+//
+// With the composite key, both accounts get separate entries and the hook
+// resolves persona identity by iterating the registered persona accounts
+// and checking `sessionAccountMap.has(buildSessionAccountKey(candidate, ctx.sessionKey))`.
+// If exactly one persona account matches we use it; on 0 or >1 matches we
+// fail safe to "no persona injection" rather than risk attaching the wrong
+// identity.
+//
+// Lifetime: entries are kept (not deleted) so the hook works on every prompt
+// build for the session, not just the first one after an inbound message.
+// Sessions are bounded by accounts, so the map size is bounded by
+// (active accounts × active session keys per account) — no unbounded growth
+// in practice.
+export const sessionAccountMap = new Map<string, string>();
+
+/** Build the composite key used to record `(accountId, sessionKey)` pairs. */
+export function buildSessionAccountKey(accountId: string, sessionKey: string): string {
+  return `${accountId}:${sessionKey}`;
+}
 
 export type OctoStatusSink = (patch: {
   lastInboundAt?: number;
@@ -87,9 +122,10 @@ export async function uploadAndSendMedia(params: {
   botToken: string;
   channelId: string;
   channelType: ChannelType;
+  onBehalfOf?: string;
   log?: ChannelLogSink;
-}): Promise<void> {
-  const { mediaUrl, apiUrl, botToken, channelId, channelType, log } = params;
+}): Promise<SendMessageResult | undefined> {
+  const { mediaUrl, apiUrl, botToken, channelId, channelType, onBehalfOf, log } = params;
 
   const { createReadStream: fsCreateReadStream, statSync: fsStatSync, createWriteStream: fsCreateWriteStream } = await import("node:fs");
   const { basename, join: pathJoin } = await import("node:path");
@@ -183,7 +219,7 @@ export async function uploadAndSendMedia(params: {
     log?.info?.(`octo: uploaded media as ${isImage ? "image" : "file"}: ${filename}${width ? ` (${width}x${height})` : ""}`);
 
     // Send via sendMessage
-    await sendMediaMessage({
+    const result = await sendMediaMessage({
       apiUrl,
       botToken,
       channelId,
@@ -194,7 +230,9 @@ export async function uploadAndSendMedia(params: {
       size: fileSize,
       width,
       height,
+      ...(onBehalfOf ? { onBehalfOf } : {}),
     });
+    return result;
   } finally {
     if (tempPath) await fsUnlink(tempPath).catch(() => {});
   }
@@ -916,6 +954,32 @@ async function refreshGroupMemberCache(opts: {
   }
 }
 
+/**
+ * Build the group-path persona-clone GroupSystemPrompt (GH octo-adapters#64).
+ *
+ * When the persona-clone bot AND its grantor are both members of the same
+ * group, the inbound message arrives as a normal group event (not OBO v2).
+ * If someone @-mentions the grantor (or @所有人 / legacy @everyone), the
+ * adapter routes the reply as the grantor — but the LLM agent sees the raw
+ * `@grantor` text and concludes the message is not addressed to it,
+ * returning NO_REPLY. This hint tells the agent it is the grantor's
+ * persona clone and should respond as the grantor.
+ *
+ * Locally synthesized — no payload trust required because all inputs come
+ * from server-trusted state (`account.config.onBehalfOf` and the resolved
+ * `uidToNameMap`).
+ */
+export function buildPersonaGroupSystemPrompt(
+  grantorUid: string,
+  uidToNameMap: Map<string, string>,
+): string {
+  const grantorName = uidToNameMap.get(grantorUid) || grantorUid;
+  return (
+    `你是${grantorName}的AI分身（persona clone）。当群里有人@${grantorName}` +
+    `或@所有人时，就是在叫你，你应当以${grantorName}的身份回复，不要返回 NO_REPLY。`
+  );
+}
+
 export function buildMemberListPrefix(uidToNameMap: Map<string, string>): string {
   if (uidToNameMap.size === 0) return "";
 
@@ -949,11 +1013,31 @@ export function resolveCommandAuthorized(isGroup: boolean, isOwnerUser: boolean,
   return !isGroup || (isOwnerUser && isExplicitBotMention);
 }
 
+export function segmentHistoryEntries(params: {
+  entries: Array<{ message_id?: string; message_seq?: number; [key: string]: any }>;
+  cutoffSeq: number;
+  currentMsgId?: string;
+}): { answered: typeof params.entries; new: typeof params.entries } {
+  const filtered = params.currentMsgId
+    ? params.entries.filter(e => e.message_id !== params.currentMsgId)
+    : params.entries;
+
+  if (params.cutoffSeq <= 0) {
+    return { answered: [], new: filtered };
+  }
+
+  return {
+    answered: filtered.filter(e => (e.message_seq ?? 0) <= params.cutoffSeq),
+    new: filtered.filter(e => (e.message_seq ?? 0) > params.cutoffSeq),
+  };
+}
+
 export async function handleInboundMessage(params: {
   account: ResolvedOctoAccount;
   message: BotMessage;
   botUid: string;
   groupHistories: Map<string, any[]>;
+  lastBotReplySeqMap: Map<string, number>;
   memberMap: Map<string, string>;  // displayName -> uid mapping
   uidToNameMap: Map<string, string>;  // uid -> displayName mapping (reverse)
   groupCacheTimestamps: Map<string, number>;  // groupId -> lastFetchedAt
@@ -961,7 +1045,7 @@ export async function handleInboundMessage(params: {
   log?: ChannelLogSink;
   statusSink?: OctoStatusSink;
 }) {
-  const { account, message, botUid, groupHistories, memberMap, uidToNameMap, groupCacheTimestamps, groupMdCache, log, statusSink } = params;
+  const { account, message, botUid, groupHistories, lastBotReplySeqMap, memberMap, uidToNameMap, groupCacheTimestamps, groupMdCache, log, statusSink } = params;
 
   // Detect GROUP.md update/delete notification — refresh both memory + disk cache, do NOT pass to LLM
   const earlyEventType = (message.payload as any)?.event?.type;
@@ -1200,12 +1284,51 @@ export async function handleInboundMessage(params: {
   // Compute mention flags — separate "reply gating" from "command gating"
   let isMentioned = false;
   let isExplicitBotMention = false;
+  let triggeredByMentionHumans = false;
   if (isGroup) {
     const mentionUids = extractMentionUids(message.payload?.mention);
     const mentionAllRaw = message.payload?.mention?.all;
     const mentionAll: boolean = mentionAllRaw === true || mentionAllRaw === 1;
-    isMentioned = (!account.config.ignoreMentionAll && mentionAll) || mentionUids.includes(botUid);
+    // mention.ais=1 means @AI / @所有AI — bots should respond
+    const mentionAisRaw = message.payload?.mention?.ais;
+    const mentionAis: boolean = mentionAisRaw === true || mentionAisRaw === 1;
+    // mention.humans=1 means @所有人 (Plan X) — only persona-clone bots respond,
+    // because they act on behalf of a human who IS part of @所有人.
+    // Regular bots without onBehalfOf stay silent.
+    const mentionHumansRaw = message.payload?.mention?.humans;
+    const mentionHumans: boolean = mentionHumansRaw === true || mentionHumansRaw === 1;
+    const isPersonaClone = Boolean(account.config.onBehalfOf);
+    const grantorUid = account.config.onBehalfOf;
+    // Persona clone: when the GRANTOR is @mentioned, treat it as a mention
+    // for the bot too (the bot acts on the grantor's behalf).
+    const grantorMentioned: boolean = !!(isPersonaClone && grantorUid && mentionUids.includes(grantorUid));
+    // Broadcast suppression (PR#61 R9 / YUJ-1662):
+    // When `ignoreMentionAll=true`, a legacy `@everyone` payload arrives as `{all:1, ais:1}`
+    // (server rewrites @所有人 to include ais=1 so AIs are also covered). Treating that as a
+    // pure AI mention would let `mentionAis` bypass `ignoreMentionAll`, which is wrong:
+    // the user's intent is "no broadcast → bot stays silent". So when broadcast flags
+    // (`all` or `humans`) are present, the whole payload is treated as broadcast and
+    // suppressed by `ignoreMentionAll`. Pure `{ais:1}` (no `all`, no `humans`) is still
+    // a deliberate AI-only mention and continues to trigger the bot.
+    // Explicit bot UID and grantor mention always work regardless of `ignoreMentionAll`.
+    const isBroadcast = mentionAll || mentionHumans;
+    const suppressedByIgnore = account.config.ignoreMentionAll && isBroadcast;
+    isMentioned = (!suppressedByIgnore && (mentionAll || mentionAis || (mentionHumans && isPersonaClone)))
+      || mentionUids.includes(botUid)
+      || grantorMentioned;
     isExplicitBotMention = mentionUids.includes(botUid);
+    // Track whether the bot was triggered as the grantor's proxy.
+    // When true, persona clone replies as the grantor (admin), not as itself.
+    // Covers: @admin (grantor uid mentioned), @所有人 (mention.humans=1),
+    // legacy @所有人 (mention.all=1). @所有AI (ais=1 only) and direct @james
+    // mentions should still respond as the bot itself.
+    const isHumanBroadcast = (!account.config.ignoreMentionAll && mentionHumans) || (!account.config.ignoreMentionAll && mentionAll);
+    triggeredByMentionHumans = !!(isHumanBroadcast || grantorMentioned) && isPersonaClone && !isExplicitBotMention;
+
+    // Debug: log mention flags for troubleshooting persona clone routing
+    if (isPersonaClone) {
+      log?.debug?.(`octo: [MENTION-DEBUG] mentionAll=${mentionAll} mentionAis=${mentionAis} mentionHumans=${mentionHumans} isExplicitBot=${isExplicitBotMention} isHumanBroadcast=${isHumanBroadcast} triggeredAsGrantor=${triggeredByMentionHumans} isMentioned=${isMentioned}`);
+    }
 
     // Defensive fallback: if payload.mention is missing/empty but the message
     // text contains @botName, treat it as a mention.  This covers old senders
@@ -1246,6 +1369,8 @@ export async function handleInboundMessage(params: {
         mediaUrl: inboundMediaUrl,
         msgType: message.payload?.type,
         timestamp: message.timestamp ? message.timestamp * 1000 : Date.now(),
+        message_id: message.message_id,
+        message_seq: message.message_seq,
       });
       const historyLimit = account.config.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT;
       while (entries.length > historyLimit) {
@@ -1283,8 +1408,30 @@ export async function handleInboundMessage(params: {
           limit: fetchLimit,
           log,
         });
+
+        // Cold-start: derive initial cutoff from bot replies in API backfill
+        if ((lastBotReplySeqMap.get(sessionId) ?? 0) === 0 && apiMessages.length > 0) {
+          let inferredCutoff = 0;
+          for (const m of apiMessages) {
+            if (
+              m.from_uid === botUid &&
+              typeof m.message_seq === "number" &&
+              m.message_seq > inferredCutoff
+            ) {
+              inferredCutoff = m.message_seq;
+            }
+          }
+          if (inferredCutoff > 0) {
+            lastBotReplySeqMap.set(sessionId, inferredCutoff);
+            log?.info?.(
+              `octo: [MENTION] derived initial lastBotReplySeq=${inferredCutoff} from API backfill | session=${sessionId}`,
+            );
+          }
+        }
+
         const filteredApiMsgs = apiMessages
           .filter((m: any) => m.from_uid !== botUid && (m.content || m.type !== 1))
+          .sort((a: any, b: any) => (a.message_seq ?? 0) - (b.message_seq ?? 0))
           .slice(-historyLimit);
         entries = filteredApiMsgs.map((m: any) => {
           let body = m.content || resolveApiMessagePlaceholder(m.type, m.name);
@@ -1298,6 +1445,8 @@ export async function handleInboundMessage(params: {
             mention: m.payload?.mention,
             msgType: m.type,
             timestamp: m.timestamp,
+            message_id: m.message_id,
+            message_seq: m.message_seq,
           };
           // For media message types, resolve the URL directly (storage is public-read)
           const mediaTypes = [MessageType.Image, MessageType.File, MessageType.Voice, MessageType.Video];
@@ -1320,12 +1469,19 @@ export async function handleInboundMessage(params: {
     // History media URLs are kept in the text body only — not passed as MediaUrls
     // to Core (they are remote URLs; only local paths should go through MediaUrls)
     if (entries.length > 0) {
-      const messagesJson = JSON.stringify(entries.map((e: any) => {
-        // Convert @name → @[uid:name] for LLM context
+      const cutoffSeq = lastBotReplySeqMap.get(sessionId) ?? 0;
+      const currentMsgId = message.message_id;
+
+      const { answered: answeredEntries, new: newEntries } = segmentHistoryEntries({
+        entries,
+        cutoffSeq,
+        currentMsgId,
+      });
+
+      const formatEntries = (items: any[]) => JSON.stringify(items.map((e: any) => {
         const bodyForLLM = e.mention
           ? convertContentForLLM(e.body, e.mention, memberMap)
           : e.body;
-        // sender format: displayName(uid)
         const senderLabel = buildSenderPrefix(e.sender, uidToNameMap);
         return {
           sender: senderLabel,
@@ -1333,18 +1489,58 @@ export async function handleInboundMessage(params: {
           ...(e.mediaUrl ? { mediaUrl: e.mediaUrl } : {}),
         };
       }), null, 2);
-      const template = account.config.historyPromptTemplate || DEFAULT_HISTORY_PROMPT_TEMPLATE;
-      historyPrefix = template
-        .replace("{messages}", messagesJson)
-        .replace("{count}", String(entries.length));
-      log?.info?.(`octo: [MENTION] 已注入历史上下文 | ${historyPrefix.length} chars | ${entries.length}条消息`);
+
+      const ANSWERED_HEADER = "[Previous context - already answered, do NOT re-answer]";
+      const NEW_HEADER = "[Chat messages since your last reply - for context only, do NOT re-answer questions from this history]";
+      const CURRENT_HEADER = "[Current message - respond to this ONLY]";
+
+      let historyBlock = "";
+
+      if (answeredEntries.length > 0) {
+        historyBlock += `${ANSWERED_HEADER}\n\`\`\`json\n${formatEntries(answeredEntries)}\n\`\`\`\n\n`;
+      }
+      if (newEntries.length > 0) {
+        historyBlock += `${NEW_HEADER}\n\`\`\`json\n${formatEntries(newEntries)}\n\`\`\`\n\n`;
+      }
+
+      if (historyBlock) {
+        const template = account.config.historyPromptTemplate;
+        if (template) {
+          const hasSegmentedPlaceholders =
+            template.includes("{answered_messages}") ||
+            template.includes("{new_messages}");
+
+          if (hasSegmentedPlaceholders) {
+            historyPrefix = template
+              .replace("{answered_messages}", formatEntries(answeredEntries))
+              .replace("{new_messages}", formatEntries(newEntries))
+              .replace("{answered_count}", String(answeredEntries.length))
+              .replace("{new_count}", String(newEntries.length))
+              .replace("{messages}", formatEntries([...answeredEntries, ...newEntries]))
+              .replace("{count}", String(answeredEntries.length + newEntries.length));
+          } else {
+            const filteredEntries = entries.filter((e: any) => e.message_id !== currentMsgId);
+            const allFormatted = formatEntries(filteredEntries);
+            const legacyPreamble = answeredEntries.length > 0
+              ? `[Note: The first ${answeredEntries.length} message(s) below have already been answered. Do NOT re-answer them.]\n`
+              : "";
+            historyPrefix = legacyPreamble + template
+              .replace("{messages}", allFormatted)
+              .replace("{count}", String(filteredEntries.length));
+          }
+        } else {
+          historyPrefix = historyBlock + `${CURRENT_HEADER}\n\n`;
+        }
+        log?.info?.(`octo: [MENTION] 已注入历史上下文 | ${historyPrefix.length} chars | answered=${answeredEntries.length} new=${newEntries.length}`);
+      } else {
+        log?.info?.(`octo: [MENTION] 历史条目全部被过滤 | answered=${answeredEntries.length} new=${newEntries.length}`);
+      }
     } else {
       log?.info?.(`octo: [MENTION] 无历史上下文可注入`);
     }
 
-    // Sliding window: keep history, don't clear
-    // (entries stay in queue, limited by historyLimit in the caching logic)
-    log?.info?.(`octo: [MENTION] 历史滑动窗口 | session=${sessionId} | 队列保留`);
+    // History retained for context continuity; segmented by lastBotReplySeq at prompt build time
+    log?.info?.(`octo: [MENTION] 历史保留（按 message_seq 分段标注） | session=${sessionId}`);
   }
 
   const core = getOctoRuntime();
@@ -1425,6 +1621,13 @@ export async function handleInboundMessage(params: {
     pendingInboundContext.set(route.sessionKey, { historyPrefix, memberListPrefix });
   }
 
+  // Record (accountId, sessionKey) so the before_prompt_build hook can
+  // resolve persona identity from ctx.sessionKey (hook ctx does not expose
+  // accountId). The composite key is required for multi-account isolation —
+  // see the doc comment on sessionAccountMap above.
+  // Required by persona-prompt injection (GH octo-adapters#68).
+  sessionAccountMap.set(buildSessionAccountKey(account.accountId, route.sessionKey), account.accountId);
+
   const finalBody = quotePrefix ? (quotePrefix + rawBody) : rawBody;
 
   const body = core.channel.reply.formatAgentEnvelope({
@@ -1465,6 +1668,118 @@ export async function handleInboundMessage(params: {
   const commandBody = resolveCommandBody(rawBody, isGroup, isExplicitBotMention);
   const commandAuthorized = resolveCommandAuthorized(isGroup, isOwner(account.accountId, message.from_uid), isExplicitBotMention);
 
+  // OBO v2 detection + relevance filter (R10): Must run BEFORE
+  // finalizeInboundContext / recordInboundSession so that irrelevant
+  // OBO v2 messages (e.g. AI-only fan-out) do not leak any state —
+  // including `obo_system_hint` as GroupSystemPrompt — into the bot's
+  // DM session with the grantor. Mirrors the group-path early-return at
+  // ~L1300 (non-mention group messages return before session is recorded).
+  const oboV2OriginChannel = message.payload?.obo_origin_channel_id;
+  const oboV2OriginChannelType = message.payload?.obo_origin_channel_type;
+  const oboV2RespondAs = message.payload?.obo_respond_as ?? message.payload?.obo_grantor_uid;
+  const grantorUid = account.config.onBehalfOf;
+  const isOBOv2 = Boolean(
+    typeof oboV2OriginChannel === "string" &&
+    oboV2OriginChannel.length > 0 &&
+    typeof oboV2RespondAs === "string" &&
+    oboV2RespondAs.length > 0 &&
+    // Security: only trust OBO v2 fields when the message is sent by the
+    // configured grantor. Without this, any user able to put obo_* fields in
+    // their payload could trick the bot into replying in another channel as
+    // somebody else's persona.
+    grantorUid && message.from_uid === grantorUid
+  );
+
+  if (!isOBOv2 && typeof oboV2OriginChannel === "string" && oboV2OriginChannel.length > 0) {
+    log?.warn?.(`octo: OBO v2 payload rejected — from_uid=${message.from_uid} is not configured grantor ${grantorUid ?? "(none)"}`);
+  }
+
+  // OBO v2 relevance filter: when the fan-out message is @AI-only (mention.ais=1
+  // but no grantor mention, no @所有人), the persona clone should NOT respond.
+  // @AI targets AI bots directly, not humans or their persona clones.
+  //
+  // Mirrors the group-path semantics (see ~L1223/L1230): when
+  // `account.config.ignoreMentionAll=true`, broadcast-style mentions
+  // (`mention.humans=1`, `mention.all=1`) must NOT be treated as relevant for
+  // the persona clone. Explicit grantor UID mentions remain relevant
+  // regardless of `ignoreMentionAll`, because they target the grantor
+  // identity directly rather than the broadcast group.
+  //
+  // CRITICAL (R10): this filter MUST run before finalizeInboundContext /
+  // recordInboundSession — otherwise an irrelevant OBO v2 message would
+  // already have been persisted to the bot's DM session with the grantor,
+  // including any `obo_system_hint` as GroupSystemPrompt.
+  if (isOBOv2) {
+    const origMention = message.payload?.mention;
+    const origAis = origMention?.ais === true || origMention?.ais === 1;
+    const origHumans = origMention?.humans === true || origMention?.humans === 1;
+    const origAll = origMention?.all === true || origMention?.all === 1;
+    const origUids: string[] = Array.isArray(origMention?.uids) ? origMention.uids : [];
+    // Use the trusted configured grantor (account.config.onBehalfOf) for the
+    // explicit-mention relevance check, mirroring the group path. This is
+    // also what `effectiveOnBehalfOf` resolves to below; `oboV2RespondAs`
+    // from the payload is for diagnostic logging only.
+    const grantorInUids = typeof grantorUid === "string" && grantorUid.length > 0
+      && origUids.includes(grantorUid);
+    const ignoreBroadcast = account.config.ignoreMentionAll === true;
+    const broadcastRelevant = (!ignoreBroadcast) && (origHumans || origAll);
+    // No-mention fallback: when the payload carries no mention information at
+    // all (no ais, no humans, no all, no uids), treat the message as relevant
+    // (plain group/DM chatter the persona should see). Tightened to exclude
+    // broadcasts so that an `ignoreMentionAll`-gated humans/all does not
+    // re-enable relevance via this fallback.
+    const noMentionFallback = !origAis && !origHumans && !origAll && origUids.length === 0;
+    const isRelevantToPersona = broadcastRelevant || grantorInUids || noMentionFallback;
+    if (!isRelevantToPersona) {
+      log?.info?.(`octo: OBO v2 skipped — message not relevant to persona (ais=${origAis} humans=${origHumans} all=${origAll} grantorInUids=${grantorInUids} ignoreMentionAll=${ignoreBroadcast})`);
+      // Mirror group-path early-return: do NOT call finalizeInboundContext /
+      // recordInboundSession, so no DM session record (and no GroupSystemPrompt)
+      // is persisted for irrelevant OBO v2 fan-out messages.
+      return;
+    }
+  }
+
+  // Compute GroupSystemPrompt for two distinct persona-clone scenarios:
+  //
+  //   1. OBO v2 DM-relay path: bot is friends with the grantor only; the
+  //      grantor sends a relay message carrying `obo_system_hint` so the
+  //      LLM knows it is acting as the grantor's persona in the origin
+  //      group. The hint must come from the configured grantor (security).
+  //
+  //   2. Group path (GH octo-adapters#64): grantor and persona clone bot
+  //      are both members of the group, so the message arrives as a normal
+  //      group event (not OBO v2). When `triggeredByMentionHumans` is true
+  //      (i.e. @grantor / @所有人 / legacy @everyone), the bot replies as
+  //      the grantor — but without a system hint the LLM sees `@grantor`
+  //      and concludes "not addressed to me" → NO_REPLY. Inject a locally
+  //      synthesized hint so the LLM understands it is the grantor's
+  //      persona clone and should respond.
+  //
+  // OBO v2 takes precedence: if the message carries a valid OBO v2
+  // envelope from the grantor, we use the payload-supplied hint as-is.
+  let groupSystemPrompt: string | undefined;
+  const oboHintTrusted =
+    typeof message.payload?.obo_system_hint === "string" && message.payload.obo_system_hint.length > 0 &&
+    typeof message.payload?.obo_origin_channel_id === "string" && message.payload.obo_origin_channel_id.length > 0 &&
+    typeof (message.payload?.obo_respond_as ?? message.payload?.obo_grantor_uid) === "string" &&
+    // Security: only trust system hint from the configured grantor. Without
+    // this sender gate, a forged message from any uid could inject arbitrary
+    // system-level instructions into the LLM — the downstream OBO routing
+    // would be rejected, but the system prompt would already be in session.
+    Boolean(account.config.onBehalfOf) && message.from_uid === account.config.onBehalfOf;
+  if (oboHintTrusted) {
+    groupSystemPrompt = message.payload!.obo_system_hint as string;
+  } else if (isGroup && triggeredByMentionHumans && account.config.onBehalfOf) {
+    // Group path persona hint (GH octo-adapters#64). The bot was triggered
+    // because someone @-mentioned the grantor (or @所有人 / legacy @everyone)
+    // and the bot is the grantor's persona clone. Without this hint the LLM
+    // sees `@grantor` in the body, concludes the message is not for it, and
+    // returns NO_REPLY. Synthesized locally — no payload trust needed because
+    // the values come from server-trusted config (`onBehalfOf`) and the
+    // already-resolved group member map.
+    groupSystemPrompt = buildPersonaGroupSystemPrompt(account.config.onBehalfOf, uidToNameMap);
+  }
+
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: body,
     BodyForAgent: body,
@@ -1492,7 +1807,7 @@ export async function handleInboundMessage(params: {
     MessageSid: String(message.message_id),
     Timestamp: message.timestamp ? message.timestamp * 1000 : undefined,
     GroupSubject: isGroup ? message.channel_id : undefined,
-    GroupSystemPrompt: undefined,
+    GroupSystemPrompt: groupSystemPrompt,
     Provider: CHANNEL_ID,
     Surface: CHANNEL_ID,
     OriginatingChannel: CHANNEL_ID,
@@ -1510,25 +1825,82 @@ export async function handleInboundMessage(params: {
 
   statusSink?.({ lastInboundAt: Date.now(), lastError: null });
 
-  const replyChannelId = isGroup ? message.channel_id! : message.from_uid;
-  const replyChannelType = isGroup ? (message.channel_type ?? ChannelType.Group) : ChannelType.DM;
+  // OBO v2: when the payload carries `obo_origin_channel_id`, the reply should
+  // go to the origin GROUP channel (not the DM), with `on_behalf_of` set to
+  // `obo_respond_as` (the grantor). This way the bot replies in the group as
+  // the grantor, not in DM.
+  //
+  // Detection (`isOBOv2`) and the relevance filter that gates an early-return
+  // have already run BEFORE finalizeInboundContext / recordInboundSession
+  // (see R10 fix above) so that irrelevant OBO v2 fan-out messages do not
+  // leak `obo_system_hint` (as GroupSystemPrompt) into the bot's DM session.
+  // The reply-routing variables below (`replyChannelId`, `replyChannelType`,
+  // `effectiveOnBehalfOf`) are derived here using the previously-computed
+  // `isOBOv2`, `oboV2OriginChannel`, `oboV2OriginChannelType`, and
+  // `oboV2RespondAs`.
 
-  // 已读回执 + 正在输入 — fire-and-forget
-  log?.info?.(`octo: sending readReceipt+typing to channel=${replyChannelId} type=${replyChannelType} apiUrl=${account.config.apiUrl}`);
-  const messageIds = message.message_id ? [message.message_id] : [];
-  sendReadReceipt({ apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", channelId: replyChannelId, channelType: replyChannelType, messageIds })
-    .then(() => log?.info?.("octo: readReceipt sent OK"))
-    .catch((err) => log?.error?.(`octo: readReceipt failed: ${String(err)}`));
-  sendTyping({ apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", channelId: replyChannelId, channelType: replyChannelType })
-    .then(() => log?.info?.("octo: typing sent OK"))
-    .catch((err) => log?.error?.(`octo: typing failed: ${String(err)}`));
+  let replyChannelId: string;
+  let replyChannelType: ChannelType;
+  let effectiveOnBehalfOf: string | undefined;
+
+  if (isOBOv2) {
+    const oboV2OriginFromUid = message.payload?.obo_origin_from_uid;
+    const resolvedChannelType = (typeof oboV2OriginChannelType === "number" ? oboV2OriginChannelType : ChannelType.Group) as ChannelType;
+    if (resolvedChannelType === ChannelType.DM) {
+      // DM: bot is only friends with the grantor, not the original sender.
+      // Reply to the original sender (bob) using on_behalf_of=grantor (admin).
+      // The channel is the original sender's uid — the server routes
+      // admin→bob DM via on_behalf_of, which bypasses the bot-friend gate.
+      replyChannelId = (typeof oboV2OriginFromUid === "string" && oboV2OriginFromUid.length > 0)
+        ? oboV2OriginFromUid
+        : oboV2OriginChannel as string;
+    } else {
+      // Group/Thread: reply to the origin group
+      replyChannelId = oboV2OriginChannel as string;
+    }
+    replyChannelType = resolvedChannelType;
+    // Security: always use the trusted account.config.onBehalfOf as the
+    // authoritative grantor identity. `oboV2RespondAs` comes from the payload
+    // and must not be trusted as the reply identity — it is kept only for
+    // logging/debug visibility. (`isOBOv2` above already guarantees
+    // account.config.onBehalfOf is non-empty.)
+    effectiveOnBehalfOf = account.config.onBehalfOf!;
+    if (oboV2RespondAs !== effectiveOnBehalfOf) {
+      log?.warn?.(`octo: OBO v2 payload respondAs=${oboV2RespondAs} differs from configured grantor=${effectiveOnBehalfOf} — using configured grantor`);
+    }
+    log?.info?.(`octo: OBO v2 detected — reply target=${replyChannelId} type=${replyChannelType} respondAs=${effectiveOnBehalfOf} payloadRespondAs=${oboV2RespondAs} originFrom=${oboV2OriginFromUid}`);
+  } else {
+    replyChannelId = isGroup ? message.channel_id! : message.from_uid;
+    replyChannelType = isGroup ? (message.channel_type ?? ChannelType.Group) : ChannelType.DM;
+    // Persona clone: only reply as grantor when triggered by @所有人 (mention.humans=1).
+    // When the bot is directly mentioned (@James, @AI), respond as itself.
+    effectiveOnBehalfOf = (isGroup && triggeredByMentionHumans && account.config.onBehalfOf) ? account.config.onBehalfOf : undefined;
+  }
 
   const apiUrl = account.config.apiUrl;
   const botToken = account.config.botToken ?? "";
 
+  // 已读回执 + 正在输入 — fire-and-forget
+  if (isOBOv2) {
+    // v2: send typing to origin group with grantor identity (skip readReceipt)
+    log?.info?.(`octo: OBO v2 — sending typing to origin group=${replyChannelId} as=${effectiveOnBehalfOf}`);
+    sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType, onBehalfOf: effectiveOnBehalfOf })
+      .then(() => log?.info?.("octo: OBO v2 typing sent OK"))
+      .catch((err) => log?.error?.(`octo: OBO v2 typing failed: ${String(err)}`));
+  } else {
+    log?.info?.(`octo: sending readReceipt+typing to channel=${replyChannelId} type=${replyChannelType} apiUrl=${apiUrl}`);
+    const messageIds = message.message_id ? [message.message_id] : [];
+    sendReadReceipt({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType, messageIds })
+      .then(() => log?.info?.("octo: readReceipt sent OK"))
+      .catch((err) => log?.error?.(`octo: readReceipt failed: ${String(err)}`));
+    sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType, ...(effectiveOnBehalfOf ? { onBehalfOf: effectiveOnBehalfOf } : {}) })
+      .then(() => log?.info?.(`octo: typing sent OK${effectiveOnBehalfOf ? ` (as ${effectiveOnBehalfOf})` : ""}`))
+      .catch((err) => log?.error?.(`octo: typing failed: ${String(err)}`));
+  }
+
   // Keep sending typing indicator while AI is processing
   const typingInterval = setInterval(() => {
-    sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType }).catch(() => {});
+    sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType, ...(effectiveOnBehalfOf ? { onBehalfOf: effectiveOnBehalfOf } : {}) }).catch(() => {});
   }, 5000);
 
   // Buffer text across streaming deliver calls; only send once after dispatcher finishes.
@@ -1540,7 +1912,7 @@ export async function handleInboundMessage(params: {
   const sentMediaUrls = new Set<string>();
 
   // --- Shared helper: resolve mentions and send text ---
-  const resolveAndSendText = async (content: string) => {
+  const resolveAndSendText = async (content: string): Promise<SendMessageResult | undefined> => {
     let replyMentionUids: string[] = [];
     let replyMentionEntities: MentionEntity[] = [];
     let finalContent = content;
@@ -1638,7 +2010,7 @@ export async function handleInboundMessage(params: {
     // Detect @all/@所有人 in final content
     const hasAtAll = /(?:^|(?<=\s))@(?:all|所有人)(?=\s|[^\w]|$)/i.test(finalContent);
 
-    await sendMessage({
+    const result = await sendMessage({
       apiUrl: account.config.apiUrl,
       botToken: account.config.botToken ?? "",
       channelId: replyChannelId,
@@ -1647,9 +2019,13 @@ export async function handleInboundMessage(params: {
       ...(replyMentionUids.length > 0 ? { mentionUids: replyMentionUids } : {}),
       ...(replyMentionEntities.length > 0 ? { mentionEntities: replyMentionEntities } : {}),
       mentionAll: hasAtAll || undefined,
+      ...(effectiveOnBehalfOf ? { onBehalfOf: effectiveOnBehalfOf } : {}),
     });
     statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
+    return result;
   };
+
+  let replySucceeded = false;
 
   try {
     await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
@@ -1674,12 +2050,13 @@ export async function handleInboundMessage(params: {
           for (const mediaUrl of outboundMediaUrls) {
             if (sentMediaUrls.has(mediaUrl)) continue;
             try {
-              await uploadAndSendMedia({
+              const mediaResult = await uploadAndSendMedia({
                 mediaUrl,
                 apiUrl: account.config.apiUrl,
                 botToken: account.config.botToken ?? "",
                 channelId: replyChannelId,
                 channelType: replyChannelType,
+                ...(effectiveOnBehalfOf ? { onBehalfOf: effectiveOnBehalfOf } : {}),
                 log,
               });
               sentMediaUrls.add(mediaUrl);
@@ -1690,8 +2067,9 @@ export async function handleInboundMessage(params: {
 
           // --- Text handling based on kind ---
           const content = payload.text?.trim() ?? "";
-          if (!content && outboundMediaUrls.length > 0) {
+          if (!content && sentMediaUrls.size > 0) {
             statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
+            replySucceeded = true;
             return;
           }
           if (!content) return;
@@ -1699,6 +2077,7 @@ export async function handleInboundMessage(params: {
           if (kind === "tool") {
             // Verbose tool call output: send immediately
             await resolveAndSendText(content);
+            replySucceeded = true;
             log?.info?.(`octo: [deliver] tool text sent (${content.length} chars)`);
             return;
           }
@@ -1720,6 +2099,7 @@ export async function handleInboundMessage(params: {
               channelId: replyChannelId,
               channelType: replyChannelType,
               content: "⚠️ 抱歉，处理您的消息时遇到了问题，请稍后重试。",
+              ...(effectiveOnBehalfOf ? { onBehalfOf: effectiveOnBehalfOf } : {}),
             });
           } catch (sendErr) {
             log?.error?.(`octo: failed to send error message: ${String(sendErr)}`);
@@ -1728,11 +2108,15 @@ export async function handleInboundMessage(params: {
       },
     });
   } finally {
+    // --- Debug: log dispatch outcome ---
+    log?.debug?.(`octo: [dispatch-result] replySucceeded=${replySucceeded} bufferedText=${deliverBuffer.lastText?.length ?? 0} textSent=${deliverBuffer.textSent} effectiveOBO=${effectiveOnBehalfOf ?? 'none'}`);
+
     // --- Final send: deliver buffered text if only blocks arrived (no final/tool) ---
     if (deliverBuffer.lastText && !deliverBuffer.textSent) {
       deliverBuffer.textSent = true;
       try {
         await resolveAndSendText(deliverBuffer.lastText);
+        replySucceeded = true;
         log?.info?.(`octo: [deliver-buffer] fallback text sent (${deliverBuffer.lastText.length} chars)`);
       } catch (finalSendErr) {
         log?.error?.(`octo: [deliver-buffer] final text send failed: ${String(finalSendErr)}`);
@@ -1741,5 +2125,19 @@ export async function handleInboundMessage(params: {
     clearInterval(typingInterval);
     // Safety net: clean up pending inbound context in case the hook didn't fire
     pendingInboundContext.delete(route.sessionKey);
+
+    // Record last answered inbound message_seq for history segmentation (don't clear history).
+    // We use the inbound @mention message's message_seq (from WebSocket frame) rather than
+    // sendMessage's returned message_seq, because the API always returns message_seq=0.
+    if (isGroup && replySucceeded) {
+      const seq = message.message_seq;
+      if (typeof seq === "number" && seq > 0) {
+        const existing = lastBotReplySeqMap.get(sessionId) ?? 0;
+        if (seq > existing) {
+          lastBotReplySeqMap.set(sessionId, seq);
+          log?.info?.(`octo: [HISTORY] Bot reply done, recorded lastAnsweredSeq=${seq} | session=${sessionId}`);
+        }
+      }
+    }
   }
 }

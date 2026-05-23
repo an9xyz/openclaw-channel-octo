@@ -15,6 +15,19 @@ const DEFAULT_HEADERS = {
   "Content-Type": "application/json",
 };
 
+/**
+ * Parse JSON with int64 message_id protection.
+ * Converts 16+ digit numeric message_id values to strings before JSON.parse
+ * to prevent JavaScript precision loss for IDs exceeding Number.MAX_SAFE_INTEGER.
+ */
+function parseOctoJson<T>(text: string): T {
+  const safeText = text.replace(
+    /"message_id"\s*:\s*(\d{16,})/g,
+    '"message_id":"$1"',
+  );
+  return JSON.parse(safeText) as T;
+}
+
 export async function postJson<T>(
   apiUrl: string,
   botToken: string,
@@ -41,11 +54,7 @@ export async function postJson<T>(
   const text = await response.text();
   if (!text) return undefined;
   try {
-    // Protect int64 message_id from JSON.parse precision loss.
-    // Applied globally in postJson since only "message_id" fields are matched;
-    // the regex is conservative (16+ digits) to avoid any precision edge cases.
-    const safeText = text.replace(/"message_id"\s*:\s*(\d{16,})/g, '"message_id":"$1"');
-    return JSON.parse(safeText) as T;
+    return parseOctoJson<T>(text);
   } catch {
     throw new Error(`Octo API ${path} returned invalid JSON: ${text.slice(0, 200)}`);
   }
@@ -68,8 +77,9 @@ export async function sendMediaMessage(params: {
   height?: number;
   mentionUids?: string[];
   mentionEntities?: MentionEntity[];
+  onBehalfOf?: string;
   signal?: AbortSignal;
-}): Promise<void> {
+}): Promise<SendMessageResult | undefined> {
   const payload: Record<string, unknown> = {
     type: params.type,
     url: params.url,
@@ -99,10 +109,11 @@ export async function sendMediaMessage(params: {
     }
     payload.mention = mention;
   }
-  await postJson(params.apiUrl, params.botToken, "/v1/bot/sendMessage", {
+  return await postJson<SendMessageResult>(params.apiUrl, params.botToken, "/v1/bot/sendMessage", {
     channel_id: params.channelId,
     channel_type: params.channelType,
     payload,
+    ...(params.onBehalfOf ? { on_behalf_of: params.onBehalfOf } : {}),
   }, params.signal);
 }
 
@@ -206,6 +217,7 @@ export async function sendMessage(params: {
   mentionEntities?: MentionEntity[];
   mentionAll?: boolean;
   replyMsgId?: string;
+  onBehalfOf?: string;
   signal?: AbortSignal;
 }): Promise<SendMessageResult | undefined> {
   const payload: Record<string, unknown> = {
@@ -238,6 +250,7 @@ export async function sendMessage(params: {
     channel_id: params.channelId,
     channel_type: params.channelType,
     payload,
+    ...(params.onBehalfOf ? { on_behalf_of: params.onBehalfOf } : {}),
   }, params.signal);
 }
 
@@ -246,11 +259,13 @@ export async function sendTyping(params: {
   botToken: string;
   channelId: string;
   channelType: ChannelType;
+  onBehalfOf?: string;
   signal?: AbortSignal;
 }): Promise<void> {
   await postJson(params.apiUrl, params.botToken, "/v1/bot/typing", {
     channel_id: params.channelId,
     channel_type: params.channelType,
+    ...(params.onBehalfOf ? { on_behalf_of: params.onBehalfOf } : {}),
   }, params.signal);
 }
 
@@ -625,6 +640,81 @@ export async function deleteVoiceContext(params: {
   });
 }
 
+// ---- OBO Grant API (persona clone introspection) ----
+
+/**
+ * Bot-side view of its own OBO grant — used by persona clones to fetch
+ * the active `persona_prompt` so it can be injected into the LLM system
+ * prompt via the before_prompt_build hook (GH octo-adapters#68).
+ *
+ * Returned by GET /v1/bot/obo-grant (octo-server YUJ-1762). The bot is
+ * identified by its botToken; the server resolves the grant where this
+ * bot is the grantee.
+ */
+export interface BotOboGrant {
+  /** False / absent when the bot has no active grant (regular non-persona bot). */
+  has_grant: boolean;
+  grantor_uid?: string;
+  grantor_name?: string;
+  persona_prompt?: string;
+  /** Whether the grant is currently active (mode != "paused" & not revoked). */
+  active?: boolean;
+}
+
+/**
+ * GET /v1/bot/obo-grant — fetch this bot's own OBO grant info.
+ *
+ * Returns null when:
+ *  - the bot has no grant (404)
+ *  - the server reports has_grant=false
+ *  - the response is malformed
+ *
+ * Throws on transport / 5xx errors so the caller's retry-on-next-tick
+ * cadence (see persona-prompt.ts) can decide whether to log and skip.
+ */
+export async function getBotOboGrant(params: {
+  apiUrl: string;
+  botToken: string;
+}): Promise<BotOboGrant | null> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/obo-grant`;
+  const resp = await fetch(url, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${params.botToken}` },
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  // 404 = no grant for this bot (regular bot, not a persona clone).
+  if (resp.status === 404) return null;
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(
+      `Bot API GET /v1/bot/obo-grant failed (${resp.status}): ${text || resp.statusText}`,
+    );
+  }
+  const raw = (await resp.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!raw || typeof raw !== "object") return null;
+  const hasGrant = raw.has_grant === true;
+  if (!hasGrant) return null;
+  return {
+    has_grant: true,
+    grantor_uid: typeof raw.grantor_uid === "string" ? raw.grantor_uid : undefined,
+    grantor_name: typeof raw.grantor_name === "string" ? raw.grantor_name : undefined,
+    persona_prompt: typeof raw.persona_prompt === "string" ? raw.persona_prompt : undefined,
+    active: raw.active === true,
+  };
+}
+
+/** Decoded payload from base64 message content */
+interface SyncMessagePayload {
+  type?: number;
+  content?: string;
+  url?: string;
+  name?: string;
+  mention?: {
+    all?: boolean;
+    uids?: string[];
+  };
+}
+
 /**
  * 获取频道历史消息（用于注入上下文）
  * @param params.log - Optional logger for consistent logging with OpenClaw log system
@@ -639,7 +729,7 @@ export async function getChannelMessages(params: {
   endMessageSeq?: number;
   signal?: AbortSignal;
   log?: { info?: (msg: string) => void; error?: (msg: string) => void };
-}): Promise<Array<{ from_uid: string; content: string; timestamp: number; type?: number; url?: string; name?: string }>> {
+}): Promise<Array<{ from_uid: string; content: string; timestamp: number; message_id?: string; message_seq?: number; type?: number; url?: string; name?: string; payload?: SyncMessagePayload }>> {
   try {
     const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/messages/sync`;
     const limit = params.limit ?? 20;
@@ -665,11 +755,14 @@ export async function getChannelMessages(params: {
       return [];
     }
 
-    const data = await response.json();
+    const text = await response.text();
+    const data = text
+      ? parseOctoJson<{ messages?: any[] }>(text)
+      : {};
     const messages = data.messages ?? [];
     return messages.map((m: any) => {
       // payload is base64-encoded JSON string
-      let payload: any = {};
+      let payload: SyncMessagePayload = {};
       if (m.payload) {
         try {
           const decoded = Buffer.from(m.payload, "base64").toString("utf-8");
@@ -682,6 +775,8 @@ export async function getChannelMessages(params: {
       }
       return {
         from_uid: m.from_uid ?? "unknown",
+        message_id: m.message_id ?? undefined,
+        message_seq: m.message_seq ?? undefined,
         type: payload.type ?? undefined,
         url: payload.url ?? undefined,
         name: payload.name ?? undefined,

@@ -35,6 +35,7 @@ import { createOctoManagementTools } from "./agent-tools.js";
 import { getOrCreateGroupMdCache, registerBotGroupIds, getKnownGroupIds, writeGroupMdToDisk } from "./group-md.js";
 import { registerOwnerUid } from "./owner-registry.js";
 import { preloadGroupMemberCache, getGroupMembersFromCache } from "./member-cache.js";
+import { initPersonaPromptCache, stopPersonaPromptCache } from "./persona-prompt.js";
 import path from "node:path";
 import os from "node:os";
 import { mkdir, readFile, writeFile, unlink } from "node:fs/promises";
@@ -105,6 +106,79 @@ function getOrCreateHistoryMap(accountId: string): Map<string, any[]> {
     _historyMaps.set(accountId, m);
   }
   return m;
+}
+
+// Track last answered inbound message_seq per session for history segmentation.
+// Stores the message_seq of the @mention message that triggered the bot's last reply,
+// NOT the bot's own reply message_seq (sendMessage API returns 0 for that).
+const _lastBotReplySeq = new Map<string, Map<string, number>>();
+function getOrCreateLastBotReplySeqMap(accountId: string): Map<string, number> {
+  let m = _lastBotReplySeq.get(accountId);
+  if (!m) {
+    m = new Map<string, number>();
+    _lastBotReplySeq.set(accountId, m);
+  }
+  return m;
+}
+
+const _inboundQueues = new Map<string, Promise<void>>();
+
+function getInboundQueueKey(accountId: string, msg: BotMessage): string {
+  const isGroup =
+    typeof msg.channel_id === "string" &&
+    msg.channel_id.length > 0 &&
+    (msg.channel_type === ChannelType.Group ||
+     msg.channel_type === ChannelType.CommunityTopic);
+
+  if (isGroup) {
+    return `${accountId}:group:${msg.channel_id}`;
+  }
+
+  let spaceId = "";
+  const effectiveChannelId = msg.from_uid;
+
+  // DM channel_id format: "s{spaceId}_{peerId}" or "s{spaceId}_{peerId}@{suffix}"
+  if (msg.channel_id?.startsWith("s")) {
+    const atIdx = msg.channel_id.indexOf("@");
+    const firstPart = atIdx > 0
+      ? msg.channel_id.substring(0, atIdx)
+      : msg.channel_id;
+    const lastUnderscore = firstPart.lastIndexOf("_");
+    if (lastUnderscore > 0) {
+      spaceId = firstPart.substring(1, lastUnderscore);
+    }
+  }
+
+  const sessionId = spaceId
+    ? `${spaceId}:${effectiveChannelId}`
+    : effectiveChannelId;
+  return `${accountId}:dm:${sessionId}`;
+}
+
+function enqueueInbound(
+  key: string,
+  task: () => Promise<void>,
+  log?: { error?: (msg: string) => void },
+): void {
+  const previous = _inboundQueues.get(key) ?? Promise.resolve();
+
+  const next = previous
+    .catch(() => undefined)
+    .then(task)
+    .catch((err) => {
+      log?.error?.(
+        `octo: inbound handler failed: ${
+          err instanceof Error ? err.stack ?? String(err) : String(err)
+        }`,
+      );
+    })
+    .finally(() => {
+      if (_inboundQueues.get(key) === next) {
+        _inboundQueues.delete(key);
+      }
+    });
+
+  _inboundQueues.set(key, next);
 }
 
 // Module-level member mapping: displayName -> uid
@@ -188,6 +262,7 @@ function cleanupStaleCaches(): void {
     for (const [groupId, lastAccess] of activityMap) {
       if (lastAccess < cutoff) {
         _historyMaps.get(accountId)?.delete(groupId);
+        _lastBotReplySeq.get(accountId)?.delete(groupId);
         _memberMaps.get(accountId)?.delete(groupId);
         // Note: uidToNameMap is a flat uid→name map (not keyed by groupId),
         // so we don't delete from it here — names remain valid across groups.
@@ -829,6 +904,20 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
         log,
       }).catch(() => {});
 
+      // Start persona_prompt cache refresh loop for persona-clone bots
+      // (GH octo-adapters#68). No-op for regular bots. Polls
+      // GET /v1/bot/obo-grant so persona_prompt edits propagate without
+      // requiring a fan-out copy or process restart.
+      initPersonaPromptCache(
+        {
+          accountId: account.accountId,
+          apiUrl: account.config.apiUrl,
+          botToken: account.config.botToken!,
+          onBehalfOf: account.config.onBehalfOf,
+        },
+        log,
+      );
+
       // Prefetch GROUP.md and group members for all groups (fire-and-forget)
       const groupMdCache = getOrCreateGroupMdCache(account.accountId);
       (async () => {
@@ -935,6 +1024,9 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
       // 4. Group history map — persists across auto-restarts (module-level)
       const groupHistories = getOrCreateHistoryMap(account.accountId);
 
+      // 4a. Last bot reply seq map — for history segmentation
+      const lastBotReplySeqMap = getOrCreateLastBotReplySeqMap(account.accountId);
+
       // 4b. Member name->uid map — for resolving @mentions in replies
       const memberMap = getOrCreateMemberMap(account.accountId);
 
@@ -1008,20 +1100,26 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
             }
           }
 
-          handleInboundMessage({
-            account,
-            message: msg,
-            botUid: credentials.robot_id,
-            groupHistories,
-            memberMap,
-            uidToNameMap,
-            groupCacheTimestamps,
-            groupMdCache,
+          const inboundQueueKey = getInboundQueueKey(account.accountId, msg);
+
+          enqueueInbound(
+            inboundQueueKey,
+            () =>
+              handleInboundMessage({
+                account,
+                message: msg,
+                botUid: credentials.robot_id,
+                groupHistories,
+                lastBotReplySeqMap,
+                memberMap,
+                uidToNameMap,
+                groupCacheTimestamps,
+                groupMdCache,
+                log,
+                statusSink,
+              }),
             log,
-            statusSink,
-          }).catch((err) => {
-            log?.error?.(`octo: inbound handler failed: ${err instanceof Error ? err.stack ?? String(err) : String(err)}`);
-          });
+          );
         },
 
         onConnected: () => {
@@ -1109,6 +1207,7 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
           socket.disconnect();
           if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
           if (cooldownReconnectTimer) { clearTimeout(cooldownReconnectTimer); cooldownReconnectTimer = null; }
+          stopPersonaPromptCache(account.accountId);
           ctx.setStatus({
             accountId: account.accountId,
             running: false,
