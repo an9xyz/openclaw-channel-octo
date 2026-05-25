@@ -20,6 +20,7 @@ import {
 import type { MentionPayload, MentionEntity, SendMessageResult } from "./types.js";
 import { registerGroupAccount, ensureGroupMd, handleGroupMdEvent, broadcastGroupMdUpdate, extractParentGroupNo, extractThreadShortId, ensureThreadMd, handleThreadMdEvent } from "./group-md.js";
 import { isOwner } from "./owner-registry.js";
+import { getPersonaPromptForSession } from "./persona-prompt.js";
 import { createWriteStream } from "node:fs";
 import { mkdir, unlink, readdir, stat } from "node:fs/promises";
 import { join, basename } from "node:path";
@@ -1778,6 +1779,15 @@ export async function handleInboundMessage(params: {
     // the values come from server-trusted config (`onBehalfOf`) and the
     // already-resolved group member map.
     groupSystemPrompt = buildPersonaGroupSystemPrompt(account.config.onBehalfOf, uidToNameMap);
+    // Append cached persona_prompt so the GroupSystemPrompt carries the full
+    // custom instruction (e.g. "always reply in English"). Without this,
+    // only the generic "you are X's clone" hint lands in GroupSystemPrompt
+    // and the persona_prompt only reaches via prependSystemContext which
+    // has lower effective priority.
+    const cachedHint = getPersonaPromptForSession(account.accountId);
+    if (cachedHint) {
+      groupSystemPrompt += '\n\n' + cachedHint;
+    }
   }
 
   const ctxPayload = core.channel.reply.finalizeInboundContext({
