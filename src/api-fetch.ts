@@ -692,7 +692,10 @@ export async function getBotOboGrant(params: {
   }
   const raw = (await resp.json().catch(() => null)) as Record<string, unknown> | null;
   if (!raw || typeof raw !== "object") return null;
-  const hasGrant = raw.has_grant === true;
+  // Accept grant when either `has_grant: true` is explicit OR when the
+  // response contains a `grantor_uid` (server may omit `has_grant`).
+  const hasGrant = raw.has_grant === true ||
+    (typeof raw.grantor_uid === "string" && raw.grantor_uid.length > 0);
   if (!hasGrant) return null;
   return {
     has_grant: true,
