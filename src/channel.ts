@@ -36,6 +36,7 @@ import { getOrCreateGroupMdCache, registerBotGroupIds, getKnownGroupIds, writeGr
 import { registerOwnerUid } from "./owner-registry.js";
 import { preloadGroupMemberCache, getGroupMembersFromCache } from "./member-cache.js";
 import { initPersonaPromptCache, stopPersonaPromptCache } from "./persona-prompt.js";
+import { registerOctoThreadBindingAdapter } from "./thread-binding-adapter.js";
 import path from "node:path";
 import os from "node:os";
 import { mkdir, readFile, writeFile, unlink } from "node:fs/promises";
@@ -918,6 +919,15 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
         log,
       );
 
+      // Register ACP thread-binding adapter (fixes #23). Without this, OpenClaw's
+      // ACP runtime aborts session+thread spawns with `thread_binding_invalid`.
+      const unregisterThreadBinding = registerOctoThreadBindingAdapter({
+        accountId: account.accountId,
+        apiUrl: account.config.apiUrl,
+        botToken: account.config.botToken!,
+        log,
+      });
+
       // Prefetch GROUP.md and group members for all groups (fire-and-forget)
       const groupMdCache = getOrCreateGroupMdCache(account.accountId);
       (async () => {
@@ -1208,6 +1218,7 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
           if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
           if (cooldownReconnectTimer) { clearTimeout(cooldownReconnectTimer); cooldownReconnectTimer = null; }
           stopPersonaPromptCache(account.accountId);
+          unregisterThreadBinding();
           ctx.setStatus({
             accountId: account.accountId,
             running: false,
