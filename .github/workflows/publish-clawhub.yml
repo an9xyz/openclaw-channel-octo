@@ -19,6 +19,21 @@ name: Publish ClawHub
 #   2. publish — OIDC publish (or PAT fallback) to ClawHub + GitHub Release (create
 #                or upload), then sync any auto-bumped package.json back to main
 #
+# Notes / Troubleshooting:
+#   - Auto-bump is FORWARD ONLY. Tagging a version older than current `main`
+#     (e.g. pushing `v1.0.8` while main is at 1.0.9) will FAIL the workflow with
+#     a clear error rather than downgrade the package.
+#   - Auto-bump pushes `chore(release): sync package.json to vX.Y.Z` directly to
+#     main using GITHUB_TOKEN, bypassing PR review. This is a deliberate trade-off
+#     for UI-driven release: the bump is mechanical and idempotent. If branch
+#     protection is ever configured to block GITHUB_TOKEN pushes (e.g. "Require
+#     pull request before merging" without an Actions exception), this step will
+#     fail at the end of the workflow — ClawHub publish will already have
+#     succeeded, so manual `npm version $TAG_VER` + commit on main is the recovery.
+#   - GitHub Release notes for UI-published releases are NOT overwritten by the
+#     workflow (the user wrote them deliberately). New releases created by the
+#     workflow itself use the CHANGELOG.md section as notes.
+#
 # Two ways to publish a real version:
 #
 #   A. UI flow (recommended — no local git needed)
@@ -120,9 +135,34 @@ jobs:
             echo "auto_bumped=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # Compare versions to prevent accidental downgrade. Auto-bump is
+          # forward-only: tagging an older version than current main is rejected.
+          # Inline comparator handles `MAJOR.MINOR.PATCH[-prerelease]` per semver:
+          # release > prerelease, then numeric on each component.
+          DIRECTION=$(node -e "
+            const parse = v => {
+              const [main, pre = ''] = v.split('-');
+              const [maj, min, pat] = main.split('.').map(Number);
+              return { maj, min, pat, pre };
+            };
+            const a = parse(process.argv[1]);
+            const b = parse(process.argv[2]);
+            for (const k of ['maj','min','pat']) {
+              if (a[k] !== b[k]) { console.log(a[k] < b[k] ? 'up' : 'down'); process.exit(); }
+            }
+            if (a.pre === b.pre) { console.log('eq'); process.exit(); }
+            if (!a.pre && b.pre)  { console.log('down'); process.exit(); } // 1.0.0 > 1.0.0-rc.1
+            if (a.pre && !b.pre)  { console.log('up'); process.exit(); }
+            console.log(a.pre < b.pre ? 'up' : 'down');
+          " "$PKG_VER" "$TAG_VER")
+          if [ "$DIRECTION" = "down" ]; then
+            echo "::error::Tag $TAG_VER is OLDER than package.json $PKG_VER. Auto-bump is forward-only — refusing to downgrade."
+            echo "::error::If you intended to re-release an older version, do it manually."
+            exit 1
+          fi
           echo "[verify] auto-bumping package.json: $PKG_VER → $TAG_VER (in workspace, will sync to main after publish)"
           # --no-git-tag-version: don't create a git tag (we already have one)
-          # --allow-same-version: be tolerant if PKG_VER somehow equals TAG_VER
+          # --allow-same-version: defensive; we already returned above on equality
           npm version "$TAG_VER" --no-git-tag-version --allow-same-version
           echo "auto_bumped=true" >> "$GITHUB_OUTPUT"
 
@@ -135,7 +175,23 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          STATE=$(gh release view "${{ github.ref_name }}" --json isDraft --jq '.isDraft' 2>/dev/null || echo "missing")
+          # Distinguish "release not found" (treat as missing) from transient
+          # API errors (auth/rate-limit/5xx) — the latter should fail loudly
+          # instead of being silently swallowed as "missing", which would cause
+          # the workflow to try to CREATE a release that may actually exist.
+          set +e
+          OUTPUT=$(gh release view "${{ github.ref_name }}" --json isDraft --jq '.isDraft' 2>&1)
+          RC=$?
+          set -e
+          if [ $RC -eq 0 ]; then
+            STATE="$OUTPUT"
+          elif echo "$OUTPUT" | grep -qiE "release not found|^release not found|HTTP 404|not found"; then
+            STATE="missing"
+          else
+            echo "::error::Unexpected error from 'gh release view ${{ github.ref_name }}' (rc=$RC):"
+            echo "$OUTPUT"
+            exit 1
+          fi
           if [ "$STATE" = "missing" ]; then
             echo "[verify] no existing release for ${{ github.ref_name }} — workflow will create one"
             echo "use_existing_release=false" >> "$GITHUB_OUTPUT"
@@ -254,10 +310,32 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch origin main
           git checkout main
-          # Re-apply the bump on top of latest main (it may have moved during build/publish).
           PKG_VER=$(node -p "require('./package.json').version")
           if [ "$PKG_VER" = "$TAG_VER" ]; then
             echo "[publish] main already at $TAG_VER (someone else bumped during build) — nothing to push"
+            exit 0
+          fi
+          # Forward-only safety: main may have moved past our tag during
+          # build/publish (e.g. a newer release pipeline started in parallel).
+          # If main is already ahead of TAG_VER, do NOT downgrade — skip the sync.
+          DIRECTION=$(node -e "
+            const parse = v => {
+              const [main, pre = ''] = v.split('-');
+              const [maj, min, pat] = main.split('.').map(Number);
+              return { maj, min, pat, pre };
+            };
+            const a = parse(process.argv[1]);
+            const b = parse(process.argv[2]);
+            for (const k of ['maj','min','pat']) {
+              if (a[k] !== b[k]) { console.log(a[k] < b[k] ? 'up' : 'down'); process.exit(); }
+            }
+            if (a.pre === b.pre) { console.log('eq'); process.exit(); }
+            if (!a.pre && b.pre)  { console.log('down'); process.exit(); }
+            if (a.pre && !b.pre)  { console.log('up'); process.exit(); }
+            console.log(a.pre < b.pre ? 'up' : 'down');
+          " "$PKG_VER" "$TAG_VER")
+          if [ "$DIRECTION" = "down" ]; then
+            echo "::warning::main is at $PKG_VER (newer than tag $TAG_VER). Skipping sync to avoid downgrade — ClawHub publish for $TAG_VER already succeeded."
             exit 0
           fi
           npm version "$TAG_VER" --no-git-tag-version --allow-same-version
