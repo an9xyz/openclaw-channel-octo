@@ -1,6 +1,7 @@
 name: Publish ClawHub
 
-# Triggered on tag push (v1.0.8, v2.0.0-rc.1) or manual workflow_dispatch.
+# Triggered on tag push (e.g. v1.0.10, v1.2.0) or manual workflow_dispatch.
+# Only stable MAJOR.MINOR.PATCH versions are accepted — no prereleases (rc / beta / etc).
 # workflow_dispatch is dry-run ONLY (forced server-side) — real publish requires a tag push from main.
 #
 # Auth:
@@ -55,7 +56,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to dry-run (no leading v), e.g. 1.0.8 — manual dispatch is ALWAYS dry-run"
+        description: "Version to dry-run, no leading v, e.g. 1.0.10 — manual dispatch is ALWAYS dry-run; only stable MAJOR.MINOR.PATCH accepted"
         required: true
         type: string
 
@@ -102,9 +103,11 @@ jobs:
             VERSION="${GITHUB_REF_NAME#v}"
             DRY_RUN="false"
           fi
-          # SemVer validation (rejects anything that could embed shell metacharacters).
-          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Invalid version '$VERSION'. Expected SemVer like 1.0.8 or 2.0.0-rc.1"
+          # Stable SemVer only (MAJOR.MINOR.PATCH). Prereleases (rc, beta, alpha) are
+          # intentionally rejected — this project ships only stable releases. The strict
+          # regex also rejects anything that could embed shell metacharacters.
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid version '$VERSION'. Expected stable SemVer like 1.0.10 or 1.2.0 (no prereleases)."
             exit 1
           fi
           {
@@ -137,23 +140,16 @@ jobs:
           fi
           # Compare versions to prevent accidental downgrade. Auto-bump is
           # forward-only: tagging an older version than current main is rejected.
-          # Inline comparator handles `MAJOR.MINOR.PATCH[-prerelease]` per semver:
-          # release > prerelease, then numeric on each component.
+          # Strict MAJOR.MINOR.PATCH compare — prereleases were already rejected
+          # by the regex in the resolve step.
           DIRECTION=$(node -e "
-            const parse = v => {
-              const [main, pre = ''] = v.split('-');
-              const [maj, min, pat] = main.split('.').map(Number);
-              return { maj, min, pat, pre };
-            };
+            const parse = v => v.split('.').map(Number);
             const a = parse(process.argv[1]);
             const b = parse(process.argv[2]);
-            for (const k of ['maj','min','pat']) {
-              if (a[k] !== b[k]) { console.log(a[k] < b[k] ? 'up' : 'down'); process.exit(); }
+            for (let i = 0; i < 3; i++) {
+              if (a[i] !== b[i]) { console.log(a[i] < b[i] ? 'up' : 'down'); process.exit(); }
             }
-            if (a.pre === b.pre) { console.log('eq'); process.exit(); }
-            if (!a.pre && b.pre)  { console.log('down'); process.exit(); } // 1.0.0 > 1.0.0-rc.1
-            if (a.pre && !b.pre)  { console.log('up'); process.exit(); }
-            console.log(a.pre < b.pre ? 'up' : 'down');
+            console.log('eq');
           " "$PKG_VER" "$TAG_VER")
           if [ "$DIRECTION" = "down" ]; then
             echo "::error::Tag $TAG_VER is OLDER than package.json $PKG_VER. Auto-bump is forward-only — refusing to downgrade."
@@ -318,21 +314,15 @@ jobs:
           # Forward-only safety: main may have moved past our tag during
           # build/publish (e.g. a newer release pipeline started in parallel).
           # If main is already ahead of TAG_VER, do NOT downgrade — skip the sync.
+          # Strict MAJOR.MINOR.PATCH compare (prereleases rejected upstream).
           DIRECTION=$(node -e "
-            const parse = v => {
-              const [main, pre = ''] = v.split('-');
-              const [maj, min, pat] = main.split('.').map(Number);
-              return { maj, min, pat, pre };
-            };
+            const parse = v => v.split('.').map(Number);
             const a = parse(process.argv[1]);
             const b = parse(process.argv[2]);
-            for (const k of ['maj','min','pat']) {
-              if (a[k] !== b[k]) { console.log(a[k] < b[k] ? 'up' : 'down'); process.exit(); }
+            for (let i = 0; i < 3; i++) {
+              if (a[i] !== b[i]) { console.log(a[i] < b[i] ? 'up' : 'down'); process.exit(); }
             }
-            if (a.pre === b.pre) { console.log('eq'); process.exit(); }
-            if (!a.pre && b.pre)  { console.log('down'); process.exit(); }
-            if (a.pre && !b.pre)  { console.log('up'); process.exit(); }
-            console.log(a.pre < b.pre ? 'up' : 'down');
+            console.log('eq');
           " "$PKG_VER" "$TAG_VER")
           if [ "$DIRECTION" = "down" ]; then
             echo "::warning::main is at $PKG_VER (newer than tag $TAG_VER). Skipping sync to avoid downgrade — ClawHub publish for $TAG_VER already succeeded."
