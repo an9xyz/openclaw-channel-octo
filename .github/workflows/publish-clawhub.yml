@@ -1,6 +1,7 @@
 name: Publish ClawHub
 
-# Triggered on tag push (v1.0.8, v2.0.0-rc.1) or manual workflow_dispatch.
+# Triggered on tag push (e.g. v1.0.10, v1.2.0) or manual workflow_dispatch.
+# Only stable MAJOR.MINOR.PATCH versions are accepted — no prereleases (rc / beta / etc).
 # workflow_dispatch is dry-run ONLY (forced server-side) — real publish requires a tag push from main.
 #
 # Auth:
@@ -13,14 +14,40 @@ name: Publish ClawHub
 #     the PAT login becomes a no-op — no workflow change needed.
 #
 # Sequence:
-#   1. verify  — checkout (full history), tag-on-main check, version sanity, CHANGELOG presence,
-#                release-not-exists check, install/type-check/test/build, npm pack
-#   2. publish — OIDC publish (or PAT fallback) to ClawHub + GitHub Release
+#   1. verify  — checkout (full history), tag-on-main check, auto-bump package.json
+#                if needed, CHANGELOG presence, handle existing release (UI Publish
+#                or release-drafter draft), install/type-check/test/build, npm pack
+#   2. publish — OIDC publish (or PAT fallback) to ClawHub + GitHub Release (create
+#                or upload), then sync any auto-bumped package.json back to main
 #
-# To publish a real version:
-#   1. Bump package.json version + add a CHANGELOG.md section for that version
-#   2. Commit + merge to main
-#   3. git tag v1.0.8 && git push origin v1.0.8
+# Notes / Troubleshooting:
+#   - Auto-bump is FORWARD ONLY. Tagging a version older than current `main`
+#     (e.g. pushing `v1.0.8` while main is at 1.0.9) will FAIL the workflow with
+#     a clear error rather than downgrade the package.
+#   - Auto-bump pushes `chore(release): sync package.json to vX.Y.Z` directly to
+#     main using GITHUB_TOKEN, bypassing PR review. This is a deliberate trade-off
+#     for UI-driven release: the bump is mechanical and idempotent. If branch
+#     protection is ever configured to block GITHUB_TOKEN pushes (e.g. "Require
+#     pull request before merging" without an Actions exception), this step will
+#     fail at the end of the workflow — ClawHub publish will already have
+#     succeeded, so manual `npm version $TAG_VER` + commit on main is the recovery.
+#   - GitHub Release notes for UI-published releases are NOT overwritten by the
+#     workflow (the user wrote them deliberately). New releases created by the
+#     workflow itself use the CHANGELOG.md section as notes.
+#
+# Two ways to publish a real version:
+#
+#   A. UI flow (recommended — no local git needed)
+#      1. (Optional) Edit CHANGELOG.md via web UI, add `## [X.Y.Z]` section, commit to main
+#      2. Go to Releases → find release-drafter's vX.Y.Z draft (or Draft a new release)
+#      3. Confirm tag = vX.Y.Z, target = main, then Publish release
+#      4. This workflow auto-bumps package.json if it's behind, publishes to ClawHub,
+#         and uploads the tarball to the release. Done.
+#
+#   B. CLI flow (legacy)
+#      1. Bump package.json version locally + add a CHANGELOG.md section for that version
+#      2. Commit + merge to main
+#      3. git tag vX.Y.Z && git push origin vX.Y.Z
 
 on:
   push:
@@ -29,12 +56,12 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to dry-run (no leading v), e.g. 1.0.8 — manual dispatch is ALWAYS dry-run"
+        description: "Version to dry-run, no leading v, e.g. 1.0.10 — manual dispatch is ALWAYS dry-run; only stable MAJOR.MINOR.PATCH accepted"
         required: true
         type: string
 
 permissions:
-  contents: write   # gh release create + git fetch
+  contents: write   # gh release create/upload + git push (auto-bump)
   id-token: write   # ClawHub OIDC
 
 concurrency:
@@ -48,6 +75,8 @@ jobs:
     outputs:
       version: ${{ steps.resolve.outputs.version }}
       dry_run: ${{ steps.resolve.outputs.dry_run }}
+      auto_bumped: ${{ steps.bump.outputs.auto_bumped }}
+      use_existing_release: ${{ steps.existing.outputs.use_existing_release }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -74,9 +103,11 @@ jobs:
             VERSION="${GITHUB_REF_NAME#v}"
             DRY_RUN="false"
           fi
-          # SemVer validation (rejects anything that could embed shell metacharacters).
-          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Invalid version '$VERSION'. Expected SemVer like 1.0.8 or 2.0.0-rc.1"
+          # Stable SemVer only (MAJOR.MINOR.PATCH). Prereleases (rc, beta, alpha) are
+          # intentionally rejected — this project ships only stable releases. The strict
+          # regex also rejects anything that could embed shell metacharacters.
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid version '$VERSION'. Expected stable SemVer like 1.0.10 or 1.2.0 (no prereleases)."
             exit 1
           fi
           {
@@ -96,30 +127,78 @@ jobs:
           fi
           echo "[verify] tag commit confirmed reachable from origin/main"
 
-      - name: assert package.json version matches
+      - name: ensure package.json matches tag (auto-bump if needed)
+        id: bump
+        env:
+          TAG_VER: ${{ steps.resolve.outputs.version }}
         run: |
           PKG_VER=$(node -p "require('./package.json').version")
-          if [ "${{ steps.resolve.outputs.version }}" != "$PKG_VER" ]; then
-            echo "::error::Resolved version (${{ steps.resolve.outputs.version }}) != package.json version ($PKG_VER). Bump package.json before tagging."
+          if [ "$PKG_VER" = "$TAG_VER" ]; then
+            echo "[verify] package.json version $PKG_VER matches tag $TAG_VER"
+            echo "auto_bumped=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Compare versions to prevent accidental downgrade. Auto-bump is
+          # forward-only: tagging an older version than current main is rejected.
+          # Strict MAJOR.MINOR.PATCH compare — prereleases were already rejected
+          # by the regex in the resolve step.
+          DIRECTION=$(node -e "
+            const parse = v => v.split('.').map(Number);
+            const a = parse(process.argv[1]);
+            const b = parse(process.argv[2]);
+            for (let i = 0; i < 3; i++) {
+              if (a[i] !== b[i]) { console.log(a[i] < b[i] ? 'up' : 'down'); process.exit(); }
+            }
+            console.log('eq');
+          " "$PKG_VER" "$TAG_VER")
+          if [ "$DIRECTION" = "down" ]; then
+            echo "::error::Tag $TAG_VER is OLDER than package.json $PKG_VER. Auto-bump is forward-only — refusing to downgrade."
+            echo "::error::If you intended to re-release an older version, do it manually."
             exit 1
           fi
+          echo "[verify] auto-bumping package.json: $PKG_VER → $TAG_VER (in workspace, will sync to main after publish)"
+          # --no-git-tag-version: don't create a git tag (we already have one)
+          # --allow-same-version: defensive; we already returned above on equality
+          npm version "$TAG_VER" --no-git-tag-version --allow-same-version
+          echo "auto_bumped=true" >> "$GITHUB_OUTPUT"
 
       - name: assert CHANGELOG section exists
         run: ./scripts/extract-changelog.sh "${{ steps.resolve.outputs.version }}" > /dev/null
 
-      - name: clean up draft release if exists (release-drafter race)
+      - name: handle existing release (draft / UI-published / none)
+        id: existing
         if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if gh release view "${{ github.ref_name }}" --json isDraft --jq '.isDraft' 2>/dev/null | grep -q true; then
-            echo "[verify] deleting draft release ${{ github.ref_name }} (created by release-drafter)"
-            gh release delete "${{ github.ref_name }}" --yes
-          elif gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
-            echo "::error::GitHub Release ${{ github.ref_name }} already exists (not a draft). Did you re-tag without bumping version?"
+          # Distinguish "release not found" (treat as missing) from transient
+          # API errors (auth/rate-limit/5xx) — the latter should fail loudly
+          # instead of being silently swallowed as "missing", which would cause
+          # the workflow to try to CREATE a release that may actually exist.
+          set +e
+          OUTPUT=$(gh release view "${{ github.ref_name }}" --json isDraft --jq '.isDraft' 2>&1)
+          RC=$?
+          set -e
+          if [ $RC -eq 0 ]; then
+            STATE="$OUTPUT"
+          elif echo "$OUTPUT" | grep -qiE "release not found|^release not found|HTTP 404|not found"; then
+            STATE="missing"
+          else
+            echo "::error::Unexpected error from 'gh release view ${{ github.ref_name }}' (rc=$RC):"
+            echo "$OUTPUT"
             exit 1
           fi
-          echo "[verify] no conflicting release for ${{ github.ref_name }}"
+          if [ "$STATE" = "missing" ]; then
+            echo "[verify] no existing release for ${{ github.ref_name }} — workflow will create one"
+            echo "use_existing_release=false" >> "$GITHUB_OUTPUT"
+          elif [ "$STATE" = "true" ]; then
+            echo "[verify] deleting draft release ${{ github.ref_name }} (release-drafter) — workflow will create fresh"
+            gh release delete "${{ github.ref_name }}" --yes
+            echo "use_existing_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "[verify] existing non-draft release found for ${{ github.ref_name }} — workflow will upload tarball to it"
+            echo "use_existing_release=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - run: npm ci
 
@@ -150,6 +229,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Need full history so we can push the auto-bump commit back to main.
+          fetch-depth: 0
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -196,12 +278,63 @@ jobs:
             $DRY \
             octo-*.tgz
 
-      - name: create GitHub Release
+      - name: publish GitHub Release (create or upload)
         if: github.event_name == 'push' && needs.verify.outputs.dry_run != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ github.ref_name }}" \
-            --title "${{ github.ref_name }}" \
-            --notes-file /tmp/notes.md \
-            octo-*.tgz
+          if [ "${{ needs.verify.outputs.use_existing_release }}" = "true" ]; then
+            echo "[publish] uploading tarball to existing release ${{ github.ref_name }}"
+            gh release upload "${{ github.ref_name }}" octo-*.tgz --clobber
+          else
+            echo "[publish] creating new release ${{ github.ref_name }}"
+            gh release create "${{ github.ref_name }}" \
+              --title "${{ github.ref_name }}" \
+              --notes-file /tmp/notes.md \
+              octo-*.tgz
+          fi
+
+      - name: sync auto-bumped package.json back to main
+        if: github.event_name == 'push' && needs.verify.outputs.dry_run != 'true' && needs.verify.outputs.auto_bumped == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_VER: ${{ needs.verify.outputs.version }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout main
+          PKG_VER=$(node -p "require('./package.json').version")
+          if [ "$PKG_VER" = "$TAG_VER" ]; then
+            echo "[publish] main already at $TAG_VER (someone else bumped during build) — nothing to push"
+            exit 0
+          fi
+          # Forward-only safety: main may have moved past our tag during
+          # build/publish (e.g. a newer release pipeline started in parallel).
+          # If main is already ahead of TAG_VER, do NOT downgrade — skip the sync.
+          # Strict MAJOR.MINOR.PATCH compare (prereleases rejected upstream).
+          DIRECTION=$(node -e "
+            const parse = v => v.split('.').map(Number);
+            const a = parse(process.argv[1]);
+            const b = parse(process.argv[2]);
+            for (let i = 0; i < 3; i++) {
+              if (a[i] !== b[i]) { console.log(a[i] < b[i] ? 'up' : 'down'); process.exit(); }
+            }
+            console.log('eq');
+          " "$PKG_VER" "$TAG_VER")
+          if [ "$DIRECTION" = "down" ]; then
+            echo "::warning::main is at $PKG_VER (newer than tag $TAG_VER). Skipping sync to avoid downgrade — ClawHub publish for $TAG_VER already succeeded."
+            exit 0
+          fi
+          npm version "$TAG_VER" --no-git-tag-version --allow-same-version
+          git add package.json package-lock.json
+          git commit -m "chore(release): sync package.json to $TAG_VER for $TAG_NAME"
+          # Retry once on conflict (main may move between fetch and push).
+          if ! git push origin HEAD:main; then
+            echo "[publish] push to main failed, retrying once after pull --rebase"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
+          echo "[publish] package.json synced to $TAG_VER on main"
