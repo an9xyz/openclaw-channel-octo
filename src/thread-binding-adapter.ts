@@ -155,8 +155,11 @@ export function registerOctoThreadBindingAdapter(
       input: SessionBindingBindInput,
     ): Promise<SessionBindingRecord | null> => {
       // Defensive: SDK should already filter by channel/accountId, but the
-      // adapter contract permits us to no-op on mismatched input.
+      // adapter contract permits us to no-op on mismatched input. Mirror the
+      // same normalization that `resolveByConversation` applies so a direct
+      // caller passing a mixed-case accountId still routes correctly here.
       if (input.conversation.channel !== CHANNEL_ID) return null;
+      if (normalizeAccountId(input.conversation.accountId) !== accountId) return null;
 
       const targetSessionKey = input.targetSessionKey.trim();
       if (!targetSessionKey) return null;

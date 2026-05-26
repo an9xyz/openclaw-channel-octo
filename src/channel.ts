@@ -552,14 +552,24 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
         // (or an in-process config reload hook) to install a working manager.
         return { stop: () => {} };
       }
+      // The SDK's `createManager` signature does NOT include a log sink, so
+      // we wire a minimal console-backed fallback. This surfaces
+      // `createThread` failures in the `child`-placement path that would
+      // otherwise be swallowed into a generic null binding result.
+      const fallbackLog = {
+        info: (msg: string) => console.log(`[octo:thread-binding] ${msg}`),
+        warn: (msg: string) => console.warn(`[octo:thread-binding] ${msg}`),
+        debug: (msg: string) => console.debug(`[octo:thread-binding] ${msg}`),
+      };
       const unregister = registerOctoThreadBindingAdapter({
         accountId: resolvedId,
         apiUrl: account.config.apiUrl,
         botToken: account.config.botToken,
+        log: fallbackLog,
       });
       return { stop: () => unregister() };
     },
-  } as any, // TODO: remove when SDK types support this
+  },
   actions: {
     listActions: ({ cfg }: { cfg: any }) => {
       const actions = getAvailableActions(cfg);

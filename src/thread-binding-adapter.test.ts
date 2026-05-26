@@ -307,6 +307,22 @@ describe("registerOctoThreadBindingAdapter", () => {
     unregister();
   });
 
+  it("bind(placement=current) ignores conversations whose accountId does not match the adapter", async () => {
+    const { unregister } = makeAdapterContext();
+    const record = await _capturedAdapter!.bind!({
+      targetSessionKey: "s",
+      targetKind: "session",
+      conversation: {
+        channel: "octo",
+        accountId: "27someotheraccount_bot", // not ACCOUNT_ID
+        conversationId: "c",
+      },
+      placement: "current",
+    });
+    expect(record).toBeNull();
+    unregister();
+  });
+
   // -------------------------------------------------------------------------
   // Mixed-case account ID round-trip (regression for PR #32 review feedback).
   // -------------------------------------------------------------------------
