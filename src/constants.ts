@@ -16,6 +16,13 @@ export const PLUGIN_ID = "octo";
 
 export const CHANNEL_ID = "octo";
 
+/**
+ * Separator between parent group_no and thread short_id in Octo's CommunityTopic
+ * channel ID format (`<groupNo>____<shortId>`, 4 underscores). Centralized here
+ * to avoid drift across modules that need to split or compose thread refs.
+ */
+export const THREAD_ID_SEPARATOR = "____";
+
 /** Strip channel namespace prefix from a sessionKey or target string. */
 export function stripChannelPrefix(s: string): string {
   return s.replace(/^octo:/, "");

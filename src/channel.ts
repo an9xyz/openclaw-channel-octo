@@ -36,6 +36,7 @@ import { getOrCreateGroupMdCache, registerBotGroupIds, getKnownGroupIds, writeGr
 import { registerOwnerUid } from "./owner-registry.js";
 import { preloadGroupMemberCache, getGroupMembersFromCache } from "./member-cache.js";
 import { initPersonaPromptCache, stopPersonaPromptCache } from "./persona-prompt.js";
+import { registerOctoThreadBindingAdapter } from "./thread-binding-adapter.js";
 import path from "node:path";
 import os from "node:os";
 import { mkdir, readFile, writeFile, unlink } from "node:fs/promises";
@@ -492,6 +493,83 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
     threads: true,
   },
   reload: { configPrefixes: [`channels.${CHANNEL_ID}`] },
+  // Declare ACP thread-binding support so OpenClaw's session-binding service
+  // recognizes Octo as a thread-binding-capable channel. Without this block,
+  // `getCapabilities({channel:"octo",...})` returns
+  // `{ adapterAvailable: false, bindSupported: false }` and ACP spawns abort
+  // with `errorCode: "thread_binding_invalid"` (#23).
+  //
+  // - `supportsCurrentConversationBinding: true` is the minimum for OpenClaw's
+  //   generic current-placement bind path to accept Octo.
+  // - `createManager` is the runtime entry point: OpenClaw calls it on demand
+  //   per (cfg, accountId) and we install a SessionBindingAdapter that adds
+  //   "child" placement support (creates a new Octo sub-thread on bind).
+  // - `resolveConversationRef` normalizes octo's `groupNo____shortId` thread
+  //   format so callers passing a parent + threadId get the correct merged ref.
+  // - `buildBoundReplyPayload` returns null because Octo doesn't have a
+  //   per-thread pin/notify equivalent of Telegram's topic pin payload.
+  conversationBindings: {
+    supportsCurrentConversationBinding: true,
+    defaultTopLevelPlacement: "current",
+    resolveConversationRef: ({ conversationId, parentConversationId, threadId }: {
+      accountId?: string | null;
+      conversationId: string;
+      parentConversationId?: string;
+      threadId?: string | number | null;
+    }) => {
+      // Already a thread ref like "groupNo____shortId": split into parent+child.
+      if (conversationId.includes("____")) {
+        const parent = conversationId.split("____")[0]!;
+        return { conversationId, parentConversationId: parent };
+      }
+      // Caller passed a parent group + an explicit threadId: synthesize the
+      // composite conversationId in Octo's canonical format.
+      const tid = threadId == null ? "" : String(threadId).trim();
+      if (tid) {
+        return {
+          conversationId: `${conversationId}____${tid}`,
+          parentConversationId: conversationId,
+        };
+      }
+      return {
+        conversationId,
+        ...(parentConversationId ? { parentConversationId } : {}),
+      };
+    },
+    buildBoundReplyPayload: () => null,
+    createManager: ({ cfg, accountId }: { cfg: any; accountId?: string | null }) => {
+      const resolvedId =
+        (accountId && accountId.trim()) ||
+        resolveDefaultOctoAccountId(cfg) ||
+        DEFAULT_ACCOUNT_ID;
+      const account = resolveOctoAccount({ cfg, accountId: resolvedId });
+      if (!account.config.botToken) {
+        // Account not yet configured (botToken missing). Return a no-op
+        // manager so OpenClaw's lifecycle doesn't crash. NOTE: the runtime
+        // tracks one manager per (plugin, account) and will NOT call
+        // createManager again on subsequent binds for the same account, so
+        // configuring the bot AFTER first bind requires a gateway restart
+        // (or an in-process config reload hook) to install a working manager.
+        return { stop: () => {} };
+      }
+      // The SDK's `createManager` signature does NOT include a log sink, so
+      // we wire a minimal console-backed fallback. This surfaces
+      // `createThread` failures in the `child`-placement path that would
+      // otherwise be swallowed into a generic null binding result.
+      const fallbackLog = {
+        info: (msg: string) => console.log(`[octo:thread-binding] ${msg}`),
+        warn: (msg: string) => console.warn(`[octo:thread-binding] ${msg}`),
+        debug: (msg: string) => console.debug(`[octo:thread-binding] ${msg}`),
+      };
+      const unregister = registerOctoThreadBindingAdapter({
+        accountId: resolvedId,
+        apiUrl: account.config.apiUrl,
+        botToken: account.config.botToken,
+        log: fallbackLog,
+      });
+      return { stop: () => unregister() };
+    },
+  },
   actions: {
     listActions: ({ cfg }: { cfg: any }) => {
       const actions = getAvailableActions(cfg);
@@ -917,6 +995,11 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
         },
         log,
       );
+
+      // NOTE: ACP thread-binding adapter is NOT registered here. The canonical
+      // wiring is via `octoPlugin.conversationBindings.createManager`, which
+      // OpenClaw runtime calls on demand and whose returned `{stop}` it owns.
+      // See the plugin declaration above and `src/thread-binding-adapter.ts`.
 
       // Prefetch GROUP.md and group members for all groups (fire-and-forget)
       const groupMdCache = getOrCreateGroupMdCache(account.accountId);
