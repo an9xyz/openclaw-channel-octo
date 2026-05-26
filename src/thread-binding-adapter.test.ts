@@ -11,7 +11,11 @@ vi.mock("./api-fetch.js", () => ({
 
 import { createThread } from "./api-fetch.js";
 
-const ACCOUNT_ID = "27pBwzf2F6bfa5cd142_bot";
+// Lowercase by design: the adapter normalizes accountIds via toLowerCase
+// before storing, so most assertions in this file expect the normalized form.
+// A separate `mixed-case account ID round-trip` describe block below covers
+// the normalization behavior explicitly.
+const ACCOUNT_ID = "27pbwzf2f6bfa5cd142_bot";
 const API_URL = "https://im.example.com/api";
 const BOT_TOKEN = "bf_test123";
 
@@ -301,5 +305,90 @@ describe("registerOctoThreadBindingAdapter", () => {
     });
     expect(record).toBeNull();
     unregister();
+  });
+
+  // -------------------------------------------------------------------------
+  // Mixed-case account ID round-trip (regression for PR #32 review feedback).
+  // -------------------------------------------------------------------------
+  // OpenClaw's session-binding service normalizes adapter accountIds and
+  // conversation refs to lowercase before invoking adapter methods. A previous
+  // version of the adapter captured the raw mixed-case accountId in its
+  // closure and compared `ref.accountId !== accountId` directly, which made
+  // `resolveByConversation` silently miss for any account whose original ID
+  // contained uppercase letters (BotFather emits mixed-case bf_… IDs).
+  // -------------------------------------------------------------------------
+  describe("mixed-case account ID round-trip", () => {
+    const MIXED_CASE_ACCOUNT = "27pBwzf2F6bfa5cd142_bot";
+    const NORMALIZED = MIXED_CASE_ACCOUNT.toLowerCase();
+
+    it("registers the adapter under the normalized (lowercased) accountId", () => {
+      const unregister = registerOctoThreadBindingAdapter({
+        accountId: MIXED_CASE_ACCOUNT,
+        apiUrl: API_URL,
+        botToken: BOT_TOKEN,
+      });
+      expect(_capturedAdapter).not.toBeNull();
+      expect(_capturedAdapter!.accountId).toBe(NORMALIZED);
+      unregister();
+    });
+
+    it("resolveByConversation matches when the SDK passes a lowercased ref (the production path)", async () => {
+      const unregister = registerOctoThreadBindingAdapter({
+        accountId: MIXED_CASE_ACCOUNT,
+        apiUrl: API_URL,
+        botToken: BOT_TOKEN,
+      });
+      // SDK normalizes the conversation ref before calling bind(). Simulate
+      // exactly what the production path looks like by passing the lowercased
+      // accountId on every interaction.
+      const conversationId = "groupX";
+      const rec = await _capturedAdapter!.bind!({
+        targetSessionKey: "agent:cc:acp:abc",
+        targetKind: "session",
+        conversation: {
+          channel: "octo",
+          accountId: NORMALIZED,
+          conversationId,
+        },
+        placement: "current",
+      });
+      expect(rec).not.toBeNull();
+      expect(rec!.conversation.accountId).toBe(NORMALIZED);
+
+      // The crucial assertion: SDK calls resolveByConversation with the
+      // lowercased accountId. Before the fix, the adapter compared this to
+      // the captured mixed-case original and returned null.
+      const found = _capturedAdapter!.resolveByConversation({
+        channel: "octo",
+        accountId: NORMALIZED,
+        conversationId,
+      });
+      expect(found?.bindingId).toBe(rec!.bindingId);
+      unregister();
+    });
+
+    it("resolveByConversation also matches when callers pass the original mixed-case accountId (defensive double-normalization)", () => {
+      const unregister = registerOctoThreadBindingAdapter({
+        accountId: MIXED_CASE_ACCOUNT,
+        apiUrl: API_URL,
+        botToken: BOT_TOKEN,
+      });
+      // Direct adapter-level callers (e.g. tests, debug tools) might bypass
+      // SDK normalization and pass the raw mixed-case accountId. The adapter
+      // normalizes the ref defensively, so this still resolves.
+      _capturedAdapter!.bind!({
+        targetSessionKey: "s",
+        targetKind: "session",
+        conversation: { channel: "octo", accountId: NORMALIZED, conversationId: "g" },
+        placement: "current",
+      });
+      const found = _capturedAdapter!.resolveByConversation({
+        channel: "octo",
+        accountId: MIXED_CASE_ACCOUNT, // mixed case here
+        conversationId: "g",
+      });
+      expect(found).not.toBeNull();
+      unregister();
+    });
   });
 });

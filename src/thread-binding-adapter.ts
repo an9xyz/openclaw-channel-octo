@@ -33,7 +33,7 @@ import {
   type SessionBindingAdapter,
   type SessionBindingRecord,
 } from "openclaw/plugin-sdk/thread-bindings-runtime";
-import { CHANNEL_ID } from "./constants.js";
+import { CHANNEL_ID, THREAD_ID_SEPARATOR } from "./constants.js";
 import { createThread } from "./api-fetch.js";
 
 // SDK's `thread-bindings-runtime` only re-exports the adapter + record types.
@@ -42,6 +42,21 @@ import { createThread } from "./api-fetch.js";
 type SessionBindingBindInput = Parameters<NonNullable<SessionBindingAdapter["bind"]>>[0];
 type SessionBindingUnbindInput = Parameters<NonNullable<SessionBindingAdapter["unbind"]>>[0];
 type ConversationRef = Parameters<SessionBindingAdapter["resolveByConversation"]>[0];
+
+/**
+ * OpenClaw's session-binding service normalizes account IDs to lowercase
+ * before invoking adapter methods (see `normalizeOptionalLowercaseString`
+ * inside `session-binding-service`). BotFather can emit mixed-case bot IDs
+ * (e.g. `27pBwzf2F6bfa5cd142_bot`), so storing/comparing against the raw
+ * registration accountId silently breaks `resolveByConversation` for those
+ * accounts — bindings succeed (SDK passes the lowercased id into `bind`)
+ * but reverse lookup misses because the closure compares against the
+ * mixed-case original. Normalize once at registration and use the result
+ * everywhere internal.
+ */
+function normalizeAccountId(accountId: string): string {
+  return accountId.toLowerCase();
+}
 
 type Logger = {
   info?: (msg: string) => void;
@@ -98,7 +113,9 @@ function resolveParentGroupNo(
     conversation.conversationId?.trim() ||
     "";
   if (!raw) return null;
-  return raw.includes("____") ? raw.split("____")[0]! : raw;
+  return raw.includes(THREAD_ID_SEPARATOR)
+    ? raw.split(THREAD_ID_SEPARATOR)[0]!
+    : raw;
 }
 
 export interface RegisterOctoThreadBindingAdapterParams {
@@ -118,7 +135,12 @@ export interface RegisterOctoThreadBindingAdapterParams {
 export function registerOctoThreadBindingAdapter(
   params: RegisterOctoThreadBindingAdapterParams,
 ): () => void {
-  const { accountId, apiUrl, botToken, log } = params;
+  const { apiUrl, botToken, log } = params;
+  // Normalize the account id ONCE here. Every internal map key, bindingId,
+  // and ref comparison below uses `accountId` (the normalized form), never
+  // params.accountId. The SDK invokes adapter methods with already-normalized
+  // refs, so this keeps both halves of the round-trip aligned.
+  const accountId = normalizeAccountId(params.accountId);
 
   const adapter: SessionBindingAdapter = {
     channel: CHANNEL_ID,
@@ -161,7 +183,7 @@ export function registerOctoThreadBindingAdapter(
             groupNo: parentGroupNo,
             name: threadName,
           });
-          conversationId = `${parentGroupNo}____${thread.short_id}`;
+          conversationId = `${parentGroupNo}${THREAD_ID_SEPARATOR}${thread.short_id}`;
           parentConversationId = parentGroupNo;
           log?.info?.(
             `octo: [${accountId}] child thread created group=${parentGroupNo} short_id=${thread.short_id} (name="${threadName}")`,
@@ -217,19 +239,23 @@ export function registerOctoThreadBindingAdapter(
     },
 
     resolveByConversation: (ref: ConversationRef): SessionBindingRecord | null => {
-      if (ref.channel !== CHANNEL_ID || ref.accountId !== accountId) return null;
+      // ref.accountId is already lowercased by the SDK (see normalizeAccountId
+      // doc-comment at top of this file). Defensively normalize again so a
+      // direct adapter-level caller (e.g. test code) bypassing the SDK still
+      // gets a correct result.
+      if (ref.channel !== CHANNEL_ID) return null;
+      const refAccountId = normalizeAccountId(ref.accountId);
+      if (refAccountId !== accountId) return null;
       const m = _bindingsByAccount.get(accountId);
       if (!m) return null;
       return m.get(buildBindingId(accountId, ref.conversationId)) ?? null;
     },
 
-    touch: (bindingId: string, _at?: number): void => {
-      // In-memory adapter has no idle-expiry sweeper, so touch is a no-op.
-      // Kept for SDK contract compliance; record's boundAt is the source of
-      // truth for callers that care about activity.
-      const m = _bindingsByAccount.get(accountId);
-      if (!m || !m.has(bindingId)) return;
-      // Future: if we add a sweeper, mutate a lastTouchedAt field here.
+    touch: (_bindingId: string, _at?: number): void => {
+      // The in-memory adapter has no idle-expiry sweeper, so touch is
+      // intentionally a no-op. Implementing it would require a `lastTouchedAt`
+      // field on records that nothing currently reads. Kept for SDK contract
+      // compliance and to avoid adapter-shape surprises if the runtime calls it.
     },
 
     unbind: async (

@@ -544,9 +544,12 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
         DEFAULT_ACCOUNT_ID;
       const account = resolveOctoAccount({ cfg, accountId: resolvedId });
       if (!account.config.botToken) {
-        // Not configured yet — return a no-op manager so OpenClaw's lifecycle
-        // doesn't crash. Once the account is configured and startAccount runs,
-        // a fresh manager will be created on the next bind request.
+        // Account not yet configured (botToken missing). Return a no-op
+        // manager so OpenClaw's lifecycle doesn't crash. NOTE: the runtime
+        // tracks one manager per (plugin, account) and will NOT call
+        // createManager again on subsequent binds for the same account, so
+        // configuring the bot AFTER first bind requires a gateway restart
+        // (or an in-process config reload hook) to install a working manager.
         return { stop: () => {} };
       }
       const unregister = registerOctoThreadBindingAdapter({
