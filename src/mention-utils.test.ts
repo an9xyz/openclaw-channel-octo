@@ -671,6 +671,28 @@ describe("buildEntitiesFromFallback — @all 跳过", () => {
     expect(uids).toEqual(["uid_bob"]);
     expect(entities).toHaveLength(1);
   });
+
+  it("@所有AI 不应生成 entity", () => {
+    const memberMap = new Map([["Bob", "uid_bob"]]);
+    const { entities, uids } = buildEntitiesFromFallback("@所有AI @Bob", memberMap);
+    expect(uids).toEqual(["uid_bob"]);
+    expect(entities).toHaveLength(1);
+    expect(entities[0]).toEqual({ uid: "uid_bob", offset: 6, length: 4 });
+  });
+
+  it("@所有AI 单独出现也不应生成 entity", () => {
+    const memberMap = new Map<string, string>();
+    const { entities, uids } = buildEntitiesFromFallback("@所有AI", memberMap);
+    expect(uids).toEqual([]);
+    expect(entities).toEqual([]);
+  });
+
+  it("@All AIs (英文别名) 不应生成 entity", () => {
+    const memberMap = new Map<string, string>();
+    const { entities, uids } = buildEntitiesFromFallback("@All AIs please look", memberMap);
+    expect(uids).toEqual([]);
+    expect(entities).toEqual([]);
+  });
 });
 
 describe("convertContentForLLM — 空格昵称支持", () => {

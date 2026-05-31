@@ -1200,4 +1200,82 @@ describe("sendMessage — mentionAll serialization", () => {
 
     expect(sentBody.payload.mention).toBeUndefined();
   });
+
+  it("mentionHumans 应序列化为 mention.humans=1", async () => {
+    let sentBody: any = null;
+    global.fetch = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      sentBody = JSON.parse(init?.body as string);
+      return new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const { sendMessage } = await import("./api-fetch.js");
+    await sendMessage({
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      channelId: "group1",
+      channelType: ChannelType.Group,
+      content: "hello @所有人",
+      mentionHumans: true,
+    });
+
+    const mention = sentBody.payload.mention;
+    expect(mention.humans).toBe(1);
+    expect(mention.all).toBeUndefined();
+    expect(mention.ais).toBeUndefined();
+  });
+
+  it("mentionAis 应序列化为 mention.ais=1", async () => {
+    let sentBody: any = null;
+    global.fetch = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      sentBody = JSON.parse(init?.body as string);
+      return new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const { sendMessage } = await import("./api-fetch.js");
+    await sendMessage({
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      channelId: "group1",
+      channelType: ChannelType.Group,
+      content: "hello @所有AI",
+      mentionAis: true,
+    });
+
+    const mention = sentBody.payload.mention;
+    expect(mention.ais).toBe(1);
+    expect(mention.all).toBeUndefined();
+    expect(mention.humans).toBeUndefined();
+  });
+
+  it("mentionHumans + mentionAis 可同时设置", async () => {
+    let sentBody: any = null;
+    global.fetch = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      sentBody = JSON.parse(init?.body as string);
+      return new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const { sendMessage } = await import("./api-fetch.js");
+    await sendMessage({
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      channelId: "group1",
+      channelType: ChannelType.Group,
+      content: "hello @所有人 @所有AI",
+      mentionHumans: true,
+      mentionAis: true,
+    });
+
+    const mention = sentBody.payload.mention;
+    expect(mention.humans).toBe(1);
+    expect(mention.ais).toBe(1);
+  });
 });

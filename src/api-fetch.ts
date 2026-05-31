@@ -216,6 +216,8 @@ export async function sendMessage(params: {
   mentionUids?: string[];
   mentionEntities?: MentionEntity[];
   mentionAll?: boolean;
+  mentionHumans?: boolean;
+  mentionAis?: boolean;
   replyMsgId?: string;
   onBehalfOf?: string;
   signal?: AbortSignal;
@@ -224,11 +226,14 @@ export async function sendMessage(params: {
     type: MessageType.Text,
     content: params.content,
   };
-  // Add mention field if any UIDs specified, entities present, or mentionAll
+  // Add mention field if any UIDs specified, entities present, or any
+  // broadcast flag (all / humans / ais) is set.
   if (
     (params.mentionUids && params.mentionUids.length > 0) ||
     (params.mentionEntities && params.mentionEntities.length > 0) ||
-    params.mentionAll
+    params.mentionAll ||
+    params.mentionHumans ||
+    params.mentionAis
   ) {
     const mention: Record<string, unknown> = {};
     if (params.mentionUids && params.mentionUids.length > 0) {
@@ -239,6 +244,15 @@ export async function sendMessage(params: {
     }
     if (params.mentionAll) {
       mention.all = 1;
+    }
+    // Three-state mention: humans = notify all humans (@所有人),
+    // ais = notify all AI bots (@所有AI). Independent flags — both may
+    // be set on the same message.
+    if (params.mentionHumans) {
+      mention.humans = 1;
+    }
+    if (params.mentionAis) {
+      mention.ais = 1;
     }
     payload.mention = mention;
   }

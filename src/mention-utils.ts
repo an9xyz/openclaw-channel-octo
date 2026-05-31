@@ -204,8 +204,16 @@ export function buildEntitiesFromFallback(
   while ((match = pattern.exec(content)) !== null) {
     const name = match[1];
 
-    // Skip @all / @All etc. — handled separately as mentionAll, not as entity
-    if (name.toLowerCase() === "all" || name === "所有人") continue;
+    // Skip broadcast tokens — handled separately as mentionAll /
+    // mentionHumans / mentionAis, not as a member entity.
+    const lowerName = name.toLowerCase();
+    if (
+      lowerName === "all" ||
+      lowerName === "all ais" ||
+      name === "所有人" ||
+      name === "所有AI"
+    )
+      continue;
 
     let uid: string | undefined;
     let matchedName = name;
