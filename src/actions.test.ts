@@ -104,6 +104,65 @@ describe("handleOctoMessageAction", () => {
     });
   });
 
+  // -----------------------------------------------------------------------
+  // #51 — messageId / mediaMessageIds propagation in toolResult.data
+  //   When Octo API returns SendMessageResult, the handler must surface
+  //   message_id back to the LLM via toolResult.data so the agent can
+  //   reference the sent message for downstream edit/pin/delete.
+  // -----------------------------------------------------------------------
+  describe("send — messageId / mediaMessageIds propagation (#51)", () => {
+    it("toolResult.data.messageId comes from Octo API send response", async () => {
+      globalThis.fetch = mockFetch({
+        "/v1/bot/sendMessage": async () =>
+          jsonResponse({ message_id: "2061639302604820480", client_msg_no: "uuid", message_seq: 7 }),
+      });
+
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
+        action: "send",
+        args: { target: "group:chan123", message: "hello" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+      });
+
+      expect(result.ok).toBe(true);
+      expect((result.data as any).messageId).toBe("2061639302604820480");
+    });
+
+    it("toolResult.data.mediaMessageIds comes from uploadAndSendMedia results", async () => {
+      const { uploadAndSendMedia } = await import("./inbound.js");
+      vi.mocked(uploadAndSendMedia).mockResolvedValueOnce({
+        message_id: "media-1-id",
+        client_msg_no: "uuid",
+        message_seq: 10,
+      });
+      vi.mocked(uploadAndSendMedia).mockResolvedValueOnce({
+        message_id: "media-2-id",
+        client_msg_no: "uuid",
+        message_seq: 11,
+      });
+
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
+        action: "send",
+        args: {
+          target: "group:chan123",
+          // No text — pure media send so we observe mediaMessageIds in isolation.
+          attachments: [
+            { url: "https://example.com/a.png" },
+            { url: "https://example.com/b.png" },
+          ],
+        },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+      });
+
+      expect(result.ok).toBe(true);
+      expect((result.data as any).mediaMessageIds).toEqual(["media-1-id", "media-2-id"]);
+      expect((result.data as any).mediaCount).toBe(2);
+    });
+  });
+
   describe("send — bare target defaults to DM", () => {
     it("should default to DM when no prefix", async () => {
       let sentPayload: any = null;

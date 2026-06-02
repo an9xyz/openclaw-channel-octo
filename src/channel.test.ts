@@ -4,10 +4,17 @@ import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
 // Mock api-fetch so outbound adapter wiring tests (below) can observe the
 // final sendMessage / sendMediaMessage arguments without actually hitting
 // Octo. Real implementations still ship in the bundle — this is test-only.
+//
+// Default success result — outbound deliver helper (toDeliveryResult) throws
+// on missing message_id (issue #51), so existing wiring tests that only
+// care about HOW we called sendMessage need a valid result by default.
+// Individual tests can `vi.mocked(sendMessage).mockResolvedValueOnce(...)`
+// to assert failure paths.
 vi.mock("./api-fetch.js", async () => {
+  const okResult = { message_id: "test-msg-id", client_msg_no: "uuid", message_seq: 1 };
   return {
-    sendMessage: vi.fn().mockResolvedValue(undefined),
-    sendMediaMessage: vi.fn().mockResolvedValue(undefined),
+    sendMessage: vi.fn().mockResolvedValue(okResult),
+    sendMediaMessage: vi.fn().mockResolvedValue(okResult),
     getUploadCredentials: vi.fn().mockResolvedValue({
       credentials: { TmpSecretId: "id", TmpSecretKey: "k", Token: "t" },
       startTime: 0,
@@ -711,5 +718,114 @@ describe("outbound sendText/sendMedia — accountId correction threads through t
     expect(sendMessage).toHaveBeenCalledTimes(1);
     const call = (sendMessage as any).mock.calls[0][0];
     expect(call.botToken).toBe("tok-bot-b");
+  });
+});
+
+// ─── #51 outbound deliver — messageId propagation ──────────────────────────
+// Regression tests for the bug where sendText / sendMedia returned
+// `messageId: ""` regardless of what the Octo API returned. After 2026.5.7
+// the host runtime evaluates `deliverySucceeded` strictly and silently
+// drops outbound when the adapter result has an empty messageId.
+
+describe("outbound sendText/sendMedia — messageId propagation (#51)", () => {
+  const cfg = {
+    channels: {
+      octo: {
+        apiUrl: "https://api.example",
+        accounts: {
+          "bot-a": { botToken: "tok-a", apiUrl: "https://api.example" },
+        },
+      },
+    },
+  };
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+  });
+
+  it("sendText propagates message_id from Octo API result to OutboundDeliveryResult", async () => {
+    const { octoPlugin } = await import("./channel.js");
+    const { sendMessage } = await import("./api-fetch.js");
+    vi.mocked(sendMessage).mockResolvedValueOnce({
+      message_id: "real-id-abc",
+      client_msg_no: "uuid",
+      message_seq: 42,
+    });
+
+    const result = await octoPlugin.outbound!.sendText!({
+      cfg,
+      to: "group:grp1",
+      text: "hello",
+      accountId: "bot-a",
+    } as any);
+
+    expect(result.messageId).toBe("real-id-abc");
+    expect(result.channel).toBe("octo");
+  });
+
+  it("sendText empty text returns messageId='' and does NOT call sendMessage (noop)", async () => {
+    const { octoPlugin } = await import("./channel.js");
+    const { sendMessage } = await import("./api-fetch.js");
+
+    const result = await octoPlugin.outbound!.sendText!({
+      cfg,
+      to: "group:grp1",
+      text: "   ",
+      accountId: "bot-a",
+    } as any);
+
+    expect(result.messageId).toBe("");
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("sendText throws when Octo API returns undefined (fail-fast on anomaly)", async () => {
+    const { octoPlugin } = await import("./channel.js");
+    const { sendMessage } = await import("./api-fetch.js");
+    vi.mocked(sendMessage).mockResolvedValueOnce(undefined);
+
+    await expect(octoPlugin.outbound!.sendText!({
+      cfg,
+      to: "group:grp1",
+      text: "hello",
+      accountId: "bot-a",
+    } as any)).rejects.toThrow(/no message_id/);
+  });
+
+  it("sendText throws when Octo API returns empty message_id", async () => {
+    const { octoPlugin } = await import("./channel.js");
+    const { sendMessage } = await import("./api-fetch.js");
+    vi.mocked(sendMessage).mockResolvedValueOnce({
+      message_id: "",
+      client_msg_no: "uuid",
+      message_seq: 0,
+    });
+
+    await expect(octoPlugin.outbound!.sendText!({
+      cfg,
+      to: "group:grp1",
+      text: "hello",
+      accountId: "bot-a",
+    } as any)).rejects.toThrow(/no message_id/);
+  });
+
+  it("sendMedia propagates message_id from sendMediaMessage result", async () => {
+    const { octoPlugin } = await import("./channel.js");
+    const { sendMediaMessage } = await import("./api-fetch.js");
+    vi.mocked(sendMediaMessage).mockResolvedValueOnce({
+      message_id: "media-xyz",
+      client_msg_no: "uuid",
+      message_seq: 99,
+    });
+
+    const result = await octoPlugin.outbound!.sendMedia!({
+      cfg,
+      to: "group:grp1",
+      text: "",
+      mediaUrl: "data:text/plain;base64,aGVsbG8=",
+      accountId: "bot-a",
+    } as any);
+
+    expect(result.messageId).toBe("media-xyz");
   });
 });
