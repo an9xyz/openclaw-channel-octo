@@ -368,6 +368,7 @@ async function handleSend(params: {
   }
 
   // Send text message
+  let textMessageId: string | undefined;
   if (message) {
     let mentionUids: string[] = [];
     let mentionEntities: MentionEntity[] = [];
@@ -411,7 +412,7 @@ async function handleSend(params: {
     // Detect @all/@所有人 in final content
     const hasAtAll = /(?:^|(?<=\s))@(?:all|所有人)(?=\s|[^\w]|$)/i.test(finalMessage);
 
-    await sendMessage({
+    const sendResult = await sendMessage({
       apiUrl,
       botToken,
       channelId,
@@ -421,14 +422,19 @@ async function handleSend(params: {
       ...(mentionEntities.length > 0 ? { mentionEntities } : {}),
       mentionAll: hasAtAll || undefined,
     });
+    // Capture message_id so the LLM toolResult can reference this message
+    // (see issue #51). Octo API may rarely return an undefined/empty id
+    // even on 2xx — fall back to undefined and let the caller see no
+    // messageId rather than fabricate one.
+    textMessageId = sendResult?.message_id ? String(sendResult.message_id).trim() : undefined;
   }
 
   // Send media
-  const sentMedia: string[] = [];
+  const sentMedia: Array<{ url: string; messageId?: string }> = [];
   const failedMedia: { url: string; error: string }[] = [];
   for (const mediaUrl of mediaUrls) {
     try {
-      await uploadAndSendMedia({
+      const mediaResult = await uploadAndSendMedia({
         mediaUrl,
         apiUrl,
         botToken,
@@ -436,7 +442,8 @@ async function handleSend(params: {
         channelType,
         log: log as any,
       });
-      sentMedia.push(mediaUrl);
+      const mediaMessageId = mediaResult?.message_id ? String(mediaResult.message_id).trim() : undefined;
+      sentMedia.push({ url: mediaUrl, messageId: mediaMessageId });
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       log?.error?.(`octo: uploadAndSendMedia failed for ${mediaUrl}: ${errMsg}`);
@@ -452,6 +459,10 @@ async function handleSend(params: {
     };
   }
 
+  const mediaMessageIds = sentMedia
+    .map(m => m.messageId)
+    .filter((id): id is string => Boolean(id));
+
   return {
     ok: true,
     data: {
@@ -460,6 +471,10 @@ async function handleSend(params: {
       channelId,
       channelType,
       mediaCount: sentMedia.length,
+      // messageId fields added for issue #51 — let the LLM reference the
+      // sent message(s) for downstream edit/pin/delete operations.
+      ...(textMessageId ? { messageId: textMessageId } : {}),
+      ...(mediaMessageIds.length > 0 ? { mediaMessageIds } : {}),
       ...(failedMedia.length > 0 ? { failedMedia } : {}),
     },
   };

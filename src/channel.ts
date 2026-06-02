@@ -27,7 +27,7 @@ function getAgentVersion(): string {
 }
 import { WKSocket } from "./socket.js";
 import { handleInboundMessage, type OctoStatusSink, sanitizeFilename } from "./inbound.js";
-import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "./types.js";
+import { ChannelType, MessageType, type BotMessage, type MessagePayload, type SendMessageResult } from "./types.js";
 import { buildEntitiesFromFallback, parseStructuredMentions, convertStructuredMentions } from "./mention-utils.js";
 import type { MentionEntity } from "./types.js";
 import { handleOctoMessageAction, parseTarget, resolveOutboundOctoTarget, normalizeOutboundChannelPrefix, extractInlineMentionUids } from "./actions.js";
@@ -49,6 +49,27 @@ const DEFAULT_GROUP_HISTORY_LIMIT = 20;
 
 const MAX_UPLOAD_SIZE = 500 * 1024 * 1024; // 500 MB
 const UPLOAD_TEMP_DIR = path.join("/tmp", "octo-upload");
+
+/**
+ * Build OutboundDeliveryResult from Octo's SendMessageResult.
+ *
+ * Fail-fast on missing/empty message_id: when the Octo API returned 2xx but
+ * the body is missing `message_id`, that is an API anomaly — surfacing it as
+ * an error is better than silently returning `messageId: ""`, which OpenClaw
+ * 2026.5.7+ treats as `deliverySucceeded=false` and quietly drops downstream
+ * (see issue #51).
+ *
+ * For early-return noop paths (empty content, no actual API call), do NOT
+ * use this helper — return `{ channel, to, messageId: "" }` directly with an
+ * inline comment.
+ */
+function toDeliveryResult(to: string, result: SendMessageResult | undefined) {
+  const messageId = result?.message_id ? String(result.message_id).trim() : "";
+  if (!messageId) {
+    throw new Error("Octo send API returned no message_id");
+  }
+  return { channel: CHANNEL_ID, to, messageId };
+}
 
 /** Download a URL to a temp file with backpressure, return the temp path. */
 async function downloadToTempFile(url: string, filename: string, signal?: AbortSignal): Promise<{ tempPath: string; contentType: string | undefined }> {
@@ -683,6 +704,11 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
       }
       const content = ctx.text?.trim();
       if (!content) {
+        // noop early-return: no API call was made, so no real message_id
+        // exists. Runtime will see messageId="" and judge
+        // deliverySucceeded=false — that is the CORRECT semantics for
+        // "we delivered nothing". Do NOT fabricate an ID here. See
+        // toDeliveryResult() helper at the top of this file.
         return { channel: CHANNEL_ID, to: ctx.to, messageId: "" };
       }
 
@@ -732,7 +758,7 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
       // Detect @all/@所有人 in content
       const hasAtAll = /(?:^|(?<=\s))@(?:all|所有人)(?=\s|[^\w]|$)/i.test(finalContent);
 
-      await sendMessage({
+      const sendResult = await sendMessage({
         apiUrl: account.config.apiUrl,
         botToken: account.config.botToken,
         channelId,
@@ -743,7 +769,7 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
         mentionAll: hasAtAll || undefined,
       });
 
-      return { channel: CHANNEL_ID, to: ctx.to, messageId: "" };
+      return toDeliveryResult(ctx.to, sendResult);
     },
     sendMedia: async (ctx) => {
       // Resolve correct accountId — framework may pass wrong one for multi-bot setups
@@ -830,6 +856,7 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
 
       contentType = contentType || "application/octet-stream";
 
+      let sendResult: SendMessageResult | undefined;
       try {
         // 2. Upload to COS via STS credentials (stream mode)
         const creds = await getUploadCredentials({
@@ -867,7 +894,7 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
             : Buffer.isBuffer(fileBody)
               ? parseImageDimensions(fileBody, contentType)
               : null;
-          await sendMediaMessage({
+          sendResult = await sendMediaMessage({
             apiUrl: account.config.apiUrl,
             botToken: account.config.botToken,
             channelId,
@@ -880,7 +907,7 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
             size: fileSize,
           });
         } else {
-          await sendMediaMessage({
+          sendResult = await sendMediaMessage({
             apiUrl: account.config.apiUrl,
             botToken: account.config.botToken,
             channelId,
@@ -896,7 +923,7 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
         if (tempPath) await unlink(tempPath).catch(() => {});
       }
 
-      return { channel: CHANNEL_ID, to: ctx.to, messageId: "" };
+      return toDeliveryResult(ctx.to, sendResult);
     },
   },
   status: {
