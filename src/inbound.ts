@@ -2,6 +2,7 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import type { ChannelLogSink } from "openclaw/plugin-sdk/channel-contract";
 import { DEFAULT_GROUP_HISTORY_LIMIT } from "openclaw/plugin-sdk/reply-history";
 import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson, sendMediaMessage, inferContentType, ensureTextCharset, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS, fetchUserInfo } from "./api-fetch.js";
+import { getMentionPrefFromCache } from "./mention-prefs.js";
 import type { ResolvedOctoAccount } from "./accounts.js";
 import type { BotMessage } from "./types.js";
 import { ChannelType, MessageType, RICH_TEXT_BLOCK_IMAGE, RICH_TEXT_BLOCK_TEXT, RICH_TEXT_IMAGE_PLACEHOLDER } from "./types.js";
@@ -21,6 +22,7 @@ import {
 import type { MentionPayload, MentionEntity, SendMessageResult } from "./types.js";
 import { registerGroupAccount, ensureGroupMd, handleGroupMdEvent, broadcastGroupMdUpdate, extractParentGroupNo, extractThreadShortId, ensureThreadMd, handleThreadMdEvent } from "./group-md.js";
 import { isOwner } from "./owner-registry.js";
+import { isKnownBot } from "./bot-registry.js";
 import { getPersonaPromptForSession } from "./persona-prompt.js";
 import { createWriteStream } from "node:fs";
 import { mkdir, unlink, readdir, stat } from "node:fs/promises";
@@ -1037,12 +1039,16 @@ async function refreshGroupMemberCache(opts: {
   memberMap: Map<string, string>;
   uidToNameMap: Map<string, string>;
   groupCacheTimestamps: Map<string, number>;
+  // uid -> robot flag (server-authoritative GroupMember.robot). Used by the 免@
+  // gate to suppress relaxation for ANY bot sender — including cross-process /
+  // external bots this plugin never registered via registerKnownBot().
+  memberRobotMap?: Map<string, boolean>;
   apiUrl: string;
   botToken: string;
   forceRefresh?: boolean;
   log?: ChannelLogSink;
 }): Promise<boolean> {
-  const { sessionId, memberMap, uidToNameMap, groupCacheTimestamps, apiUrl, botToken, log } = opts;
+  const { sessionId, memberMap, uidToNameMap, groupCacheTimestamps, memberRobotMap, apiUrl, botToken, log } = opts;
   const forceRefresh = opts.forceRefresh ?? false;
 
   const lastFetched = groupCacheTimestamps.get(sessionId) ?? 0;
@@ -1074,6 +1080,16 @@ async function refreshGroupMemberCache(opts: {
             memberMap.set(nameWithoutEmoji, m.uid);
             log?.debug?.(`octo: [CACHE] Added emoji alias: "${nameWithoutEmoji}" -> "${m.uid}"`);
           }
+        }
+        // Preserve the server-authoritative robot flag for the 免@ gate. Keyed
+        // by uid (not name) so sender classification survives display-name
+        // collisions. Accept BOTH boolean `true` and numeric `1`: the backend
+        // serializes GroupMember.robot as a number, so a strict `=== true`
+        // would misclassify a bot (robot:1) as human → relax requireMention →
+        // reply to non-@ bot messages → bot-to-bot loop. This matches the
+        // no_mention true/1 coercion used elsewhere in the gate.
+        if (m.uid && memberRobotMap) {
+          memberRobotMap.set(m.uid, m.robot === true || m.robot === 1);
         }
       }
       groupCacheTimestamps.set(sessionId, now);
@@ -1178,11 +1194,16 @@ export async function handleInboundMessage(params: {
   memberMap: Map<string, string>;  // displayName -> uid mapping
   uidToNameMap: Map<string, string>;  // uid -> displayName mapping (reverse)
   groupCacheTimestamps: Map<string, number>;  // groupId -> lastFetchedAt
+  memberRobotMap?: Map<string, boolean>;  // uid -> robot flag (server-authoritative)
   groupMdCache?: Map<string, { content: string; version: number }>;
   log?: ChannelLogSink;
   statusSink?: OctoStatusSink;
 }) {
   const { account, message, botUid, groupHistories, lastBotReplySeqMap, memberMap, uidToNameMap, groupCacheTimestamps, groupMdCache, log, statusSink } = params;
+  // Server-authoritative robot map. Default to a throwaway Map when the caller
+  // omits it so the gate logic below can read it unconditionally; the real
+  // channel call site passes a persistent per-account map.
+  const memberRobotMap = params.memberRobotMap ?? new Map<string, boolean>();
 
   // Detect GROUP.md update/delete notification — refresh both memory + disk cache, do NOT pass to LLM
   const earlyEventType = (message.payload as any)?.event?.type;
@@ -1422,21 +1443,67 @@ export async function handleInboundMessage(params: {
     }
   }
 
-  // --- Mention gating for group messages ---
-  const requireMention = account.config.requireMention !== false;
-  let historyPrefix = "";
-
-  // Save original mention uids for reply (exclude bot itself)
-  const originalMentionUids: string[] = (message.payload?.mention?.uids ?? []).filter((uid: string) => uid !== botUid);
-
-    // Refresh group member cache if needed (on first message or after expiry)
+  // Refresh group member cache BEFORE the mention gate.
+  // The gate's bot-sender classification relies on the server-authoritative
+  // GroupMember.robot flag (populated into memberRobotMap by this refresh), so
+  // the cache must be warm before we decide whether to relax requireMention.
   // Use parent groupNo for member cache API calls (thread channelIds are compound)
   const memberCacheGroupNo = isGroup
     ? extractParentGroupNo(message.channel_id!)
     : sessionId;
   if (isGroup) {
-    await refreshGroupMemberCache({ sessionId: memberCacheGroupNo, memberMap, uidToNameMap, groupCacheTimestamps, apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", log });
+    await refreshGroupMemberCache({ sessionId: memberCacheGroupNo, memberMap, uidToNameMap, groupCacheTimestamps, memberRobotMap, apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", log });
   }
+
+  // --- Mention gating for group messages ---
+  // Group-aware requireMention: a group admin can mark a group as 免@
+  // (no_mention=true) for this specific bot, in which case the bot replies to
+  // every message without an explicit @mention. The preference is per-(bot,
+  // group); thread (compound channel_id) messages inherit their PARENT group's
+  // preference, so we resolve the parent group_no first. On miss/expiry the
+  // cache pulls GET /v1/bot/groups/:group_no/mention_pref (TTL 5min); any
+  // failure falls back to the account-level config, so the gate never crashes.
+  //
+  // The 免@ relaxation is HUMAN-ONLY and FAIL-CLOSED (PR#57 round-4 P1).
+  // channel.ts forwards other bots' group messages into here on purpose,
+  // relying on this mention gate to drop the non-@ ones. If we relaxed
+  // requireMention for a non-human sender, two 免@ bots in the same group would
+  // reply to each other with no @ to break the chain — an unbounded bot-to-bot
+  // loop (group spam + token burn).
+  //
+  // Earlier rounds used a BLACKLIST ("relax UNLESS the sender is a proven
+  // bot"), which fails OPEN: any sender we could not positively prove was a bot
+  // defaulted to "human" and had requireMention relaxed. That left loop paths
+  // open whenever classification was uncertain — an unknown/cross-process
+  // sender absent from isKnownBot, or ANY sender when refreshGroupMemberCache
+  // failed/returned empty so memberRobotMap was never populated (robot flag →
+  // undefined → treated as human → reply → loop).
+  //
+  // We invert to a WHITELIST: relax requireMention ONLY for a sender the
+  // server-authoritative member list positively confirms as human. This closes
+  // every loop path at once, independent of where the sender came from, how its
+  // robot flag was serialized, or whether the member refresh succeeded:
+  //   memberRobotMap.get(uid) === false → confirmed human          → may relax
+  //   memberRobotMap.get(uid) === true  → confirmed bot             → keep @
+  //   memberRobotMap.get(uid) === undefined (unknown sender, OR the
+  //       member refresh failed/empty so the map is unpopulated)
+  //                                      → classification unknown   → keep @
+  //   isKnownBot(uid)                   → bot from this process     → keep @
+  //
+  // memberRobotMap is populated by the refreshGroupMemberCache() call above;
+  // a failed/empty refresh simply leaves the sender's uid absent → undefined →
+  // fail-closed. We key on this per-sender map entry rather than the refresh()
+  // boolean on purpose: that boolean is ambiguous (it also returns false on a
+  // warm-cache hit, and the maps are shared across groups), so gating on it
+  // would wrongly suppress replies to humans on every cached message.
+  const isFromKnownBot = isKnownBot(message.from_uid);
+  const isConfirmedHuman = !isFromKnownBot && memberRobotMap.get(message.from_uid) === false;
+  // account-level requireMention: false means the account is already 免@.
+  const accountRequiresMention = account.config.requireMention !== false;
+  let historyPrefix = "";
+
+  // Save original mention uids for reply (exclude bot itself)
+  const originalMentionUids: string[] = (message.payload?.mention?.uids ?? []).filter((uid: string) => uid !== botUid);
 
   // Compute mention flags — separate "reply gating" from "command gating"
   let isMentioned = false;
@@ -1508,6 +1575,36 @@ export async function handleInboundMessage(params: {
       }
     }
   }
+
+  // Group 免@ preference lookup — deferred until AFTER mention flags are known.
+  // Only consult the group pref when it can actually change the outcome:
+  //   1. isGroup && accountRequiresMention — else the pref can only return
+  //      no_mention=false, with no effect.
+  //   2. isConfirmedHuman — the 免@ relaxation is whitelist/fail-closed: it
+  //      applies ONLY to a sender the member list positively confirms is human.
+  //      Unknown senders, refresh failures, and any bot keep requireMention, so
+  //      there is no point paying for the pref lookup for them either.
+  //   3. !isMentioned — an explicit @bot message already passes the gate, so
+  //      the pref can't change anything. Short-circuiting here keeps explicit
+  //      @bot replies off the (cold/slow) pref network path entirely, avoiding
+  //      up to MENTION_PREF_TIMEOUT_MS of needless latency on the hot path.
+  const shouldCheckGroupPref =
+    isGroup && accountRequiresMention && isConfirmedHuman && !isMentioned;
+  const mentionPref = shouldCheckGroupPref
+    ? await getMentionPrefFromCache({
+        accountId: account.accountId,
+        parentGroupNo: extractParentGroupNo(message.channel_id!),
+        apiUrl: account.config.apiUrl,
+        // botToken ?? "" can yield an empty `Bearer` header; getMentionPref
+        // treats any non-2xx (incl. the resulting 401) as no_mention=false, so
+        // the gate safely falls back to the account-level config.
+        botToken: account.config.botToken ?? "",
+        log,
+      })
+    : undefined;
+  const requireMention = mentionPref?.no_mention === true
+    ? false
+    : accountRequiresMention;
 
   if (isGroup && requireMention) {
     // Debug: log received mention info
@@ -2160,7 +2257,7 @@ export async function handleInboundMessage(params: {
 
         if (unresolvedNames.length > 0) {
           log?.info?.(`octo: [REPLY] ${unresolvedNames.length} unresolved names, force refreshing cache...`);
-          const refreshed = await refreshGroupMemberCache({ sessionId: memberCacheGroupNo, memberMap, uidToNameMap, groupCacheTimestamps, apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", forceRefresh: true, log });
+          const refreshed = await refreshGroupMemberCache({ sessionId: memberCacheGroupNo, memberMap, uidToNameMap, groupCacheTimestamps, memberRobotMap, apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", forceRefresh: true, log });
           if (refreshed) {
             for (const { name, index } of unresolvedNames) {
               const uid = findUidByName(name, memberMap);

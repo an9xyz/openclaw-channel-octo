@@ -11,6 +11,11 @@ import { randomUUID } from "node:crypto";
 import COS from "cos-nodejs-sdk-v5";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+// Short timeout for the per-message mention_pref hot-path lookup. On a cache
+// miss this fires on the first message of every group every TTL window; before
+// the backend ships it 404s, and we must not stall the inbound pipeline for the
+// full 30s. A failed/slow lookup just falls back to the account-level config.
+const MENTION_PREF_TIMEOUT_MS = 3_000;
 
 /**
  * 生成出站消息的客户端幂等编号 client_msg_no（UUID）。
@@ -438,7 +443,9 @@ export interface GroupMember {
   uid: string;
   name: string;
   role?: string;    // admin/member
-  robot?: boolean;  // 是否是机器人
+  // 是否是机器人。后端把该 flag 序列化成数字（1/0），但历史上也出现过 boolean，
+  // 故类型放宽为 boolean | number；消费端须同时认 `=== true` 和 `=== 1`。
+  robot?: boolean | number;
 }
 
 export async function getGroupMembers(params: {
@@ -496,6 +503,62 @@ export async function getGroupInfo(params: {
   } catch (err) {
     params.log?.error?.(`octo: getGroupInfo error: ${err}`);
     throw err;
+  }
+}
+
+/**
+ * 群级免@偏好（per-group mention preference）。
+ *
+ * 后端 octo-server#237 暴露 GET /v1/bot/groups/:group_no/mention_pref，
+ * 返回 `{ no_mention: boolean }`。`no_mention=true` 表示该群对当前 bot
+ * 免@即可触发回复。
+ */
+export interface MentionPref {
+  no_mention: boolean;
+}
+
+/**
+ * 获取某群对当前 bot 的免@偏好。
+ *
+ * 失败（网络错误 / 非 2xx / 解析失败）一律回退到账号级行为
+ * （`{ no_mention: false }`，即保持需@），绝不抛错，避免 gate 崩溃。
+ */
+export async function getMentionPref(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;  // 父群 group_no（thread 复合 channel_id 须先取父群）
+  log?: { info?: (msg: string) => void; error?: (msg: string) => void };
+}): Promise<MentionPref> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${encodeURIComponent(params.groupNo)}/mention_pref`;
+  try {
+    const resp = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${params.botToken}`,
+      },
+      signal: AbortSignal.timeout(MENTION_PREF_TIMEOUT_MS),
+    });
+    if (!resp.ok) {
+      // 404 = the mention_pref endpoint isn't deployed yet (expected during
+      // rollout before octo-server#237 ships); 401 = empty/short-lived Bearer.
+      // Both are benign — we fall back to no_mention=false below — and recur on
+      // every inbound message, so logging them at error level (compounded by
+      // the 30s negative-cache TTL) makes a healthy rollout look broken. Log
+      // expected statuses at info and reserve error for genuinely unexpected
+      // responses (5xx, etc.).
+      const expected = resp.status === 404 || resp.status === 401;
+      const msg = `octo: getMentionPref(${params.groupNo}) failed: ${resp.status}`;
+      if (expected) params.log?.info?.(msg);
+      else params.log?.error?.(msg);
+      return { no_mention: false };
+    }
+    const data = await resp.json();
+    // Accept boolean `true` or numeric `1` (DB/JSON may serialize either),
+    // mirroring the mention.{all,ais,humans} coercion in inbound.ts.
+    return { no_mention: data?.no_mention === true || data?.no_mention === 1 };
+  } catch (err) {
+    params.log?.error?.(`octo: getMentionPref(${params.groupNo}) error: ${err}`);
+    return { no_mention: false };
   }
 }
 

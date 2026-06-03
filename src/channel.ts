@@ -33,7 +33,9 @@ import type { MentionEntity } from "./types.js";
 import { handleOctoMessageAction, parseTarget, resolveOutboundOctoTarget, normalizeOutboundChannelPrefix, extractInlineMentionUids } from "./actions.js";
 import { getOrCreateGroupMdCache, registerBotGroupIds, getKnownGroupIds, writeGroupMdToDisk } from "./group-md.js";
 import { registerOwnerUid } from "./owner-registry.js";
+import { registerKnownBot, isKnownBot } from "./bot-registry.js";
 import { preloadGroupMemberCache, getGroupMembersFromCache } from "./member-cache.js";
+import { preloadMentionPrefs } from "./mention-prefs.js";
 import { initPersonaPromptCache, stopPersonaPromptCache } from "./persona-prompt.js";
 import { registerOctoThreadBindingAdapter } from "./thread-binding-adapter.js";
 import path from "node:path";
@@ -237,6 +239,20 @@ function getOrCreateGroupCacheTimestamps(accountId: string): Map<string, number>
   return m;
 }
 
+// Module-level robot flags: uid -> robot (server-authoritative GroupMember.robot)
+// Consulted by the 免@ mention gate to keep requireMention for ANY bot sender,
+// including cross-process / external bots not registered via registerKnownBot().
+// Flat uid→robot map (not keyed by groupId), like uidToNameMap.
+const _memberRobotMaps = new Map<string, Map<string, boolean>>();
+function getOrCreateMemberRobotMap(accountId: string): Map<string, boolean> {
+  let m = _memberRobotMaps.get(accountId);
+  if (!m) {
+    m = new Map<string, boolean>();
+    _memberRobotMaps.set(accountId, m);
+  }
+  return m;
+}
+
 
 // --- Group → Account mapping: tracks which accounts are active in each group ---
 // Used by handleAction to resolve the correct account when framework passes wrong accountId
@@ -295,8 +311,15 @@ function cleanupStaleCaches(): void {
   }
 }
 
-// Known bot robot_ids across all accounts — for bot-to-bot loop prevention
-const _knownBotUids = new Set<string>();
+// Known bot robot_ids across all accounts — for bot-to-bot loop prevention.
+// Backed by the shared bot-registry so inbound.ts can consult the same set
+// without importing channel.ts (channel.ts → inbound.ts is one-way; importing
+// back would create a cycle). The thin wrapper keeps existing call sites
+// (_knownBotUids.add / .has) unchanged.
+const _knownBotUids = {
+  add: (uid: string) => registerKnownBot(uid),
+  has: (uid: string) => isKnownBot(uid),
+};
 
 // Singleton timer to prevent accumulation during hot reload (#54)
 let _cleanupTimer: NodeJS.Timeout | null = null;
@@ -1007,6 +1030,15 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
         log,
       }).catch(() => {});
 
+      // Preload group-level 免@偏好 for this bot (fire-and-forget). Optional
+      // warm-up; the inbound mention gate works lazily without it.
+      preloadMentionPrefs({
+        accountId: account.accountId,
+        apiUrl: account.config.apiUrl,
+        botToken: account.config.botToken!,
+        log,
+      }).catch(() => {});
+
       // Start persona_prompt cache refresh loop for persona-clone bots
       // (GH octo-adapters#68). No-op for regular bots. Polls
       // GET /v1/bot/obo-grant so persona_prompt edits propagate without
@@ -1144,6 +1176,9 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
       // 4d. Group cache timestamps — track when each group's members were last fetched
       const groupCacheTimestamps = getOrCreateGroupCacheTimestamps(account.accountId);
 
+      // 4e. Robot flags map — server-authoritative sender classification for the 免@ gate
+      const memberRobotMap = getOrCreateMemberRobotMap(account.accountId);
+
       // 5. Token refresh state — time-based cooldown to prevent refresh storms
       let lastTokenRefreshAt = 0;
       const TOKEN_REFRESH_COOLDOWN_MS = 60_000; // 60 seconds
@@ -1222,6 +1257,7 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
                 memberMap,
                 uidToNameMap,
                 groupCacheTimestamps,
+                memberRobotMap,
                 groupMdCache,
                 log,
                 statusSink,
