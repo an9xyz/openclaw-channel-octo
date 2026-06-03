@@ -21,6 +21,7 @@ import {
   sessionAccountMap,
   buildSessionAccountKey,
   segmentHistoryEntries,
+  resolveInboundMediaList,
   type ResolveFileResult,
 } from "./inbound.js";
 import { extractMentionUids } from "./mention-utils.js";
@@ -982,7 +983,7 @@ describe("downloadMediaToLocal", () => {
 
     expect(result).toBeDefined();
     expect(result).not.toContain("http");
-    expect(result!.startsWith("/tmp/octo-media/")).toBe(true);
+    expect(result!.startsWith("/tmp/openclaw/octo-media/")).toBe(true);
     expect(result!.endsWith(".jpeg")).toBe(true);
     expect(existsSync(result!)).toBe(true);
     expect(readFileSync(result!)).toEqual(Buffer.from(imageData));
@@ -1101,6 +1102,63 @@ describe("downloadMediaToLocal", () => {
     expect(result).toBeDefined();
     expect(result!.endsWith(".mp4")).toBe(true);
     tempFiles.push(result!);
+  });
+});
+
+/**
+ * resolveInboundMediaList drives both MediaPaths (primary, fs-read by Core's
+ * normalizeAttachments) and MediaUrls (backward compat). This is the field that
+ * fixes #58: inbound images now travel as local fs paths under Core's allowed
+ * root, so media-understanding no longer falls back to http fetch + MediaFetchError.
+ */
+describe("resolveInboundMediaList (Fixes #58)", () => {
+  it("File messages carry no inline media → undefined", () => {
+    expect(
+      resolveInboundMediaList({
+        isFileMessage: true,
+        inboundMediaUrl: "/tmp/openclaw/octo-media/a.jpg",
+        inboundMediaUrls: ["/tmp/openclaw/octo-media/a.jpg"],
+      }),
+    ).toBeUndefined();
+  });
+
+  it("single local media path → one-element list", () => {
+    expect(
+      resolveInboundMediaList({
+        isFileMessage: false,
+        inboundMediaUrl: "/tmp/openclaw/octo-media/a.jpg",
+      }),
+    ).toEqual(["/tmp/openclaw/octo-media/a.jpg"]);
+  });
+
+  it("RichText(=14) multi-image → every local path", () => {
+    const paths = [
+      "/tmp/openclaw/octo-media/a.jpg",
+      "/tmp/openclaw/octo-media/b.png",
+    ];
+    expect(
+      resolveInboundMediaList({
+        isFileMessage: false,
+        inboundMediaUrl: paths[0],
+        inboundMediaUrls: paths,
+      }),
+    ).toEqual(paths);
+  });
+
+  it("no media at all → undefined", () => {
+    expect(resolveInboundMediaList({ isFileMessage: false })).toBeUndefined();
+  });
+
+  it("MediaPaths and MediaUrls derive identical values (compat)", () => {
+    const args = {
+      isFileMessage: false,
+      inboundMediaUrl: "/tmp/openclaw/octo-media/a.jpg",
+      inboundMediaUrls: [
+        "/tmp/openclaw/octo-media/a.jpg",
+        "/tmp/openclaw/octo-media/b.jpg",
+      ],
+    };
+    expect(resolveInboundMediaList(args)).toEqual(resolveInboundMediaList(args));
   });
 });
 

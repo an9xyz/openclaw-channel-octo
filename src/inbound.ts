@@ -603,9 +603,30 @@ export function calcDownloadTimeout(fileSize?: number): number {
   return Math.min(MAX_TIMEOUT, Math.max(MIN_TIMEOUT, computed));
 }
 
-const MEDIA_TEMP_DIR = join("/tmp", "octo-media");
+// Download inbound media under Core's allowed media root (/tmp/openclaw) so
+// that isInboundPathAllowed accepts the local path passed via MediaPaths.
+// A bare /tmp/octo-media dir is outside buildMediaLocalRoots and would be
+// rejected as `blocked`.
+const MEDIA_TEMP_DIR = join("/tmp", "openclaw", "octo-media");
 const MAX_MEDIA_DOWNLOAD_SIZE = 20 * 1024 * 1024; // 20MB cap for inbound media
 const MEDIA_DOWNLOAD_TIMEOUT = 120_000; // 120 seconds
+
+/**
+ * Derive the inbound media list passed to Core as both MediaPaths (primary,
+ * fs-read) and MediaUrls (backward-compatible). File messages carry no inline
+ * media here. RichText(=14) yields every locally-downloaded image; other types
+ * yield the single current local media path (no remote history URLs).
+ */
+export function resolveInboundMediaList(args: {
+  isFileMessage: boolean;
+  inboundMediaUrl?: string;
+  inboundMediaUrls?: string[];
+}): string[] | undefined {
+  const { isFileMessage, inboundMediaUrl, inboundMediaUrls } = args;
+  if (isFileMessage) return undefined;
+  if (inboundMediaUrls?.length) return inboundMediaUrls;
+  return inboundMediaUrl ? [inboundMediaUrl] : undefined;
+}
 
 /** Best-effort cleanup of inbound media temp files older than 1 hour */
 async function cleanupMediaTempFiles(): Promise<void> {
@@ -2053,13 +2074,14 @@ export async function handleInboundMessage(params: {
     BodyForCommands: commandBody,
     CommandAuthorized: commandAuthorized,
     MediaUrl: isFileMessage ? undefined : inboundMediaUrl,
-    MediaUrls: (() => {
-      if (isFileMessage) return undefined;
-      // RichText(=14): pass every locally-downloaded image (図文混排 multi-image).
-      if (inboundMediaUrls?.length) return inboundMediaUrls;
-      // Other types: only pass current message's local media path (no remote history URLs)
-      return inboundMediaUrl ? [inboundMediaUrl] : undefined;
-    })(),
+    // MediaPath(s): inbound media is downloaded to a Core-allowed local root,
+    // so pass the local fs path(s). normalizeAttachments prefers MediaPaths and
+    // reads via fs — avoiding the readRemoteMediaBuffer http path that throws
+    // MediaFetchError on bare local paths. MediaUrls below is kept at the same
+    // value for backward-compatible consumers.
+    MediaPath: isFileMessage ? undefined : inboundMediaUrl,
+    MediaPaths: resolveInboundMediaList({ isFileMessage, inboundMediaUrl, inboundMediaUrls }),
+    MediaUrls: resolveInboundMediaList({ isFileMessage, inboundMediaUrl, inboundMediaUrls }),
     MediaTypes: (() => {
       if (isFileMessage) return undefined;
       if (inboundMediaUrls?.length) {
