@@ -27,6 +27,7 @@ import {
   type ResolveFileResult,
 } from "./inbound.js";
 import { extractMentionUids } from "./mention-utils.js";
+import { normalizeMediaAttachments } from "openclaw/plugin-sdk/media-runtime";
 import { existsSync, unlinkSync, readFileSync } from "node:fs";
 
 /**
@@ -1166,14 +1167,19 @@ describe("resolveInboundMediaList (Fixes #58)", () => {
 });
 
 /**
- * resolveInboundMediaPaths is the local-only counterpart of resolveInboundMediaList.
- * Core treats MediaPaths as local fs inputs (normalizeAttachments prefers them and
- * reads via fs), so a RichText image whose download FAILED and fell back to its
- * remote URL must never enter MediaPaths — otherwise Core fs-reads a remote URL
- * string and rejects it as blocked/unreadable (the LIVE bug fixed here, Jerry-Xin
- * P1 on #59). Failed-fallback remote URLs stay only in MediaUrls.
+ * resolveInboundMediaPaths is the index-aligned counterpart of
+ * resolveInboundMediaList. Core's normalizeAttachments path-branch pairs
+ * MediaPaths[i] with MediaUrls[i] for the SAME image i, so the two arrays must
+ * stay equal-length and index-aligned. A RichText image whose download FAILED
+ * and fell back to its remote URL must never be handed to Core as a local fs
+ * path — Core would fs-read a remote URL string and reject it as
+ * blocked/unreadable (#58). But it must NOT be dropped either (Jerry-Xin P1 on
+ * #59): dropping shifts later indices and mis-pairs a local path with another
+ * image's remote URL. Instead, failed (remote) slots become `undefined`
+ * placeholders, which Core keeps as URL-only attachments via
+ * `.filter((e) => Boolean(e.path ?? e.url))`, sourcing the URL from MediaUrls[i].
  */
-describe("resolveInboundMediaPaths (#59 — exclude failed remote fallbacks)", () => {
+describe("resolveInboundMediaPaths (#59 — placeholder, not exclude, for failed remote fallbacks)", () => {
   it("File messages carry no inline media → undefined", () => {
     expect(
       resolveInboundMediaPaths({
@@ -1193,7 +1199,7 @@ describe("resolveInboundMediaPaths (#59 — exclude failed remote fallbacks)", (
     ).toEqual(["/tmp/openclaw/octo-media/a.jpg"]);
   });
 
-  it("mixed local + failed remote fallback → only local paths reach MediaPaths", () => {
+  it("mixed [local, failed-remote] → remote slot is an undefined placeholder, length preserved", () => {
     // RichText with two images: first downloaded OK (local path), second failed
     // and fell back to its remote https URL.
     const local = "/tmp/openclaw/octo-media/a.jpg";
@@ -1203,11 +1209,27 @@ describe("resolveInboundMediaPaths (#59 — exclude failed remote fallbacks)", (
       inboundMediaUrl: local,
       inboundMediaUrls: [local, remote],
     };
-    // The failed remote URL is EXCLUDED from MediaPaths…
-    expect(resolveInboundMediaPaths(args)).toEqual([local]);
-    // …but is still carried as a reference via MediaUrls.
+    // MediaPaths stays the SAME LENGTH as MediaUrls, index-aligned: the failed
+    // remote slot is an `undefined` placeholder, not dropped.
+    expect(resolveInboundMediaPaths(args)).toEqual([local, undefined]);
+    // The remote URL survives only via MediaUrls at the SAME index.
     expect(resolveInboundMediaList(args)).toEqual([local, remote]);
-    expect(resolveInboundMediaPaths(args)).not.toContain(remote);
+    // Same cardinality is the load-bearing invariant for Core's path-branch.
+    expect(resolveInboundMediaPaths(args)?.length).toBe(
+      resolveInboundMediaList(args)?.length,
+    );
+  });
+
+  it("mixed [failed-remote, local] → leading remote slot is placeholder, local keeps its index", () => {
+    const remote = "https://cdn.example.com/a.png";
+    const local = "/tmp/openclaw/octo-media/b.jpg";
+    const args = {
+      isFileMessage: false,
+      inboundMediaUrl: remote,
+      inboundMediaUrls: [remote, local],
+    };
+    expect(resolveInboundMediaPaths(args)).toEqual([undefined, local]);
+    expect(resolveInboundMediaList(args)).toEqual([remote, local]);
   });
 
   it("all images failed (every entry remote) → MediaPaths undefined", () => {
@@ -1219,7 +1241,8 @@ describe("resolveInboundMediaPaths (#59 — exclude failed remote fallbacks)", (
         "http://cdn.example.com/b.png",
       ],
     };
-    // Nothing local to fs-read → no MediaPaths; references survive via MediaUrls.
+    // Nothing local to fs-read → no MediaPaths; references survive via MediaUrls,
+    // where Core takes the URL branch instead.
     expect(resolveInboundMediaPaths(args)).toBeUndefined();
     expect(resolveInboundMediaList(args)).toEqual([
       "https://cdn.example.com/a.png",
@@ -1244,6 +1267,102 @@ describe("isRemoteMediaUrl", () => {
     expect(isRemoteMediaUrl("octo-media/a.jpg")).toBe(false);
     expect(isRemoteMediaUrl(undefined)).toBe(false);
     expect(isRemoteMediaUrl("")).toBe(false);
+  });
+});
+
+/**
+ * Integration-style test (#59 P1): assert the inbound media payload built by
+ * inbound.ts (MediaPaths / MediaUrls / MediaTypes) flows correctly through
+ * Core's REAL normalizeMediaAttachments (= normalizeAttachments). This guards
+ * the load-bearing cardinality + index-alignment invariant directly against
+ * Core, so a future change to resolveInboundMediaPaths that re-breaks alignment
+ * fails here, not silently in production.
+ *
+ * Core's path-branch pairs MediaPaths[i] ↔ MediaUrls[i] for the SAME image i:
+ *   pathsFromArray.map((value, index) => ({ path: value, url: urls?.[index] ?? ctx.MediaUrl }))
+ * and keeps entries where `path ?? url` is truthy. A failed (remote) image is a
+ * MediaPaths placeholder (undefined) whose URL survives at the same index.
+ */
+describe("inbound media payload × Core normalizeMediaAttachments (#59 alignment)", () => {
+  // Mirror the exact MediaPaths/MediaUrls/MediaTypes the inbound payload builds.
+  const buildPayload = (inboundMediaUrls: string[]) => {
+    const inboundMediaUrl = inboundMediaUrls[0];
+    const args = { isFileMessage: false, inboundMediaUrl, inboundMediaUrls };
+    const list = resolveInboundMediaList(args);
+    return {
+      MediaPaths: resolveInboundMediaPaths(args),
+      MediaUrls: list,
+      MediaTypes: list?.map((u) => guessImageMime(u)),
+    };
+  };
+  // Local mime helper mirroring inbound.ts's guessMime fallback for images.
+  const guessImageMime = (u: string) =>
+    /\.png$/i.test(u) ? "image/png" : "image/jpeg";
+
+  it("[local, failed-remote]: Core keeps 2 attachments, correct path/url per index", () => {
+    const local = "/tmp/openclaw/octo-media/a.jpg";
+    const remote = "https://cdn.example.com/b.png";
+    const payload = buildPayload([local, remote]);
+
+    // The inbound payload itself keeps both arrays equal-length + index-aligned.
+    expect(payload.MediaPaths).toEqual([local, undefined]);
+    expect(payload.MediaUrls).toEqual([local, remote]);
+
+    const attachments = normalizeMediaAttachments(payload as never);
+    expect(attachments).toHaveLength(2);
+    // Image 0: local download → fs path; url mirrors the same local entry.
+    expect(attachments[0].path).toBe(local);
+    expect(attachments[0].index).toBe(0);
+    expect(attachments[0].mime).toBe("image/jpeg");
+    // Image 1: download failed → URL-only attachment at the SAME index,
+    // carrying ITS OWN remote URL (not image 0's), with no local path.
+    expect(attachments[1].path).toBeUndefined();
+    expect(attachments[1].url).toBe(remote);
+    expect(attachments[1].index).toBe(1);
+    expect(attachments[1].mime).toBe("image/png");
+  });
+
+  it("[failed-remote, local]: order preserved, no cross-index mis-pairing", () => {
+    const remote = "https://cdn.example.com/a.png";
+    const local = "/tmp/openclaw/octo-media/b.jpg";
+    const payload = buildPayload([remote, local]);
+
+    expect(payload.MediaPaths).toEqual([undefined, local]);
+    expect(payload.MediaUrls).toEqual([remote, local]);
+
+    const attachments = normalizeMediaAttachments(payload as never);
+    expect(attachments).toHaveLength(2);
+    // Image 0: failed remote → URL-only, keeps its remote URL and index 0.
+    expect(attachments[0].path).toBeUndefined();
+    expect(attachments[0].url).toBe(remote);
+    expect(attachments[0].mime).toBe("image/png");
+    // Image 1: local → fs path, NOT paired with image 0's remote URL.
+    expect(attachments[1].path).toBe(local);
+    expect(attachments[1].url).toBe(local);
+    expect(attachments[1].mime).toBe("image/jpeg");
+  });
+
+  it("all-local: every attachment is an fs path read locally", () => {
+    const a = "/tmp/openclaw/octo-media/a.jpg";
+    const b = "/tmp/openclaw/octo-media/b.png";
+    const payload = buildPayload([a, b]);
+
+    const attachments = normalizeMediaAttachments(payload as never);
+    expect(attachments).toHaveLength(2);
+    expect(attachments.map((x) => x.path)).toEqual([a, b]);
+  });
+
+  it("all-failed (every remote): Core takes the URL branch, references survive", () => {
+    const a = "https://cdn.example.com/a.png";
+    const b = "http://cdn.example.com/b.png";
+    const payload = buildPayload([a, b]);
+
+    // No local path anywhere → MediaPaths undefined → Core uses MediaUrls branch.
+    expect(payload.MediaPaths).toBeUndefined();
+    const attachments = normalizeMediaAttachments(payload as never);
+    expect(attachments).toHaveLength(2);
+    expect(attachments.every((x) => x.path === undefined)).toBe(true);
+    expect(attachments.map((x) => x.url)).toEqual([a, b]);
   });
 });
 

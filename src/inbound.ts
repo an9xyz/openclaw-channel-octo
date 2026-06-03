@@ -635,25 +635,41 @@ export function resolveInboundMediaList(args: {
 }
 
 /**
- * Derive the inbound MediaPaths list: ONLY local fs paths under Core's allowed
- * media root. Core treats MediaPaths as local fs inputs (normalizeAttachments
- * prefers them and reads via fs), so a RichText image whose download failed and
- * fell back to its remote URL must NOT enter MediaPaths — otherwise Core would
- * try to fs-read a remote URL string and reject it as `blocked`/unreadable.
- * Failed-fallback remote URLs are excluded here and instead travel via MediaUrls
- * (Core does not treat MediaUrls as a local fs input), preserving the reference
- * without violating the "remote media must not be passed as a local path"
- * convention.
+ * Derive the inbound MediaPaths list, kept the SAME LENGTH and INDEX-ALIGNED
+ * with resolveInboundMediaList (the MediaUrls list). This alignment is load-
+ * bearing: Core's normalizeAttachments path-branch pairs the two arrays
+ * positionally — MediaPaths[i] supplies the local fs path and MediaUrls[i] the
+ * URL for the SAME image i:
+ *   pathsFromArray.map((value, index) => ({ path: value, url: urls?.[index] ?? ctx.MediaUrl, ... }))
+ * If the arrays drift in length or index, Core pairs a local path with another
+ * image's URL (e.g. local image B inherits failed image A's remote URL), so a
+ * later blocked/deleted local file would fall back to the WRONG remote image.
+ *
+ * A RichText image whose download FAILED falls back to its remote URL. A remote
+ * URL must never be handed to Core as a local fs path — Core would fs-read the
+ * URL string and reject it as `blocked`/unreadable (the #58 bug). So rather than
+ * DROPPING failed entries (which shifts every later index and breaks alignment),
+ * we keep the slot and place an `undefined` placeholder at each failed (remote)
+ * index. Core's normalizeOptionalString turns the placeholder into no path, and
+ * its `.filter((e) => Boolean(e.path ?? normalizeOptionalString(e.url)))` keeps
+ * that index as a URL-only attachment carrying the remote URL (from MediaUrls[i]).
+ * Downloaded entries keep their local path and are read via fs.
+ *
+ * Returns undefined only when there is no local path at all (every image
+ * failed); Core then takes the MediaUrls (URL) branch with the same entries.
  */
 export function resolveInboundMediaPaths(args: {
   isFileMessage: boolean;
   inboundMediaUrl?: string;
   inboundMediaUrls?: string[];
-}): string[] | undefined {
+}): (string | undefined)[] | undefined {
   const list = resolveInboundMediaList(args);
   if (!list) return undefined;
-  const localOnly = list.filter((entry) => !isRemoteMediaUrl(entry));
-  return localOnly.length > 0 ? localOnly : undefined;
+  const hasLocal = list.some((entry) => !isRemoteMediaUrl(entry));
+  if (!hasLocal) return undefined;
+  // Equal length + index-aligned with MediaUrls; remote (failed) slots become
+  // undefined placeholders so they survive as URL-only attachments in Core.
+  return list.map((entry) => (isRemoteMediaUrl(entry) ? undefined : entry));
 }
 
 /** Best-effort cleanup of inbound media temp files older than 1 hour */
@@ -2103,16 +2119,17 @@ export async function handleInboundMessage(params: {
     CommandAuthorized: commandAuthorized,
     MediaUrl: isFileMessage ? undefined : inboundMediaUrl,
     // MediaPath(s): inbound media is downloaded to a Core-allowed local root, so
-    // pass ONLY local fs path(s) here. normalizeAttachments prefers MediaPaths
-    // and reads them via fs — avoiding the readRemoteMediaBuffer http path that
-    // throws MediaFetchError on bare local paths. A RichText image whose
-    // download FAILED falls back to its remote URL (see inboundMediaUrls build
-    // above); that remote URL must NOT enter MediaPaths/MediaPath, or Core would
-    // try to fs-read a remote URL string and reject it as blocked/unreadable.
-    // resolveInboundMediaPaths filters out those remote fallbacks; they instead
-    // travel via MediaUrls (Core does not treat MediaUrls as a local fs input),
-    // preserving the reference without violating "remote media must not be passed
-    // as a local path".
+    // pass local fs path(s) here. normalizeAttachments prefers MediaPaths and
+    // reads them via fs — avoiding the readRemoteMediaBuffer http path that
+    // throws MediaFetchError on bare local paths. MediaPaths is kept the SAME
+    // LENGTH and INDEX-ALIGNED with MediaUrls below: Core's path-branch pairs
+    // the two arrays positionally (path[i] ↔ url[i] = same image i). A RichText
+    // image whose download FAILED falls back to its remote URL; that slot gets
+    // an `undefined` placeholder in MediaPaths (not dropped — dropping would
+    // shift later indices and mis-pair a local path with another image's remote
+    // URL). Core keeps the placeholder index as a URL-only attachment via
+    // `.filter((e) => Boolean(e.path ?? e.url))`, so the remote reference
+    // survives without Core fs-reading a remote URL string (the #58 bug).
     MediaPath: (() => {
       if (isFileMessage) return undefined;
       return isRemoteMediaUrl(inboundMediaUrl) ? undefined : inboundMediaUrl;
@@ -2121,15 +2138,14 @@ export async function handleInboundMessage(params: {
     MediaUrls: resolveInboundMediaList({ isFileMessage, inboundMediaUrl, inboundMediaUrls }),
     MediaTypes: (() => {
       if (isFileMessage) return undefined;
-      // Align MediaTypes with whichever list Core iterates: MediaPaths when any
-      // local path is present (Core's preferred branch), else the MediaUrls
-      // list. Keeping mime indices aligned with the driving list avoids pairing
-      // a local path with the wrong (failed remote sibling's) mime.
-      const localPaths = resolveInboundMediaPaths({ isFileMessage, inboundMediaUrl, inboundMediaUrls });
-      const driving = localPaths ?? resolveInboundMediaList({ isFileMessage, inboundMediaUrl, inboundMediaUrls });
-      if (driving?.length) {
-        if (inboundMediaUrls?.length) return driving.map((u) => guessMime(u, "image/jpeg"));
-        return resolved.mediaType ? [resolved.mediaType] : driving.map((u) => guessMime(u, "image/jpeg"));
+      // Align MediaTypes index-for-index with the MediaUrls/MediaPaths arrays.
+      // The MediaUrls list has a real entry (local path or remote URL) at every
+      // index, so deriving mime from it keeps each attachment's mime correct
+      // even when that index is a remote (failed) placeholder in MediaPaths.
+      const aligned = resolveInboundMediaList({ isFileMessage, inboundMediaUrl, inboundMediaUrls });
+      if (aligned?.length) {
+        if (inboundMediaUrls?.length) return aligned.map((u) => guessMime(u, "image/jpeg"));
+        return resolved.mediaType ? [resolved.mediaType] : aligned.map((u) => guessMime(u, "image/jpeg"));
       }
       return resolved.mediaType ? [resolved.mediaType] : undefined;
     })(),
