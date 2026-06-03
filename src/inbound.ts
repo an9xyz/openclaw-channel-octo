@@ -611,11 +611,17 @@ const MEDIA_TEMP_DIR = join("/tmp", "openclaw", "octo-media");
 const MAX_MEDIA_DOWNLOAD_SIZE = 20 * 1024 * 1024; // 20MB cap for inbound media
 const MEDIA_DOWNLOAD_TIMEOUT = 120_000; // 120 seconds
 
+/** True when a media entry is a remote http(s) URL rather than a local fs path. */
+export function isRemoteMediaUrl(entry: string | undefined): boolean {
+  return !!entry && /^https?:\/\//i.test(entry);
+}
+
 /**
- * Derive the inbound media list passed to Core as both MediaPaths (primary,
- * fs-read) and MediaUrls (backward-compatible). File messages carry no inline
- * media here. RichText(=14) yields every locally-downloaded image; other types
- * yield the single current local media path (no remote history URLs).
+ * Derive the inbound media list passed to Core as MediaUrls (backward-compatible
+ * reference list). File messages carry no inline media here. RichText(=14)
+ * yields every image entry (locally-downloaded path, or — on a per-image
+ * download failure — the remote fallback URL so the reference survives); other
+ * types yield the single current local media path (no remote history URLs).
  */
 export function resolveInboundMediaList(args: {
   isFileMessage: boolean;
@@ -626,6 +632,28 @@ export function resolveInboundMediaList(args: {
   if (isFileMessage) return undefined;
   if (inboundMediaUrls?.length) return inboundMediaUrls;
   return inboundMediaUrl ? [inboundMediaUrl] : undefined;
+}
+
+/**
+ * Derive the inbound MediaPaths list: ONLY local fs paths under Core's allowed
+ * media root. Core treats MediaPaths as local fs inputs (normalizeAttachments
+ * prefers them and reads via fs), so a RichText image whose download failed and
+ * fell back to its remote URL must NOT enter MediaPaths — otherwise Core would
+ * try to fs-read a remote URL string and reject it as `blocked`/unreadable.
+ * Failed-fallback remote URLs are excluded here and instead travel via MediaUrls
+ * (Core does not treat MediaUrls as a local fs input), preserving the reference
+ * without violating the "remote media must not be passed as a local path"
+ * convention.
+ */
+export function resolveInboundMediaPaths(args: {
+  isFileMessage: boolean;
+  inboundMediaUrl?: string;
+  inboundMediaUrls?: string[];
+}): string[] | undefined {
+  const list = resolveInboundMediaList(args);
+  if (!list) return undefined;
+  const localOnly = list.filter((entry) => !isRemoteMediaUrl(entry));
+  return localOnly.length > 0 ? localOnly : undefined;
 }
 
 /** Best-effort cleanup of inbound media temp files older than 1 hour */
@@ -2074,18 +2102,34 @@ export async function handleInboundMessage(params: {
     BodyForCommands: commandBody,
     CommandAuthorized: commandAuthorized,
     MediaUrl: isFileMessage ? undefined : inboundMediaUrl,
-    // MediaPath(s): inbound media is downloaded to a Core-allowed local root,
-    // so pass the local fs path(s). normalizeAttachments prefers MediaPaths and
-    // reads via fs — avoiding the readRemoteMediaBuffer http path that throws
-    // MediaFetchError on bare local paths. MediaUrls below is kept at the same
-    // value for backward-compatible consumers.
-    MediaPath: isFileMessage ? undefined : inboundMediaUrl,
-    MediaPaths: resolveInboundMediaList({ isFileMessage, inboundMediaUrl, inboundMediaUrls }),
+    // MediaPath(s): inbound media is downloaded to a Core-allowed local root, so
+    // pass ONLY local fs path(s) here. normalizeAttachments prefers MediaPaths
+    // and reads them via fs — avoiding the readRemoteMediaBuffer http path that
+    // throws MediaFetchError on bare local paths. A RichText image whose
+    // download FAILED falls back to its remote URL (see inboundMediaUrls build
+    // above); that remote URL must NOT enter MediaPaths/MediaPath, or Core would
+    // try to fs-read a remote URL string and reject it as blocked/unreadable.
+    // resolveInboundMediaPaths filters out those remote fallbacks; they instead
+    // travel via MediaUrls (Core does not treat MediaUrls as a local fs input),
+    // preserving the reference without violating "remote media must not be passed
+    // as a local path".
+    MediaPath: (() => {
+      if (isFileMessage) return undefined;
+      return isRemoteMediaUrl(inboundMediaUrl) ? undefined : inboundMediaUrl;
+    })(),
+    MediaPaths: resolveInboundMediaPaths({ isFileMessage, inboundMediaUrl, inboundMediaUrls }),
     MediaUrls: resolveInboundMediaList({ isFileMessage, inboundMediaUrl, inboundMediaUrls }),
     MediaTypes: (() => {
       if (isFileMessage) return undefined;
-      if (inboundMediaUrls?.length) {
-        return inboundMediaUrls.map((u) => guessMime(u, "image/jpeg"));
+      // Align MediaTypes with whichever list Core iterates: MediaPaths when any
+      // local path is present (Core's preferred branch), else the MediaUrls
+      // list. Keeping mime indices aligned with the driving list avoids pairing
+      // a local path with the wrong (failed remote sibling's) mime.
+      const localPaths = resolveInboundMediaPaths({ isFileMessage, inboundMediaUrl, inboundMediaUrls });
+      const driving = localPaths ?? resolveInboundMediaList({ isFileMessage, inboundMediaUrl, inboundMediaUrls });
+      if (driving?.length) {
+        if (inboundMediaUrls?.length) return driving.map((u) => guessMime(u, "image/jpeg"));
+        return resolved.mediaType ? [resolved.mediaType] : driving.map((u) => guessMime(u, "image/jpeg"));
       }
       return resolved.mediaType ? [resolved.mediaType] : undefined;
     })(),

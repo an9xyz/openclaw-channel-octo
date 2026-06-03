@@ -22,6 +22,8 @@ import {
   buildSessionAccountKey,
   segmentHistoryEntries,
   resolveInboundMediaList,
+  resolveInboundMediaPaths,
+  isRemoteMediaUrl,
   type ResolveFileResult,
 } from "./inbound.js";
 import { extractMentionUids } from "./mention-utils.js";
@@ -1149,7 +1151,7 @@ describe("resolveInboundMediaList (Fixes #58)", () => {
     expect(resolveInboundMediaList({ isFileMessage: false })).toBeUndefined();
   });
 
-  it("MediaPaths and MediaUrls derive identical values (compat)", () => {
+  it("all-local: MediaPaths and MediaUrls derive identical values (compat)", () => {
     const args = {
       isFileMessage: false,
       inboundMediaUrl: "/tmp/openclaw/octo-media/a.jpg",
@@ -1158,7 +1160,90 @@ describe("resolveInboundMediaList (Fixes #58)", () => {
         "/tmp/openclaw/octo-media/b.jpg",
       ],
     };
-    expect(resolveInboundMediaList(args)).toEqual(resolveInboundMediaList(args));
+    // When every entry is a local path, paths and urls are the same list.
+    expect(resolveInboundMediaPaths(args)).toEqual(resolveInboundMediaList(args));
+  });
+});
+
+/**
+ * resolveInboundMediaPaths is the local-only counterpart of resolveInboundMediaList.
+ * Core treats MediaPaths as local fs inputs (normalizeAttachments prefers them and
+ * reads via fs), so a RichText image whose download FAILED and fell back to its
+ * remote URL must never enter MediaPaths — otherwise Core fs-reads a remote URL
+ * string and rejects it as blocked/unreadable (the LIVE bug fixed here, Jerry-Xin
+ * P1 on #59). Failed-fallback remote URLs stay only in MediaUrls.
+ */
+describe("resolveInboundMediaPaths (#59 — exclude failed remote fallbacks)", () => {
+  it("File messages carry no inline media → undefined", () => {
+    expect(
+      resolveInboundMediaPaths({
+        isFileMessage: true,
+        inboundMediaUrl: "/tmp/openclaw/octo-media/a.jpg",
+        inboundMediaUrls: ["/tmp/openclaw/octo-media/a.jpg"],
+      }),
+    ).toBeUndefined();
+  });
+
+  it("single local media path → one-element list", () => {
+    expect(
+      resolveInboundMediaPaths({
+        isFileMessage: false,
+        inboundMediaUrl: "/tmp/openclaw/octo-media/a.jpg",
+      }),
+    ).toEqual(["/tmp/openclaw/octo-media/a.jpg"]);
+  });
+
+  it("mixed local + failed remote fallback → only local paths reach MediaPaths", () => {
+    // RichText with two images: first downloaded OK (local path), second failed
+    // and fell back to its remote https URL.
+    const local = "/tmp/openclaw/octo-media/a.jpg";
+    const remote = "https://cdn.example.com/b.png";
+    const args = {
+      isFileMessage: false,
+      inboundMediaUrl: local,
+      inboundMediaUrls: [local, remote],
+    };
+    // The failed remote URL is EXCLUDED from MediaPaths…
+    expect(resolveInboundMediaPaths(args)).toEqual([local]);
+    // …but is still carried as a reference via MediaUrls.
+    expect(resolveInboundMediaList(args)).toEqual([local, remote]);
+    expect(resolveInboundMediaPaths(args)).not.toContain(remote);
+  });
+
+  it("all images failed (every entry remote) → MediaPaths undefined", () => {
+    const args = {
+      isFileMessage: false,
+      inboundMediaUrl: "https://cdn.example.com/a.png",
+      inboundMediaUrls: [
+        "https://cdn.example.com/a.png",
+        "http://cdn.example.com/b.png",
+      ],
+    };
+    // Nothing local to fs-read → no MediaPaths; references survive via MediaUrls.
+    expect(resolveInboundMediaPaths(args)).toBeUndefined();
+    expect(resolveInboundMediaList(args)).toEqual([
+      "https://cdn.example.com/a.png",
+      "http://cdn.example.com/b.png",
+    ]);
+  });
+
+  it("no media at all → undefined", () => {
+    expect(resolveInboundMediaPaths({ isFileMessage: false })).toBeUndefined();
+  });
+});
+
+describe("isRemoteMediaUrl", () => {
+  it("detects http/https URLs as remote", () => {
+    expect(isRemoteMediaUrl("https://cdn.example.com/a.png")).toBe(true);
+    expect(isRemoteMediaUrl("http://cdn.example.com/a.png")).toBe(true);
+    expect(isRemoteMediaUrl("HTTPS://CDN.EXAMPLE.COM/A.PNG")).toBe(true);
+  });
+
+  it("treats local fs paths as not remote", () => {
+    expect(isRemoteMediaUrl("/tmp/openclaw/octo-media/a.jpg")).toBe(false);
+    expect(isRemoteMediaUrl("octo-media/a.jpg")).toBe(false);
+    expect(isRemoteMediaUrl(undefined)).toBe(false);
+    expect(isRemoteMediaUrl("")).toBe(false);
   });
 });
 
