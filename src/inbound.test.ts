@@ -21,9 +21,13 @@ import {
   sessionAccountMap,
   buildSessionAccountKey,
   segmentHistoryEntries,
+  resolveInboundMediaList,
+  resolveInboundMediaPaths,
+  isRemoteMediaUrl,
   type ResolveFileResult,
 } from "./inbound.js";
 import { extractMentionUids } from "./mention-utils.js";
+import { normalizeMediaAttachments } from "openclaw/plugin-sdk/media-runtime";
 import { existsSync, unlinkSync, readFileSync } from "node:fs";
 
 /**
@@ -982,7 +986,7 @@ describe("downloadMediaToLocal", () => {
 
     expect(result).toBeDefined();
     expect(result).not.toContain("http");
-    expect(result!.startsWith("/tmp/octo-media/")).toBe(true);
+    expect(result!.startsWith("/tmp/openclaw/octo-media/")).toBe(true);
     expect(result!.endsWith(".jpeg")).toBe(true);
     expect(existsSync(result!)).toBe(true);
     expect(readFileSync(result!)).toEqual(Buffer.from(imageData));
@@ -1101,6 +1105,275 @@ describe("downloadMediaToLocal", () => {
     expect(result).toBeDefined();
     expect(result!.endsWith(".mp4")).toBe(true);
     tempFiles.push(result!);
+  });
+});
+
+/**
+ * resolveInboundMediaList drives MediaUrls and resolveInboundMediaPaths drives
+ * MediaPaths. The fix for #58 is ALL-OR-NOTHING: when every inbound image
+ * downloaded to a local path under Core's allowed root, both arrays carry the
+ * compact local paths and Core fs-reads them (no http MediaFetchError). If ANY
+ * image failed, MediaPaths is undefined and MediaUrls carries every image's
+ * original remote http(s) URL, so Core falls back to the URL (http fetch) branch
+ * for the whole message — never a sparse array, never a bare local path in the
+ * http path.
+ */
+describe("resolveInboundMediaList (Fixes #58)", () => {
+  it("no items → undefined", () => {
+    expect(resolveInboundMediaList(undefined)).toBeUndefined();
+    expect(resolveInboundMediaList([])).toBeUndefined();
+  });
+
+  it("single local media path → one-element list", () => {
+    expect(
+      resolveInboundMediaList([
+        { localPath: "/tmp/openclaw/octo-media/a.jpg", remoteUrl: "https://cdn.example.com/a.jpg" },
+      ]),
+    ).toEqual(["/tmp/openclaw/octo-media/a.jpg"]);
+  });
+
+  it("all-local multi-image → every local path", () => {
+    const items = [
+      { localPath: "/tmp/openclaw/octo-media/a.jpg", remoteUrl: "https://cdn.example.com/a.jpg" },
+      { localPath: "/tmp/openclaw/octo-media/b.png", remoteUrl: "https://cdn.example.com/b.png" },
+    ];
+    expect(resolveInboundMediaList(items)).toEqual([
+      "/tmp/openclaw/octo-media/a.jpg",
+      "/tmp/openclaw/octo-media/b.png",
+    ]);
+  });
+
+  it("any download failed → MediaUrls is every image's remote URL (no local paths)", () => {
+    const items = [
+      { localPath: "/tmp/openclaw/octo-media/a.jpg", remoteUrl: "https://cdn.example.com/a.jpg" },
+      { localPath: undefined, remoteUrl: "https://cdn.example.com/b.png" },
+    ];
+    // Mixed-fail falls back to remote http URLs for the WHOLE message — including
+    // the image that did download — so Core never fs-reads while MediaPaths is unset.
+    expect(resolveInboundMediaList(items)).toEqual([
+      "https://cdn.example.com/a.jpg",
+      "https://cdn.example.com/b.png",
+    ]);
+  });
+
+  it("all-local: MediaPaths and MediaUrls derive identical values (compat)", () => {
+    const items = [
+      { localPath: "/tmp/openclaw/octo-media/a.jpg", remoteUrl: "https://cdn.example.com/a.jpg" },
+      { localPath: "/tmp/openclaw/octo-media/b.jpg", remoteUrl: "https://cdn.example.com/b.jpg" },
+    ];
+    expect(resolveInboundMediaPaths(items)).toEqual(resolveInboundMediaList(items));
+  });
+});
+
+/**
+ * resolveInboundMediaPaths emits Core's fs-read MediaPaths array ONLY when every
+ * image downloaded locally (compact string[], no holes). If any image failed it
+ * returns undefined so the whole message falls back to the MediaUrls (remote
+ * http) branch. This deliberately avoids sparse MediaPaths: Core's sandbox media
+ * staging treats MediaPaths as a plain string[] (resolveRawPaths → raw.trim())
+ * and would crash on an undefined slot (Jerry-Xin round-3 P1). The return type
+ * is string[] — no non-string element ever reaches MediaPaths.
+ */
+describe("resolveInboundMediaPaths (#59 — all-or-nothing, never sparse)", () => {
+  it("no items → undefined", () => {
+    expect(resolveInboundMediaPaths(undefined)).toBeUndefined();
+    expect(resolveInboundMediaPaths([])).toBeUndefined();
+  });
+
+  it("single local media path → one-element list", () => {
+    expect(
+      resolveInboundMediaPaths([
+        { localPath: "/tmp/openclaw/octo-media/a.jpg", remoteUrl: "https://cdn.example.com/a.jpg" },
+      ]),
+    ).toEqual(["/tmp/openclaw/octo-media/a.jpg"]);
+  });
+
+  it("all-local multi-image → compact local-path array", () => {
+    const items = [
+      { localPath: "/tmp/openclaw/octo-media/a.jpg", remoteUrl: "https://cdn.example.com/a.jpg" },
+      { localPath: "/tmp/openclaw/octo-media/b.png", remoteUrl: "https://cdn.example.com/b.png" },
+    ];
+    const paths = resolveInboundMediaPaths(items);
+    expect(paths).toEqual([
+      "/tmp/openclaw/octo-media/a.jpg",
+      "/tmp/openclaw/octo-media/b.png",
+    ]);
+    // Load-bearing: no undefined/null element ever reaches MediaPaths.
+    expect(paths!.every((p) => typeof p === "string")).toBe(true);
+  });
+
+  it("mixed [local, failed] → MediaPaths undefined (whole message falls back to URLs)", () => {
+    const items = [
+      { localPath: "/tmp/openclaw/octo-media/a.jpg", remoteUrl: "https://cdn.example.com/a.jpg" },
+      { localPath: undefined, remoteUrl: "https://cdn.example.com/b.png" },
+    ];
+    expect(resolveInboundMediaPaths(items)).toBeUndefined();
+    expect(resolveInboundMediaList(items)).toEqual([
+      "https://cdn.example.com/a.jpg",
+      "https://cdn.example.com/b.png",
+    ]);
+  });
+
+  it("mixed [failed, local] → MediaPaths undefined regardless of order", () => {
+    const items = [
+      { localPath: undefined, remoteUrl: "https://cdn.example.com/a.png" },
+      { localPath: "/tmp/openclaw/octo-media/b.jpg", remoteUrl: "https://cdn.example.com/b.jpg" },
+    ];
+    expect(resolveInboundMediaPaths(items)).toBeUndefined();
+    expect(resolveInboundMediaList(items)).toEqual([
+      "https://cdn.example.com/a.png",
+      "https://cdn.example.com/b.jpg",
+    ]);
+  });
+
+  it("all images failed → MediaPaths undefined, MediaUrls keeps remote refs", () => {
+    const items = [
+      { localPath: undefined, remoteUrl: "https://cdn.example.com/a.png" },
+      { localPath: undefined, remoteUrl: "http://cdn.example.com/b.png" },
+    ];
+    expect(resolveInboundMediaPaths(items)).toBeUndefined();
+    expect(resolveInboundMediaList(items)).toEqual([
+      "https://cdn.example.com/a.png",
+      "http://cdn.example.com/b.png",
+    ]);
+  });
+});
+
+describe("isRemoteMediaUrl", () => {
+  it("detects http/https URLs as remote", () => {
+    expect(isRemoteMediaUrl("https://cdn.example.com/a.png")).toBe(true);
+    expect(isRemoteMediaUrl("http://cdn.example.com/a.png")).toBe(true);
+    expect(isRemoteMediaUrl("HTTPS://CDN.EXAMPLE.COM/A.PNG")).toBe(true);
+  });
+
+  it("treats local fs paths as not remote", () => {
+    expect(isRemoteMediaUrl("/tmp/openclaw/octo-media/a.jpg")).toBe(false);
+    expect(isRemoteMediaUrl("octo-media/a.jpg")).toBe(false);
+    expect(isRemoteMediaUrl(undefined)).toBe(false);
+    expect(isRemoteMediaUrl("")).toBe(false);
+  });
+});
+
+/**
+ * Integration-style test (#59 round-3 P1): assert the inbound media payload built
+ * by inbound.ts (MediaPaths / MediaUrls / MediaTypes) flows correctly through
+ * Core's REAL normalizeMediaAttachments (= normalizeAttachments). This guards the
+ * all-or-nothing contract directly against Core: all-local goes through the fs
+ * (path) branch; any mixed-fail emits NO MediaPaths and every attachment is a
+ * remote-URL attachment via the URL branch — so neither Core consumer ever sees
+ * a sparse array or a bare local path in the http path.
+ */
+describe("inbound media payload × Core normalizeMediaAttachments (#59 all-or-nothing)", () => {
+  // Mirror the exact MediaPaths/MediaUrls/MediaTypes the inbound payload builds
+  // from the per-image download outcome (localPath set ⇒ success, undefined ⇒ fail).
+  const buildPayload = (items: { localPath?: string; remoteUrl: string }[]) => {
+    const list = resolveInboundMediaList(items);
+    return {
+      MediaPaths: resolveInboundMediaPaths(items),
+      MediaUrls: list,
+      MediaTypes: list?.map((u) => guessImageMime(u)),
+    };
+  };
+  const guessImageMime = (u: string) =>
+    /\.png$/i.test(u) ? "image/png" : "image/jpeg";
+
+  it("all-local: every attachment is an fs path read locally", () => {
+    const items = [
+      { localPath: "/tmp/openclaw/octo-media/a.jpg", remoteUrl: "https://cdn.example.com/a.jpg" },
+      { localPath: "/tmp/openclaw/octo-media/b.png", remoteUrl: "https://cdn.example.com/b.png" },
+    ];
+    const payload = buildPayload(items);
+    expect(payload.MediaPaths).toEqual([
+      "/tmp/openclaw/octo-media/a.jpg",
+      "/tmp/openclaw/octo-media/b.png",
+    ]);
+
+    const attachments = normalizeMediaAttachments(payload as never);
+    expect(attachments).toHaveLength(2);
+    expect(attachments.map((x) => x.path)).toEqual([
+      "/tmp/openclaw/octo-media/a.jpg",
+      "/tmp/openclaw/octo-media/b.png",
+    ]);
+  });
+
+  it("[local, remote-fail]: MediaPaths undefined, both flow as remote-URL attachments", () => {
+    const items = [
+      { localPath: "/tmp/openclaw/octo-media/a.jpg", remoteUrl: "https://cdn.example.com/a.jpg" },
+      { localPath: undefined, remoteUrl: "https://cdn.example.com/b.png" },
+    ];
+    const payload = buildPayload(items);
+    // Mixed-fail: NO MediaPaths (never sparse) — the round-3 P1 guarantee.
+    expect(payload.MediaPaths).toBeUndefined();
+    expect(payload.MediaUrls).toEqual([
+      "https://cdn.example.com/a.jpg",
+      "https://cdn.example.com/b.png",
+    ]);
+
+    const attachments = normalizeMediaAttachments(payload as never);
+    expect(attachments).toHaveLength(2);
+    expect(attachments.every((x) => x.path === undefined)).toBe(true);
+    expect(attachments.map((x) => x.url)).toEqual([
+      "https://cdn.example.com/a.jpg",
+      "https://cdn.example.com/b.png",
+    ]);
+    expect(attachments.map((x) => x.index)).toEqual([0, 1]);
+  });
+
+  it("[remote-fail, local]: order preserved, MediaPaths still undefined", () => {
+    const items = [
+      { localPath: undefined, remoteUrl: "https://cdn.example.com/a.png" },
+      { localPath: "/tmp/openclaw/octo-media/b.jpg", remoteUrl: "https://cdn.example.com/b.jpg" },
+    ];
+    const payload = buildPayload(items);
+    expect(payload.MediaPaths).toBeUndefined();
+    expect(payload.MediaUrls).toEqual([
+      "https://cdn.example.com/a.png",
+      "https://cdn.example.com/b.jpg",
+    ]);
+
+    const attachments = normalizeMediaAttachments(payload as never);
+    expect(attachments).toHaveLength(2);
+    expect(attachments.every((x) => x.path === undefined)).toBe(true);
+    expect(attachments.map((x) => x.url)).toEqual([
+      "https://cdn.example.com/a.png",
+      "https://cdn.example.com/b.jpg",
+    ]);
+  });
+
+  it("all-failed (every remote): Core takes the URL branch, references survive", () => {
+    const items = [
+      { localPath: undefined, remoteUrl: "https://cdn.example.com/a.png" },
+      { localPath: undefined, remoteUrl: "http://cdn.example.com/b.png" },
+    ];
+    const payload = buildPayload(items);
+    expect(payload.MediaPaths).toBeUndefined();
+    const attachments = normalizeMediaAttachments(payload as never);
+    expect(attachments).toHaveLength(2);
+    expect(attachments.every((x) => x.path === undefined)).toBe(true);
+    expect(attachments.map((x) => x.url)).toEqual([
+      "https://cdn.example.com/a.png",
+      "http://cdn.example.com/b.png",
+    ]);
+  });
+
+  it("MediaPaths never contains a non-string element in any download outcome", () => {
+    const cases = [
+      [{ localPath: "/tmp/openclaw/octo-media/a.jpg", remoteUrl: "https://cdn.example.com/a.jpg" }],
+      [
+        { localPath: "/tmp/openclaw/octo-media/a.jpg", remoteUrl: "https://cdn.example.com/a.jpg" },
+        { localPath: undefined, remoteUrl: "https://cdn.example.com/b.png" },
+      ],
+      [
+        { localPath: undefined, remoteUrl: "https://cdn.example.com/a.png" },
+        { localPath: undefined, remoteUrl: "http://cdn.example.com/b.png" },
+      ],
+    ];
+    for (const items of cases) {
+      const paths = resolveInboundMediaPaths(items);
+      if (paths !== undefined) {
+        expect(paths.every((p) => typeof p === "string")).toBe(true);
+      }
+    }
   });
 });
 

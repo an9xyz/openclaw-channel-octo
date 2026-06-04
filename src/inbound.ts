@@ -603,9 +603,75 @@ export function calcDownloadTimeout(fileSize?: number): number {
   return Math.min(MAX_TIMEOUT, Math.max(MIN_TIMEOUT, computed));
 }
 
-const MEDIA_TEMP_DIR = join("/tmp", "octo-media");
+// Download inbound media under Core's allowed media root (/tmp/openclaw) so
+// that isInboundPathAllowed accepts the local path passed via MediaPaths.
+// A bare /tmp/octo-media dir is outside buildMediaLocalRoots and would be
+// rejected as `blocked`.
+const MEDIA_TEMP_DIR = join("/tmp", "openclaw", "octo-media");
 const MAX_MEDIA_DOWNLOAD_SIZE = 20 * 1024 * 1024; // 20MB cap for inbound media
 const MEDIA_DOWNLOAD_TIMEOUT = 120_000; // 120 seconds
+
+/** True when a media entry is a remote http(s) URL rather than a local fs path. */
+export function isRemoteMediaUrl(entry: string | undefined): boolean {
+  return !!entry && /^https?:\/\//i.test(entry);
+}
+
+/**
+ * One inbound media image: its locally-downloaded fs path (if the download
+ * succeeded) paired with the original remote http(s) URL fallback (always
+ * fetchable). The remote URL lets Core re-fetch the image whenever the local
+ * path is unavailable, without ever fs-reading a remote URL string.
+ */
+export interface InboundMediaItem {
+  /** Local fs path under Core's allowed root; undefined when the download failed. */
+  localPath?: string;
+  /** Original remote http(s) URL — the always-reachable fallback for this image. */
+  remoteUrl: string;
+}
+
+/**
+ * Derive the inbound MediaPaths list (Core's preferred, fs-read branch).
+ *
+ * ALL-OR-NOTHING: emit MediaPaths only when EVERY image downloaded to a local
+ * path. The returned array is then compact (string[], no holes) and same-order
+ * with MediaUrls. If ANY image failed, return undefined so the whole message
+ * falls back to the MediaUrls (remote http) branch instead.
+ *
+ * This sidesteps the sparse-array trap: Core consumes MediaPaths through two
+ * paths with different contracts — normalizeAttachments pairs MediaPaths[i] with
+ * MediaUrls[i] positionally, while sandbox staging (resolveRawPaths → trim each
+ * raw) treats MediaPaths as a plain string[] and CRASHES on an undefined slot.
+ * Never emitting a non-string MediaPaths element keeps both consumers safe.
+ */
+export function resolveInboundMediaPaths(
+  items: InboundMediaItem[] | undefined,
+): string[] | undefined {
+  if (!items?.length) return undefined;
+  if (!items.every((it) => it.localPath)) return undefined;
+  return items.map((it) => it.localPath!);
+}
+
+/**
+ * Derive the inbound media list passed to Core as MediaUrls.
+ *
+ * Mirrors the MediaPaths all-or-nothing decision so the two arrays never drift:
+ * - All images downloaded → local fs paths (same values as MediaPaths; Core
+ *   fs-reads them via the MediaPaths branch).
+ * - Any download failed → every image's ORIGINAL remote http(s) URL. MediaPaths
+ *   is undefined in this case, so Core takes the URL branch and http-fetches all
+ *   of them — including the ones that did download locally (the local-path
+ *   optimisation is sacrificed for this message to guarantee correctness and to
+ *   avoid handing a bare local path to the http fetch, which was the #58 bug).
+ */
+export function resolveInboundMediaList(
+  items: InboundMediaItem[] | undefined,
+): string[] | undefined {
+  if (!items?.length) return undefined;
+  const allLocal = items.every((it) => it.localPath);
+  return allLocal
+    ? items.map((it) => it.localPath!)
+    : items.map((it) => it.remoteUrl);
+}
 
 /** Best-effort cleanup of inbound media temp files older than 1 hour */
 async function cleanupMediaTempFiles(): Promise<void> {
@@ -1366,8 +1432,10 @@ export async function handleInboundMessage(params: {
   const resolved = resolveContent(message.payload, account.config.apiUrl, log, account.config.cdnUrl);
   let rawBody = resolved.text;
   let inboundMediaUrl = resolved.mediaUrl;
-  // RichText(=14) 图文混排可携带多张图：在此累积本地化后的图片路径。
-  let inboundMediaUrls: string[] | undefined;
+  // Inbound inline media images, each carrying its local download path (if the
+  // download succeeded) and its original remote http(s) URL fallback. Drives the
+  // MediaPaths/MediaUrls payload below. RichText(=14) 图文混排 may carry several.
+  let inboundMediaItems: InboundMediaItem[] | undefined;
 
   // Opportunistic uid→name cache fill from MultipleForward payloads
   if (message.payload?.type === MessageType.MultipleForward && Array.isArray(message.payload.users)) {
@@ -1380,22 +1448,26 @@ export async function handleInboundMessage(params: {
   // local files instead of remote URLs (avoids hang on large/slow downloads in Core)
   const mediaDownloadTypes = [MessageType.Image, MessageType.GIF, MessageType.Voice, MessageType.Video];
   if (inboundMediaUrl && message.payload?.type != null && mediaDownloadTypes.includes(message.payload.type)) {
-    const localPath = await downloadMediaToLocal(inboundMediaUrl, resolved.mediaType, log);
+    const remoteUrl = inboundMediaUrl; // original http(s) URL (always fetchable)
+    const localPath = await downloadMediaToLocal(remoteUrl, resolved.mediaType, log);
     inboundMediaUrl = localPath; // undefined on failure — graceful degradation
+    inboundMediaItems = [{ localPath, remoteUrl }];
   }
   // RichText(=14): download every embedded image to a local temp file (same
-  // rationale as single-media types above). On a per-image download failure,
-  // fall back to the REMOTE url so the agent keeps a usable reference — unlike
-  // single-media types where the url survives inside rawBody, the RichText body
-  // is only plain text with [图片] placeholders, so dropping the url loses it.
+  // rationale as single-media types above). Each image keeps its original remote
+  // http(s) URL so Core can re-fetch it whenever the local download failed —
+  // unlike single-media types where the url survives inside rawBody, the RichText
+  // body is only plain text with [图片] placeholders, so the url must travel as
+  // structured media or it is lost.
   if (message.payload?.type === MessageType.RichText && resolved.mediaUrls?.length) {
-    const resolvedImageUrls: string[] = [];
+    const items: InboundMediaItem[] = [];
     for (const remoteUrl of resolved.mediaUrls) {
       const localPath = await downloadMediaToLocal(remoteUrl, guessMime(remoteUrl, "image/jpeg"), log);
-      resolvedImageUrls.push(localPath ?? remoteUrl);
+      items.push({ localPath, remoteUrl });
     }
-    inboundMediaUrls = resolvedImageUrls.length > 0 ? resolvedImageUrls : undefined;
-    inboundMediaUrl = inboundMediaUrls?.[0];
+    inboundMediaItems = items.length > 0 ? items : undefined;
+    // History reference: prefer the first image's local path, else its remote URL.
+    inboundMediaUrl = items[0]?.localPath ?? items[0]?.remoteUrl;
   }
   // Inline text file content if possible, or stream large files to temp
   const isFileMessage = message.payload?.type === MessageType.File;
@@ -2065,18 +2137,39 @@ export async function handleInboundMessage(params: {
     CommandBody: commandBody,
     BodyForCommands: commandBody,
     CommandAuthorized: commandAuthorized,
-    MediaUrl: isFileMessage ? undefined : inboundMediaUrl,
-    MediaUrls: (() => {
+    // Scalar MediaUrl/MediaPath mirror the array all-or-nothing decision so a
+    // single-media consumer never sees a local path while the arrays fell back
+    // to remote URLs (and vice versa). All-local → first local path; mixed-fail
+    // → first remote URL (matching MediaUrls[0], never an unstaged local path).
+    MediaUrl: isFileMessage ? undefined : (resolveInboundMediaList(inboundMediaItems)?.[0] ?? inboundMediaUrl),
+    // MediaPath(s) / MediaUrls — ALL-OR-NOTHING (see resolveInboundMediaPaths):
+    // inbound media is downloaded to a Core-allowed local root, so when EVERY
+    // image succeeds we pass the compact local fs paths via MediaPath(s). Core's
+    // normalizeAttachments prefers MediaPaths and fs-reads them, avoiding the
+    // readRemoteMediaBuffer http path that throws MediaFetchError on bare local
+    // paths (the #58 bug). If ANY image download failed we emit NO MediaPaths
+    // (undefined) and put every image's original remote http(s) URL in MediaUrls;
+    // Core then takes the URL branch and http-fetches them. This never produces a
+    // sparse MediaPaths array, so the sandbox staging path (resolveRawPaths →
+    // raw.trim()) cannot crash on an undefined slot.
+    MediaPath: (() => {
       if (isFileMessage) return undefined;
-      // RichText(=14): pass every locally-downloaded image (図文混排 multi-image).
-      if (inboundMediaUrls?.length) return inboundMediaUrls;
-      // Other types: only pass current message's local media path (no remote history URLs)
-      return inboundMediaUrl ? [inboundMediaUrl] : undefined;
+      const paths = resolveInboundMediaPaths(inboundMediaItems);
+      return paths?.[0];
     })(),
+    MediaPaths: isFileMessage ? undefined : resolveInboundMediaPaths(inboundMediaItems),
+    MediaUrls: isFileMessage ? undefined : resolveInboundMediaList(inboundMediaItems),
     MediaTypes: (() => {
       if (isFileMessage) return undefined;
-      if (inboundMediaUrls?.length) {
-        return inboundMediaUrls.map((u) => guessMime(u, "image/jpeg"));
+      // Align MediaTypes index-for-index with the MediaUrls/MediaPaths arrays.
+      // Both helpers return same-length, same-order lists, so deriving mime from
+      // the MediaUrls list keeps each attachment's mime correct.
+      const list = resolveInboundMediaList(inboundMediaItems);
+      if (list?.length) {
+        if (inboundMediaItems && inboundMediaItems.length > 1) {
+          return list.map((u) => guessMime(u, "image/jpeg"));
+        }
+        return resolved.mediaType ? [resolved.mediaType] : list.map((u) => guessMime(u, "image/jpeg"));
       }
       return resolved.mediaType ? [resolved.mediaType] : undefined;
     })(),
