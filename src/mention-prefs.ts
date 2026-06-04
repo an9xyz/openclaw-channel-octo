@@ -1,10 +1,11 @@
 /**
  * Per-(bot, group) "免@偏好" cache.
  *
- * A group admin can mark a group as `no_mention=true` for a specific bot,
- * meaning that bot replies to *every* message in the group without needing
- * an explicit @mention. The mention gate in inbound.ts consults this cache
- * to decide, per message, whether `requireMention` should be relaxed.
+ * Whether a bot may reply without an explicit @mention in a group is a
+ * server-side two-axis AND decision (octo-server YUJ-2996): the bot owner's
+ * `no_mention` intent AND the group admin's `group_allow_no_mention` switch.
+ * The server collapses both into `effective`; the mention gate in inbound.ts
+ * consults this cache and relaxes `requireMention` only when `effective` is true.
  *
  * Design mirrors member-cache.ts: a plain Map with per-entry TTL, lazy
  * (pull-on-miss) refresh, and an explicit invalidate hook. Freshness is driven
@@ -28,16 +29,16 @@
 import { getMentionPref, fetchBotGroups, type MentionPref } from "./api-fetch.js";
 import type { LogSink } from "./types.js";
 
-const CACHE_TTL_MS = 30 * 1000; // 30 seconds (positive: no_mention=true)
+const CACHE_TTL_MS = 30 * 1000; // 30 seconds (positive: effective=true)
 // The cache is kept fresh primarily by the `mention_pref_updated` event (handled
 // in inbound.ts), which invalidates the affected (bot, group) entry the instant
 // an owner toggles 免@. TTL is now only a backstop: should that event ever be
 // dropped, a stale positive (免@) result self-heals within 30s instead of being
 // pinned for minutes. This is aligned with NEGATIVE_CACHE_TTL_MS below.
-// Negative results (no_mention=false) share the same short TTL. getMentionPref
-// returns no_mention=false BOTH for a genuine "needs @" group AND as its failure
-// fallback, so without a short TTL a transient backend blip would pin
-// no_mention=false and delay a freshly-enabled 免@ from taking effect.
+// Negative results (effective=false) share the same short TTL. getMentionPref
+// returns effective=false BOTH for a genuine "needs @" group (either axis off)
+// AND as its failure fallback, so without a short TTL a transient backend blip
+// would pin effective=false and delay a freshly-enabled 免@ from taking effect.
 const NEGATIVE_CACHE_TTL_MS = 30 * 1000; // 30 seconds
 
 interface CacheEntry {
@@ -55,7 +56,7 @@ function cacheKey(accountId: string, parentGroupNo: string): string {
 /**
  * Get the 免@偏好 for a (bot, group) pair, refreshing lazily on miss/expiry.
  *
- * On a fetch failure getMentionPref already returns `{ no_mention: false }`
+ * On a fetch failure getMentionPref already returns `effective: false`
  * (account-level fallback). We still cache that, but with a shorter
  * NEGATIVE_CACHE_TTL_MS so a flaky backend doesn't hammer the API on every
  * inbound message yet a freshly-enabled 免@ surfaces within ~30s rather than
@@ -83,7 +84,7 @@ export async function getMentionPrefFromCache(params: {
         }
       : undefined,
   });
-  const ttl = pref.no_mention ? CACHE_TTL_MS : NEGATIVE_CACHE_TTL_MS;
+  const ttl = pref.effective ? CACHE_TTL_MS : NEGATIVE_CACHE_TTL_MS;
   _prefCache.set(key, { pref, expiry: Date.now() + ttl });
   return pref;
 }
@@ -99,7 +100,7 @@ export function invalidateMentionPref(accountId: string, parentGroupNo: string):
  * Optional warm-up — the gate works purely lazily without it; this just
  * avoids a first-message latency bump and a thundering pull when a busy
  * group wakes up. Per-group failures are swallowed (getMentionPref already
- * falls back to no_mention=false), so a flaky backend degrades to lazy load.
+ * falls back to effective=false), so a flaky backend degrades to lazy load.
  */
 export async function preloadMentionPrefs(params: {
   accountId: string;
@@ -145,15 +146,26 @@ export function _clearMentionPrefCache(): void {
   _prefCache.clear();
 }
 
-/** Visible for testing — directly set a cache entry. */
+/**
+ * Visible for testing — directly set a cache entry.
+ *
+ * Accepts a partial pref and normalizes the two-axis shape so tests can write
+ * the terse `{ no_mention: true }` and still get a well-formed entry: the group
+ * axis defaults to true (allow) and `effective` defaults to the AND of the two
+ * axes. Pass `effective` / `group_allow_no_mention` explicitly to model the
+ * "group admin blocked it" case.
+ */
 export function _setMentionPrefEntry(
   accountId: string,
   parentGroupNo: string,
-  pref: MentionPref,
+  pref: Partial<MentionPref>,
   ttlMs?: number,
 ): void {
+  const noMention = pref.no_mention === true;
+  const groupAllow = pref.group_allow_no_mention === undefined ? true : pref.group_allow_no_mention;
+  const effective = pref.effective === undefined ? noMention && groupAllow : pref.effective;
   _prefCache.set(cacheKey(accountId, parentGroupNo), {
-    pref,
+    pref: { no_mention: noMention, group_allow_no_mention: groupAllow, effective },
     expiry: Date.now() + (ttlMs ?? CACHE_TTL_MS),
   });
 }

@@ -27,6 +27,13 @@ function jsonResponse(data: unknown, status = 200): Response {
 const API = "http://localhost:8090";
 const TOKEN = "tok";
 
+// Build the full three-field MentionPref shape getMentionPref now returns.
+// When the server mock returns only `{ no_mention }`, the group axis defaults to
+// true (allow) and effective degrades to no_mention (zero regression).
+function mp(noMention: boolean, groupAllow = true, effective = noMention && groupAllow) {
+  return { no_mention: noMention, group_allow_no_mention: groupAllow, effective };
+}
+
 describe("mention-prefs", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -50,8 +57,41 @@ describe("mention-prefs", () => {
         botToken: TOKEN,
       });
 
-      expect(pref).toEqual({ no_mention: true });
+      expect(pref).toEqual(mp(true));
       expect(spy).not.toHaveBeenCalled();
+    });
+
+    it("two-axis AND: owner enabled but group blocked → effective=false", async () => {
+      // The server enforces the AND; the adapter must honor `effective`, not the
+      // raw `no_mention` axis. group_allow_no_mention=false flips effective off.
+      const fetchMock = mockFetch(async () =>
+        jsonResponse({ no_mention: true, group_allow_no_mention: false, effective: false }),
+      );
+      globalThis.fetch = fetchMock;
+
+      const result = await getMentionPrefFromCache({
+        accountId: "acct1",
+        parentGroupNo: "gblocked",
+        apiUrl: API,
+        botToken: TOKEN,
+      });
+
+      expect(result).toEqual({ no_mention: true, group_allow_no_mention: false, effective: false });
+    });
+
+    it("old server (only no_mention) → group axis defaults allow, effective=no_mention", async () => {
+      const fetchMock = mockFetch(async () => jsonResponse({ no_mention: true }));
+      globalThis.fetch = fetchMock;
+
+      const result = await getMentionPrefFromCache({
+        accountId: "acct1",
+        parentGroupNo: "glegacy",
+        apiUrl: API,
+        botToken: TOKEN,
+      });
+
+      // Missing group_allow_no_mention/effective → backward-compatible defaults.
+      expect(result).toEqual(mp(true));
     });
 
     it("pulls and caches on miss, hitting the mention_pref endpoint", async () => {
@@ -61,6 +101,7 @@ describe("mention-prefs", () => {
       });
       globalThis.fetch = fetchMock;
 
+
       const pref = await getMentionPrefFromCache({
         accountId: "acct1",
         parentGroupNo: "g200",
@@ -68,7 +109,7 @@ describe("mention-prefs", () => {
         botToken: TOKEN,
       });
 
-      expect(pref).toEqual({ no_mention: true });
+      expect(pref).toEqual(mp(true));
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(_hasMentionPrefEntry("acct1", "g200")).toBe(true);
 
@@ -103,8 +144,8 @@ describe("mention-prefs", () => {
         botToken: "tokB",
       });
 
-      expect(a).toEqual({ no_mention: true });
-      expect(b).toEqual({ no_mention: false });
+      expect(a).toEqual(mp(true));
+      expect(b).toEqual(mp(false));
       expect(_hasMentionPrefEntry("botA", "shared")).toBe(true);
       expect(_hasMentionPrefEntry("botB", "shared")).toBe(true);
     });
@@ -121,7 +162,7 @@ describe("mention-prefs", () => {
         botToken: TOKEN,
       });
 
-      expect(pref).toEqual({ no_mention: false });
+      expect(pref).toEqual(mp(false));
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
@@ -136,7 +177,7 @@ describe("mention-prefs", () => {
         botToken: TOKEN,
       });
 
-      expect(pref).toEqual({ no_mention: false });
+      expect(pref).toEqual(mp(false));
     });
 
     it("caches a negative (no_mention=false) result with a short TTL so it re-pulls soon", async () => {
@@ -160,7 +201,7 @@ describe("mention-prefs", () => {
           apiUrl: API,
           botToken: TOKEN,
         });
-        expect(first).toEqual({ no_mention: false });
+        expect(first).toEqual(mp(false));
         expect(calls).toBe(1);
 
         // Just before the negative TTL elapses → still served from cache.
@@ -171,7 +212,7 @@ describe("mention-prefs", () => {
           apiUrl: API,
           botToken: TOKEN,
         });
-        expect(cached).toEqual({ no_mention: false });
+        expect(cached).toEqual(mp(false));
         expect(calls).toBe(1);
 
         // Past the 30s negative TTL → re-pulls and now sees 免@.
@@ -182,7 +223,7 @@ describe("mention-prefs", () => {
           apiUrl: API,
           botToken: TOKEN,
         });
-        expect(refreshed).toEqual({ no_mention: true });
+        expect(refreshed).toEqual(mp(true));
         expect(calls).toBe(2);
       } finally {
         vi.useRealTimers();
@@ -205,7 +246,7 @@ describe("mention-prefs", () => {
           apiUrl: API,
           botToken: TOKEN,
         });
-        expect(first).toEqual({ no_mention: true });
+        expect(first).toEqual(mp(true));
         expect(calls).toBe(1);
 
         // Just before the 30s TTL elapses → still served from cache.
@@ -216,7 +257,7 @@ describe("mention-prefs", () => {
           apiUrl: API,
           botToken: TOKEN,
         });
-        expect(cached).toEqual({ no_mention: true });
+        expect(cached).toEqual(mp(true));
         expect(calls).toBe(1);
 
         // Past the 30s TTL → re-pulls (backstop self-heal when no event arrives).
@@ -227,7 +268,7 @@ describe("mention-prefs", () => {
           apiUrl: API,
           botToken: TOKEN,
         });
-        expect(refreshed).toEqual({ no_mention: true });
+        expect(refreshed).toEqual(mp(true));
         expect(calls).toBe(2);
       } finally {
         vi.useRealTimers();

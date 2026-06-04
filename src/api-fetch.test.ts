@@ -1429,7 +1429,8 @@ describe("getMentionPref", () => {
 
     expect(seenUrl).toBe("http://localhost:8090/v1/bot/groups/g1/mention_pref");
     expect(seenAuth).toBe("Bearer tok");
-    expect(pref).toEqual({ no_mention: true });
+    // Old server returns only no_mention → group axis defaults allow, effective=no_mention.
+    expect(pref).toEqual({ no_mention: true, group_allow_no_mention: true, effective: true });
   });
 
   it("coerces numeric no_mention=1 to true", async () => {
@@ -1438,7 +1439,7 @@ describe("getMentionPref", () => {
     ) as unknown as typeof fetch;
     const { getMentionPref } = await import("./api-fetch.js");
     const pref = await getMentionPref({ apiUrl: "http://x", botToken: "t", groupNo: "g" });
-    expect(pref).toEqual({ no_mention: true });
+    expect(pref).toEqual({ no_mention: true, group_allow_no_mention: true, effective: true });
   });
 
   it("coerces missing/other no_mention to false", async () => {
@@ -1447,24 +1448,42 @@ describe("getMentionPref", () => {
     ) as unknown as typeof fetch;
     const { getMentionPref } = await import("./api-fetch.js");
     const pref = await getMentionPref({ apiUrl: "http://x", botToken: "t", groupNo: "g" });
-    expect(pref).toEqual({ no_mention: false });
+    expect(pref).toEqual({ no_mention: false, group_allow_no_mention: true, effective: false });
+  });
+
+  it("two-axis: server effective=false even when no_mention=true (group blocked)", async () => {
+    global.fetch = vi.fn(async () =>
+      new Response(JSON.stringify({ no_mention: true, group_allow_no_mention: false, effective: false }), { status: 200 }),
+    ) as unknown as typeof fetch;
+    const { getMentionPref } = await import("./api-fetch.js");
+    const pref = await getMentionPref({ apiUrl: "http://x", botToken: "t", groupNo: "g" });
+    expect(pref).toEqual({ no_mention: true, group_allow_no_mention: false, effective: false });
+  });
+
+  it("coerces numeric effective=1 / group_allow_no_mention=1", async () => {
+    global.fetch = vi.fn(async () =>
+      new Response(JSON.stringify({ no_mention: 1, group_allow_no_mention: 1, effective: 1 }), { status: 200 }),
+    ) as unknown as typeof fetch;
+    const { getMentionPref } = await import("./api-fetch.js");
+    const pref = await getMentionPref({ apiUrl: "http://x", botToken: "t", groupNo: "g" });
+    expect(pref).toEqual({ no_mention: true, group_allow_no_mention: true, effective: true });
   });
 
   it("returns {no_mention:false} on non-2xx", async () => {
     global.fetch = vi.fn(async () => new Response("err", { status: 404 })) as unknown as typeof fetch;
     const { getMentionPref } = await import("./api-fetch.js");
     const pref = await getMentionPref({ apiUrl: "http://x", botToken: "t", groupNo: "g" });
-    expect(pref).toEqual({ no_mention: false });
+    expect(pref).toEqual({ no_mention: false, group_allow_no_mention: true, effective: false });
   });
 
-  it("returns {no_mention:false} on network error (no throw)", async () => {
+  it("returns effective=false on network error (no throw)", async () => {
     global.fetch = vi.fn(async () => {
       throw new Error("network down");
     }) as unknown as typeof fetch;
     const { getMentionPref } = await import("./api-fetch.js");
     await expect(
       getMentionPref({ apiUrl: "http://x", botToken: "t", groupNo: "g" }),
-    ).resolves.toEqual({ no_mention: false });
+    ).resolves.toEqual({ no_mention: false, group_allow_no_mention: true, effective: false });
   });
 
   it("uses a short (≤5s) hot-path timeout, not the 30s default", async () => {
