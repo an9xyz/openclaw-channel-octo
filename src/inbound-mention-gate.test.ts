@@ -209,6 +209,35 @@ describe("inbound mention-gate 免@ relaxation (P1: human-only)", () => {
     expect(sends.length).toBeGreaterThan(0);
   });
 
+  it("does NOT reply to a HUMAN non-@ message when the GROUP blocked 免@ (effective=false)", async () => {
+    // Two-axis AND (YUJ-2996): the bot owner enabled no_mention, but the group
+    // admin set allow_no_mention=0 → server returns effective=false → the bot
+    // must still require an @mention. Seed the cache with the group-blocked shape.
+    _clearMentionPrefCache();
+    _setMentionPrefEntry("acct1", GROUP_ID, {
+      no_mention: true,
+      group_allow_no_mention: false,
+      effective: false,
+    });
+    const { dispatch } = installRuntimeStub();
+    const { sends } = installFetchStub();
+
+    await handleInboundMessage({
+      account: makeAccount(),
+      message: makeTextMessage(HUMAN_UID, "hello bot"),
+      botUid: BOT_UID,
+      groupHistories: new Map(),
+      lastBotReplySeqMap: new Map(),
+      memberMap: new Map(),
+      uidToNameMap: new Map(),
+      groupCacheTimestamps: new Map(),
+    });
+
+    // effective=false → requireMention stays on → non-@ message is gated.
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(sends.length).toBe(0);
+  });
+
   it("does NOT reply to a KNOWN-BOT non-@ message in a 免@ group (loop guard)", async () => {
     const { dispatch } = installRuntimeStub();
     const { sends } = installFetchStub();

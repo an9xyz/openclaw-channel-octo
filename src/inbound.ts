@@ -1541,13 +1541,17 @@ export async function handleInboundMessage(params: {
   }
 
   // --- Mention gating for group messages ---
-  // Group-aware requireMention: a group admin can mark a group as 免@
-  // (no_mention=true) for this specific bot, in which case the bot replies to
-  // every message without an explicit @mention. The preference is per-(bot,
-  // group); thread (compound channel_id) messages inherit their PARENT group's
-  // preference, so we resolve the parent group_no first. On miss/expiry the
-  // cache pulls GET /v1/bot/groups/:group_no/mention_pref (TTL 5min); any
-  // failure falls back to the account-level config, so the gate never crashes.
+  // Group-aware requireMention: the bot may reply without an explicit @mention
+  // only when the server's two-axis decision says so (octo-server YUJ-2996).
+  // `effective = no_mention && group_allow_no_mention`:
+  //   - no_mention: the bot OWNER marked this (bot, group) as 免@.
+  //   - group_allow_no_mention: the GROUP owner/admin allows 免@ in this group.
+  // Either axis off → effective=false → the bot still requires an @mention.
+  // The preference is per-(bot, group); thread (compound channel_id) messages
+  // inherit their PARENT group's preference, so we resolve the parent group_no
+  // first. On miss/expiry the cache pulls GET
+  // /v1/bot/groups/:group_no/mention_pref (TTL 30s); any failure falls back to
+  // the account-level config, so the gate never crashes.
   //
   // The 免@ relaxation is HUMAN-ONLY and FAIL-CLOSED (PR#57 round-4 P1).
   // channel.ts forwards other bots' group messages into here on purpose,
@@ -1664,7 +1668,7 @@ export async function handleInboundMessage(params: {
   // Group 免@ preference lookup — deferred until AFTER mention flags are known.
   // Only consult the group pref when it can actually change the outcome:
   //   1. isGroup && accountRequiresMention — else the pref can only return
-  //      no_mention=false, with no effect.
+  //      effective=false, with no effect.
   //   2. isConfirmedHuman — the 免@ relaxation is whitelist/fail-closed: it
   //      applies ONLY to a sender the member list positively confirms is human.
   //      Unknown senders, refresh failures, and any bot keep requireMention, so
@@ -1681,13 +1685,13 @@ export async function handleInboundMessage(params: {
         parentGroupNo: extractParentGroupNo(message.channel_id!),
         apiUrl: account.config.apiUrl,
         // botToken ?? "" can yield an empty `Bearer` header; getMentionPref
-        // treats any non-2xx (incl. the resulting 401) as no_mention=false, so
+        // treats any non-2xx (incl. the resulting 401) as effective=false, so
         // the gate safely falls back to the account-level config.
         botToken: account.config.botToken ?? "",
         log,
       })
     : undefined;
-  const requireMention = mentionPref?.no_mention === true
+  const requireMention = mentionPref?.effective === true
     ? false
     : accountRequiresMention;
 
