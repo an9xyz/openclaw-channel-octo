@@ -907,19 +907,21 @@ describe("uploadAndSendMedia timeout", () => {
     vi.restoreAllMocks();
   });
 
-  it("should pass timeout signal to fetch", async () => {
+  it("should pass timeout signal to the download fetch", async () => {
     const calls: Array<{ url: string; method?: string; signal?: AbortSignal }> = [];
-    const { Readable } = await import("node:stream");
     vi.stubGlobal("fetch", async (url: string, opts?: any) => {
       calls.push({ url, method: opts?.method, signal: opts?.signal });
-      if (opts?.method === "HEAD") {
-        return {
-          ok: true,
-          headers: new Headers({ "content-length": "8" }),
-        };
+      // Presigned API call — fail here so we only exercise the download path.
+      if (typeof url === "string" && url.includes("/v1/bot/")) {
+        return { ok: false, status: 500, statusText: "boom", text: async () => "" };
       }
-      // GET request — return a readable stream body
-      const body = new Readable({ read() { this.push(Buffer.alloc(8)); this.push(null); } });
+      // GET media download — return a web ReadableStream body (8 bytes).
+      const body = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new Uint8Array(8));
+          controller.close();
+        },
+      });
       return {
         ok: true,
         headers: new Headers({ "content-type": "image/png" }),
@@ -927,8 +929,8 @@ describe("uploadAndSendMedia timeout", () => {
       };
     });
 
-    // Call uploadAndSendMedia — it will use the mocked fetch for HEAD + GET,
-    // then fail on getUploadCredentials (which also uses fetch but posts to API)
+    // Call uploadAndSendMedia — it downloads via the mocked fetch (GET),
+    // then fails on getUploadPresign (the /v1/bot/ call returns 500).
     let caughtError: unknown;
     try {
       await uploadAndSendMedia({
@@ -942,10 +944,12 @@ describe("uploadAndSendMedia timeout", () => {
       caughtError = err;
     }
 
-    // calls[0] is HEAD (no signal), calls[1] is GET with timeout signal
-    expect(calls.length).toBeGreaterThanOrEqual(2);
-    expect(calls[0].method).toBe("HEAD");
-    expect(calls[1].signal).toBeDefined();
+    // No HEAD pre-check anymore: the first call is the GET download with a
+    // timeout signal, then the presigned API call.
+    expect(caughtError).toBeDefined();
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+    expect(calls[0].method).toBeUndefined();
+    expect(calls[0].signal).toBeDefined();
   });
 });
 
@@ -2135,21 +2139,21 @@ describe("media-only reply cutoff tracking", () => {
   });
 
   it("uploadAndSendMedia returns SendMessageResult from sendMediaMessage", async () => {
-    const { Readable } = await import("node:stream");
+    let putUrl: string | undefined;
+    let putHeaders: any;
 
     vi.stubGlobal("fetch", async (url: string, opts?: any) => {
-      if (opts?.method === "HEAD") {
-        return { ok: true, headers: new Headers({ "content-length": "8" }) };
-      }
       if (typeof url === "string" && url.includes("/v1/bot/")) {
-        // API calls (getUploadCredentials, sendMessage)
-        if (url.includes("upload/credentials")) {
+        // Presigned URL issuance
+        if (url.includes("upload/presigned")) {
           return {
             ok: true,
-            text: async () => JSON.stringify({
-              credentials: { tmpSecretId: "id", tmpSecretKey: "key", sessionToken: "tok" },
-              startTime: 0, expiredTime: 9999999999,
-              bucket: "b", region: "r", key: "k", cdnBaseUrl: "https://cdn.example.com",
+            json: async () => ({
+              method: "PUT",
+              uploadUrl: "https://minio.example.com/octo/chat/1/a/b.png?sig=1",
+              downloadUrl: "https://minio.example.com/octo/chat/1/a/b.png",
+              contentType: "image/png",
+              contentDisposition: 'inline; filename="img.png"',
             }),
           };
         }
@@ -2159,8 +2163,19 @@ describe("media-only reply cutoff tracking", () => {
           text: async () => JSON.stringify({ message_id: "mid_123", message_seq: 42 }),
         };
       }
-      // GET for file download
-      const body = new Readable({ read() { this.push(Buffer.alloc(8)); this.push(null); } });
+      // PUT to the presigned upload URL
+      if (opts?.method === "PUT") {
+        putUrl = url;
+        putHeaders = opts?.headers;
+        return { ok: true };
+      }
+      // GET for file download — return a web ReadableStream body (8 bytes).
+      const body = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new Uint8Array(8));
+          controller.close();
+        },
+      });
       return {
         ok: true,
         headers: new Headers({ "content-type": "image/png" }),
@@ -2168,14 +2183,20 @@ describe("media-only reply cutoff tracking", () => {
       };
     });
 
-    // COS upload fails in test env — uploadAndSendMedia should propagate the error
-    await expect(uploadAndSendMedia({
+    const result = await uploadAndSendMedia({
       mediaUrl: "https://example.com/img.png",
       apiUrl: "https://api.example.com",
       botToken: "token",
       channelId: "ch1",
       channelType: ChannelType.DM,
-    })).rejects.toThrow();
+    });
+
+    expect(result?.message_id).toBe("mid_123");
+    // The PUT lands on the presigned uploadUrl and replays the signed headers.
+    expect(putUrl).toBe("https://minio.example.com/octo/chat/1/a/b.png?sig=1");
+    expect(putHeaders["Content-Type"]).toBe("image/png");
+    expect(putHeaders["Content-Length"]).toBe("8");
+    expect(putHeaders["Content-Disposition"]).toBe('inline; filename="img.png"');
   });
 });
 

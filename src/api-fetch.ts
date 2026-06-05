@@ -7,8 +7,6 @@ import { ChannelType, MessageType, type MentionEntity, type RichTextBlock, type 
 import path from "path";
 import { open } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-// @ts-ignore — cos-nodejs-sdk-v5 has incomplete TypeScript definitions
-import COS from "cos-nodejs-sdk-v5";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 // Short timeout for the per-message mention_pref hot-path lookup. On a cache
@@ -1168,27 +1166,44 @@ export async function getChannelMessages(params: {
 }
 
 /**
- * Get STS temporary credentials for direct COS upload.
+ * Get a presigned PUT URL for direct, backend-agnostic file upload.
+ *
+ * Calls the server's `GET /v1/bot/upload/presigned` route, which signs a PUT
+ * URL against whatever object storage the deployment is configured with
+ * (MinIO / COS / S3 / OSS). This replaces the old COS-only STS-credentials
+ * path so self-hosted Docker+MinIO deployments (no Tencent COS config) can
+ * upload too — same presigned link the web/iOS/Android clients use.
+ *
+ * `fileSize` is REQUIRED and must be the exact byte count of the body the
+ * caller is about to PUT: on SigV4 backends (MinIO/COS) it is signed into the
+ * canonical headers as Content-Length, so any mismatch at PUT time returns
+ * 403 SignatureDoesNotMatch. Callers MUST pass `statSync().size` of the real
+ * payload, never a HEAD Content-Length guess.
  */
-export async function getUploadCredentials(params: {
+export async function getUploadPresign(params: {
   apiUrl: string;
   botToken: string;
   filename: string;
+  fileSize: number;
+  contentType?: string;
   signal?: AbortSignal;
 }): Promise<{
-  bucket: string;
-  region: string;
-  key: string;
-  credentials: {
-    tmpSecretId: string;
-    tmpSecretKey: string;
-    sessionToken: string;
-  };
-  startTime: number;
-  expiredTime: number;
-  cdnBaseUrl?: string;
+  uploadUrl: string;
+  downloadUrl: string;
+  contentType: string;
+  contentDisposition?: string;
 }> {
-  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/upload/credentials?filename=${encodeURIComponent(params.filename)}`;
+  if (!Number.isInteger(params.fileSize) || params.fileSize <= 0) {
+    throw new Error(
+      `getUploadPresign requires a positive integer fileSize (got ${params.fileSize})`,
+    );
+  }
+  const query = new URLSearchParams({
+    filename: params.filename,
+    fileSize: String(params.fileSize),
+  });
+  if (params.contentType) query.set("contentType", params.contentType);
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/upload/presigned?${query}`;
   const response = await fetch(url, {
     method: "GET",
     headers: {
@@ -1198,121 +1213,65 @@ export async function getUploadCredentials(params: {
   });
   if (!response.ok) {
     const text = await response.text().catch(() => "");
-    throw new Error(`Octo API /v1/bot/upload/credentials failed (${response.status}): ${text || response.statusText}`);
+    throw new Error(`Octo API /v1/bot/upload/presigned failed (${response.status}): ${text || response.statusText}`);
   }
   const data = await response.json() as any;
-  // Validate required fields to catch backend API changes early
-  if (!data.bucket || !data.region || !data.key || !data.credentials) {
-    throw new Error(`Octo API /v1/bot/upload/credentials returned incomplete response: missing ${
-      ['bucket', 'region', 'key', 'credentials'].filter(k => !data[k]).join(', ')
+  if (typeof data.uploadUrl !== "string" || typeof data.downloadUrl !== "string") {
+    throw new Error(`Octo API /v1/bot/upload/presigned returned incomplete response: missing ${
+      ['uploadUrl', 'downloadUrl'].filter(k => typeof data[k] !== "string").join(', ')
     }`);
   }
-  if (!data.credentials.tmpSecretId || !data.credentials.tmpSecretKey || !data.credentials.sessionToken) {
-    throw new Error("Octo API /v1/bot/upload/credentials returned incomplete credentials");
-  }
-  return data;
-}
-
-/** Characters unsafe in a Content-Disposition filename="..." value. */
-const CD_UNSAFE_RE = /["\\\x00-\x1F\x7F;]/;
-
-export function rfc5987Encode(s: string): string {
-  return encodeURIComponent(s).replace(/['()*]/g, c =>
-    '%' + c.charCodeAt(0).toString(16).toUpperCase()
-  );
-}
-
-export function buildContentDisposition(
-  filename: string,
-  type: 'attachment' | 'inline' = 'attachment',
-): string {
-  const isAsciiSafe = /^[\x20-\x7E]+$/.test(filename) && !CD_UNSAFE_RE.test(filename);
-  if (isAsciiSafe) {
-    return `${type}; filename="${filename}"`;
-  }
-  const ext = filename.includes('.') ? '.' + filename.split('.').pop() : '';
-  return `${type}; filename="download${ext}"; filename*=UTF-8''${rfc5987Encode(filename)}`;
+  return {
+    uploadUrl: data.uploadUrl,
+    downloadUrl: data.downloadUrl,
+    contentType: typeof data.contentType === "string" ? data.contentType : "application/octet-stream",
+    contentDisposition: typeof data.contentDisposition === "string" ? data.contentDisposition : undefined,
+  };
 }
 
 /**
- * Upload a file directly to COS using STS temporary credentials.
+ * Upload a file body with a single PUT to a server-issued presigned URL.
+ *
+ * The body must be exactly `fileSize` bytes — the same value passed to
+ * {@link getUploadPresign} so the signed Content-Length matches (SigV4
+ * backends 403 otherwise). `contentType` and `contentDisposition` are
+ * replayed verbatim from the presign response: both are folded into the
+ * canonical headers on MinIO/COS, so omitting or altering them returns
+ * 403 SignatureDoesNotMatch.
+ *
+ * Returns `{ url }` = the presign response's `downloadUrl`, ready to drop
+ * into a message payload.
  */
-export async function uploadFileToCOS(params: {
-  credentials: {
-    tmpSecretId: string;
-    tmpSecretKey: string;
-    sessionToken: string;
-  };
-  startTime: number;
-  expiredTime: number;
-  bucket: string;
-  region: string;
-  key: string;
+export async function uploadFileToPresignedUrl(params: {
+  uploadUrl: string;
+  downloadUrl: string;
   fileBody: Buffer | NodeJS.ReadableStream;
-  fileSize?: number;
+  fileSize: number;
   contentType: string;
-  cdnBaseUrl?: string;
-  filename?: string;
+  contentDisposition?: string;
+  signal?: AbortSignal;
 }): Promise<{ url: string }> {
-  const cos = new COS({
-    SecretId: params.credentials.tmpSecretId,
-    SecretKey: params.credentials.tmpSecretKey,
-    SecurityToken: params.credentials.sessionToken,
-    StartTime: params.startTime,
-    ExpiredTime: params.expiredTime,
-  } as any);
-
-  let contentDisposition: string | undefined;
-  if (params.filename) {
-    const ct = params.contentType;
-    if (ct.startsWith('video/') || ct.startsWith('audio/')) {
-      contentDisposition = buildContentDisposition(params.filename, 'inline');
-    } else if (!ct.startsWith('image/')) {
-      contentDisposition = buildContentDisposition(params.filename, 'attachment');
-    }
-  }
-
-  const putParams: Record<string, unknown> = {
-    Bucket: params.bucket,
-    Region: params.region,
-    Key: params.key,
-    Body: params.fileBody,
-    ContentType: params.contentType,
-    ...(contentDisposition && { ContentDisposition: contentDisposition }),
+  const headers: Record<string, string> = {
+    "Content-Type": params.contentType,
+    "Content-Length": String(params.fileSize),
   };
-  if (params.fileSize != null) {
-    putParams.ContentLength = params.fileSize;
+  if (params.contentDisposition) {
+    headers["Content-Disposition"] = params.contentDisposition;
   }
 
-  return new Promise((resolve, reject) => {
-    cos.putObject(putParams as any, (err: any, data: any) => {
-      if (err) {
-        reject(new Error(`COS upload failed: ${err.message || JSON.stringify(err)}`));
-      } else {
-        // Prefer CDN base URL (e.g. https://cdn.example.com) over raw COS URL
-        let url: string;
-        if (params.cdnBaseUrl) {
-          const base = params.cdnBaseUrl.replace(/\/+$/, "");
-          // Re-encode each path segment: COS keys may contain percent-encoded
-          // characters (e.g. Chinese filenames). Without double-encoding, the
-          // IM client decodes the URL once and requests a key with raw UTF-8
-          // characters that doesn't exist in COS (NoSuchKey / 404).
-          const reEncodedKey = params.key
-            .split("/")
-            .map((seg) => encodeURIComponent(seg))
-            .join("/");
-          url = `${base}/${reEncodedKey}`;
-        } else {
-          url = data.Location ? `https://${data.Location}` : "";
-        }
-        if (!url) {
-          reject(new Error("COS upload succeeded but returned no Location URL"));
-          return;
-        }
-        resolve({ url });
-      }
-    });
-  });
+  const response = await fetch(params.uploadUrl, {
+    method: "PUT",
+    headers,
+    body: params.fileBody as any,
+    // Required by undici when streaming a request body.
+    duplex: "half",
+    signal: params.signal,
+  } as RequestInit);
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`Presigned PUT upload failed (${response.status}): ${text || response.statusText}`);
+  }
+  return { url: params.downloadUrl };
 }
 
 

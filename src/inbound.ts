@@ -1,7 +1,7 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import type { ChannelLogSink } from "openclaw/plugin-sdk/channel-contract";
 import { DEFAULT_GROUP_HISTORY_LIMIT } from "openclaw/plugin-sdk/reply-history";
-import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson, sendMediaMessage, inferContentType, ensureTextCharset, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS, fetchUserInfo } from "./api-fetch.js";
+import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson, sendMediaMessage, inferContentType, ensureTextCharset, parseImageDimensions, parseImageDimensionsFromFile, getUploadPresign, uploadFileToPresignedUrl, fetchUserInfo } from "./api-fetch.js";
 import { getMentionPrefFromCache, invalidateMentionPref } from "./mention-prefs.js";
 import { normalizeAccountId } from "./account-id.js";
 import type { ResolvedOctoAccount } from "./accounts.js";
@@ -175,7 +175,8 @@ export function extractFilename(url: string): string {
 }
 
 /**
- * Result of uploading a single media asset to COS (without sending).
+ * Result of uploading a single media asset via the server presigned URL
+ * (without sending).
  */
 export interface UploadedMedia {
   /** Public CDN/object URL of the uploaded asset. */
@@ -195,8 +196,9 @@ export interface UploadedMedia {
 }
 
 /**
- * Upload a single media asset (remote URL or local path) to COS and return its
- * public URL plus metadata — WITHOUT sending a message.
+ * Upload a single media asset (remote URL or local path) via the server's
+ * backend-agnostic presigned PUT URL and return its public URL plus metadata
+ * — WITHOUT sending a message.
  *
  * Extracted from {@link uploadAndSendMedia} so the outbound RichText(=14) path
  * can batch-upload images first, collect their URLs/dimensions, then assemble a
@@ -214,27 +216,30 @@ export async function uploadMedia(params: {
   const { basename, join: pathJoin } = await import("node:path");
   const { mkdir: fsMkdir, unlink: fsUnlink } = await import("node:fs/promises");
   const { randomUUID } = await import("node:crypto");
-  const { pipeline } = await import("node:stream/promises");
-  const { Readable } = await import("node:stream");
 
-  const MAX_UPLOAD = 500 * 1024 * 1024;
+  // Align with the server presigned route cap (file.MaxFileSize = 100MB).
+  const MAX_UPLOAD = 100 * 1024 * 1024;
   const TEMP_DIR = pathJoin("/tmp", "octo-upload");
 
-  let fileBody: Buffer | NodeJS.ReadableStream;
   let fileSize: number;
   let contentType: string;
   let filename: string;
   let tempPath: string | undefined;
+  // Path the upload body is streamed from (temp file for remote, original for
+  // local). The read stream is opened lazily right before the PUT so that an
+  // earlier failure (e.g. presign) can unlink the temp file without leaving a
+  // dangling open() that throws ENOENT.
+  let bodyPath: string;
 
   if (mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) {
     filename = extractFilename(mediaUrl);
-    // Stream download to temp file
+    // Stream download to a temp file. We deliberately do NOT trust the HEAD
+    // Content-Length for the size check or for the presigned fileSize: a
+    // remote server may omit or lie about it, and the presigned PUT signs the
+    // exact byte count (SigV4 403 on any mismatch). Enforce the cap while
+    // streaming, then use the real statSync().size.
     await fsMkdir(TEMP_DIR, { recursive: true });
     tempPath = pathJoin(TEMP_DIR, `${randomUUID()}-${filename}`);
-
-    const head = await fetch(mediaUrl, { method: "HEAD" });
-    const cl = Number(head.headers.get("content-length") || 0);
-    if (cl > MAX_UPLOAD) throw new Error(`File too large (${cl} bytes, max ${MAX_UPLOAD})`);
 
     const resp = await fetch(mediaUrl, {
       signal: AbortSignal.timeout(300_000),
@@ -242,13 +247,42 @@ export async function uploadMedia(params: {
     if (!resp.ok) throw new Error(`Failed to fetch media: ${resp.status}`);
     contentType = resp.headers.get("content-type") || "application/octet-stream";
 
-    const body = resp.body;
-    if (!body) throw new Error(`No response body from ${mediaUrl}`);
-    const nodeStream = Readable.fromWeb(body as any);
+    if (!resp.body) throw new Error(`No response body from ${mediaUrl}`);
     const ws = fsCreateWriteStream(tempPath);
+    let totalBytes = 0;
+    // Attach the error handler before the first write so a mid-stream write
+    // error (disk full, etc.) is captured promptly instead of crashing as an
+    // unhandled stream 'error' event.
+    const streamError = new Promise<never>((_, reject) => {
+      ws.on("error", reject);
+    });
+    // Swallow late rejections (e.g. error after we already resolved) so they
+    // never surface as an unhandledRejection; the await sites still see them.
+    streamError.catch(() => {});
     try {
-      await pipeline(nodeStream, ws);
+      const reader = (resp.body as any).getReader() as ReadableStreamDefaultReader<Uint8Array>;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        totalBytes += value.byteLength;
+        if (totalBytes > MAX_UPLOAD) {
+          reader.cancel();
+          throw new Error(`File too large (exceeds max ${MAX_UPLOAD} bytes)`);
+        }
+        if (!ws.write(value)) {
+          await Promise.race([
+            new Promise<void>(r => ws.once("drain", r)),
+            streamError,
+          ]);
+        }
+      }
+      ws.end();
+      await Promise.race([
+        new Promise<void>(resolve => ws.on("finish", resolve)),
+        streamError,
+      ]);
     } catch (err) {
+      ws.destroy();
       // Cleanup partial temp file on download failure
       await fsUnlink(tempPath).catch(() => {});
       tempPath = undefined;
@@ -256,33 +290,36 @@ export async function uploadMedia(params: {
     }
 
     const st = fsStatSync(tempPath);
-    fileBody = fsCreateReadStream(tempPath);
+    bodyPath = tempPath;
     fileSize = st.size;
   } else {
     // Local file path — stream, don't buffer
     const st = fsStatSync(mediaUrl);
     if (st.size > MAX_UPLOAD) throw new Error(`File too large (${st.size} bytes, max ${MAX_UPLOAD})`);
-    fileBody = fsCreateReadStream(mediaUrl);
+    bodyPath = mediaUrl;
     fileSize = st.size;
     filename = basename(mediaUrl);
     contentType = inferContentType(filename);
   }
 
   try {
-    // Upload to COS via STS credentials (stream mode)
-    const creds = await getUploadCredentials({ apiUrl, botToken, filename });
-    const { url: uploadedUrl } = await uploadFileToCOS({
-      credentials: creds.credentials,
-      startTime: creds.startTime,
-      expiredTime: creds.expiredTime,
-      bucket: creds.bucket,
-      region: creds.region,
-      key: creds.key,
-      fileBody,
+    // Upload via the server's presigned PUT URL (backend-agnostic: MinIO/COS/S3/OSS).
+    const presign = await getUploadPresign({
+      apiUrl,
+      botToken,
+      filename,
       fileSize,
       contentType: ensureTextCharset(contentType),
-      cdnBaseUrl: creds.cdnBaseUrl,
-      filename,
+    });
+    const { url: uploadedUrl } = await uploadFileToPresignedUrl({
+      uploadUrl: presign.uploadUrl,
+      downloadUrl: presign.downloadUrl,
+      fileBody: fsCreateReadStream(bodyPath),
+      fileSize,
+      // Replay the server-signed contentType / contentDisposition verbatim:
+      // both are folded into the SigV4 canonical headers (403 otherwise).
+      contentType: presign.contentType,
+      contentDisposition: presign.contentDisposition,
     });
 
     // Determine media kind from MIME
@@ -306,7 +343,7 @@ export async function uploadMedia(params: {
   }
 }
 
-/** Upload media to MinIO and send as image/file message */
+/** Upload media via the server presigned URL and send as image/file message */
 export async function uploadAndSendMedia(params: {
   mediaUrl: string;
   apiUrl: string;

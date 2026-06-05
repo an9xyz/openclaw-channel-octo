@@ -328,7 +328,7 @@ function resolveActionMediaUrls(args: Record<string, unknown>): string[] {
  * 顺序组成单条 content 数组，一次 HTTP 提交（替代 N+1 次）。
  *
  * 当没有任何带正宽高的图片可组装（全部是非图片文件 / 宽高解析失败 / 上传全失败）时，
- * 不返回 null（那会让调用方重新上传、孤儿化已上传的 COS 对象）：直接在此发送文本 +
+ * 不返回 null（那会让调用方重新上传、孤儿化已上传的对象）：直接在此发送文本 +
  * 复用已上传 url 的 sideload 媒体，返回 `richText:false`。
  */
 async function sendRichTextCombined(params: {
@@ -388,7 +388,7 @@ async function sendRichTextCombined(params: {
   // Deliver any sideloaded assets (non-image files, or dimensionless images)
   // via a single-send each, reusing the already-uploaded URL — no re-upload.
   // Defined before the no-image early path so both branches share it (avoids
-  // returning null after uploads, which would orphan COS objects + re-upload).
+  // returning null after uploads, which would orphan uploaded objects + re-upload).
   const deliverSideloads = async (): Promise<number> => {
     let delivered = 0;
     for (const { uploaded } of sideloads) {
@@ -418,7 +418,7 @@ async function sendRichTextCombined(params: {
   // No image block survived (all non-image files / dimensionless images / all
   // uploads failed). We already uploaded the sideloads, so deliver them here
   // (reusing the uploaded URLs) plus the text — do NOT return null, which would
-  // make the caller re-upload via the legacy path and orphan the COS objects.
+  // make the caller re-upload via the legacy path and orphan the uploaded objects.
   if (imageBlocks.length === 0) {
     let textMessageId: string | undefined;
     if (finalMessage.trim() !== "") {

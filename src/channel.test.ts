@@ -15,14 +15,13 @@ vi.mock("./api-fetch.js", async () => {
   return {
     sendMessage: vi.fn().mockResolvedValue(okResult),
     sendMediaMessage: vi.fn().mockResolvedValue(okResult),
-    getUploadCredentials: vi.fn().mockResolvedValue({
-      credentials: { TmpSecretId: "id", TmpSecretKey: "k", Token: "t" },
-      startTime: 0,
-      expiredTime: 0,
-      bucket: "b", region: "r", key: "k",
-      cdnBaseUrl: "https://cdn.example/",
+    getUploadPresign: vi.fn().mockResolvedValue({
+      uploadUrl: "https://minio.example/octo/chat/1/a/b.txt?sig=1",
+      downloadUrl: "https://cdn.example/file.txt",
+      contentType: "text/plain; charset=utf-8",
+      contentDisposition: 'inline; filename="file.txt"',
     }),
-    uploadFileToCOS: vi.fn().mockResolvedValue({ url: "https://cdn.example/file.txt" }),
+    uploadFileToPresignedUrl: vi.fn().mockResolvedValue({ url: "https://cdn.example/file.txt" }),
     inferContentType: (fn: string) =>
       fn.endsWith(".txt") ? "text/plain" : "application/octet-stream",
     ensureTextCharset: (ct: string) =>
@@ -536,8 +535,8 @@ describe("outbound.sendMedia — threadId wiring", () => {
   beforeEach(async () => {
     const apiFetch = await import("./api-fetch.js");
     (apiFetch.sendMediaMessage as any).mockClear();
-    (apiFetch.getUploadCredentials as any).mockClear();
-    (apiFetch.uploadFileToCOS as any).mockClear();
+    (apiFetch.getUploadPresign as any).mockClear();
+    (apiFetch.uploadFileToPresignedUrl as any).mockClear();
   });
 
   it("merges ctx.threadId into the group target as CommunityTopic (type=5)", async () => {
