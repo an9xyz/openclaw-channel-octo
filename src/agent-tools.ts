@@ -42,7 +42,7 @@ import {
 } from "./api-fetch.js";
 import { broadcastGroupMdUpdate, broadcastThreadMdUpdate } from "./group-md.js";
 import { mkdir, writeFile, appendFile, chmod, realpath, lstat } from "node:fs/promises";
-import { dirname, resolve as resolvePath, isAbsolute, sep } from "node:path";
+import { dirname, resolve as resolvePath, sep } from "node:path";
 
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
