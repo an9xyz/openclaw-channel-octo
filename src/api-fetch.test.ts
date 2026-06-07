@@ -1506,3 +1506,149 @@ describe("getMentionPref", () => {
     expect(seenSignal!.aborted).toBe(true);
   }, 10_000);
 });
+
+describe("resolveSecret", () => {
+  const originalFetch = global.fetch;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("returns resolved value on a resolved response", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockResolvedValue({
+        status: "resolved",
+        value: "sk-live-PLAINTEXT",
+        secret_id: "sec_1",
+        display_name: "openai key",
+      }),
+    }) as unknown as typeof fetch;
+
+    const { resolveSecret } = await import("./api-fetch.js");
+    const result = await resolveSecret({
+      apiUrl: "http://api.test",
+      botToken: "bf_token",
+      alias: "openai key",
+    });
+
+    expect(result.status).toBe("resolved");
+    if (result.status === "resolved") {
+      expect(result.value).toBe("sk-live-PLAINTEXT");
+      expect(result.secret_id).toBe("sec_1");
+      expect(result.display_name).toBe("openai key");
+    }
+  });
+
+  it("POSTs the alias with a bearer bot token", async () => {
+    const spy = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockResolvedValue({ status: "not_found" }),
+    });
+    global.fetch = spy as unknown as typeof fetch;
+
+    const { resolveSecret } = await import("./api-fetch.js");
+    await resolveSecret({ apiUrl: "http://api.test/", botToken: "bf_token", alias: "k" });
+
+    const [url, init] = spy.mock.calls[0];
+    expect(url).toBe("http://api.test/v1/bot/secrets/resolve");
+    expect(init.method).toBe("POST");
+    expect(init.headers.Authorization).toBe("Bearer bf_token");
+    expect(JSON.parse(init.body)).toEqual({ alias: "k" });
+  });
+
+  it("normalizes status:not_found", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockResolvedValue({ status: "not_found" }),
+    }) as unknown as typeof fetch;
+
+    const { resolveSecret } = await import("./api-fetch.js");
+    const result = await resolveSecret({ apiUrl: "http://api.test", botToken: "t", alias: "x" });
+    expect(result.status).toBe("not_found");
+  });
+
+  it("normalizes a 404 to not_found (endpoint not deployed / unknown alias)", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 404,
+      text: vi.fn().mockResolvedValue("not found"),
+    }) as unknown as typeof fetch;
+
+    const { resolveSecret } = await import("./api-fetch.js");
+    const result = await resolveSecret({ apiUrl: "http://api.test", botToken: "t", alias: "x" });
+    expect(result.status).toBe("not_found");
+  });
+
+  it("returns label-only candidates for an ambiguous match (no value field)", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockResolvedValue({
+        status: "ambiguous",
+        candidates: [
+          { secret_id: "a", display_name: "openai prod" },
+          { secret_id: "b", display_name: "openai test" },
+          { display_name: "" }, // dropped: no label
+        ],
+      }),
+    }) as unknown as typeof fetch;
+
+    const { resolveSecret } = await import("./api-fetch.js");
+    const result = await resolveSecret({ apiUrl: "http://api.test", botToken: "t", alias: "openai" });
+    expect(result.status).toBe("ambiguous");
+    if (result.status === "ambiguous") {
+      expect(result.candidates).toHaveLength(2);
+      expect(result.candidates[0]).toEqual({ secret_id: "a", display_name: "openai prod" });
+      // No plaintext leaks into candidates.
+      expect(JSON.stringify(result.candidates)).not.toContain("value");
+    }
+  });
+
+  it("throws on a 5xx (resolve failure) without leaking a value", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      statusText: "Internal Server Error",
+      text: vi.fn().mockResolvedValue("boom"),
+    }) as unknown as typeof fetch;
+
+    const { resolveSecret } = await import("./api-fetch.js");
+    await expect(
+      resolveSecret({ apiUrl: "http://api.test", botToken: "t", alias: "x" }),
+    ).rejects.toThrow(/resolveSecret failed \(500\)/);
+  });
+
+  it("throws when a resolved secret has no value", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockResolvedValue({ status: "resolved" }),
+    }) as unknown as typeof fetch;
+
+    const { resolveSecret } = await import("./api-fetch.js");
+    await expect(
+      resolveSecret({ apiUrl: "http://api.test", botToken: "t", alias: "x" }),
+    ).rejects.toThrow(/no value/);
+  });
+
+  it("throws on an unknown status", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockResolvedValue({ status: "weird" }),
+    }) as unknown as typeof fetch;
+
+    const { resolveSecret } = await import("./api-fetch.js");
+    await expect(
+      resolveSecret({ apiUrl: "http://api.test", botToken: "t", alias: "x" }),
+    ).rejects.toThrow(/unknown status/);
+  });
+});

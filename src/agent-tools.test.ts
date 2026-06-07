@@ -17,11 +17,18 @@ vi.mock("./api-fetch.js", () => ({
   deleteVoiceContext: vi.fn(),
   getThreadMd: vi.fn(),
   updateThreadMd: vi.fn(),
+  resolveSecret: vi.fn(),
 }));
 
 vi.mock("./group-md.js", () => ({
   broadcastGroupMdUpdate: vi.fn(),
   broadcastThreadMdUpdate: vi.fn(),
+}));
+
+vi.mock("node:fs/promises", () => ({
+  mkdir: vi.fn().mockResolvedValue(undefined),
+  writeFile: vi.fn().mockResolvedValue(undefined),
+  appendFile: vi.fn().mockResolvedValue(undefined),
 }));
 
 import { createOctoManagementTools } from "./agent-tools.js";
@@ -41,8 +48,10 @@ import {
   deleteVoiceContext,
   getThreadMd,
   updateThreadMd,
+  resolveSecret,
 } from "./api-fetch.js";
 import { broadcastGroupMdUpdate, broadcastThreadMdUpdate } from "./group-md.js";
+import { mkdir, writeFile, appendFile } from "node:fs/promises";
 
 // Minimal config stub — mocked account functions don't inspect it
 const mockCfg = { channels: { octo: { botToken: "tok-secret" } } } as any;
@@ -1165,6 +1174,241 @@ describe("createOctoManagementTools", () => {
       });
       const data = parseText(result);
       expect(data.error).toContain("thread-md-update failed");
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // write-secret (user-managed external keys; internal deref)
+  // -----------------------------------------------------------------------
+  describe("execute — write-secret", () => {
+    // The plaintext value any resolved secret yields. The whole point of this
+    // feature is that THIS string never appears in a tool return value.
+    const PLAINTEXT = "sk-live-SUPER-SECRET-VALUE-123";
+
+    it("tool schema includes the write-secret action", () => {
+      const tools = createOctoManagementTools({ cfg: mockCfg });
+      expect(tools[0].parameters.properties.action.enum).toContain("write-secret");
+    });
+
+    it("resolves the alias and writes the raw value to the file", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({
+        status: "resolved",
+        value: PLAINTEXT,
+        secret_id: "sec_1",
+        display_name: "openai key",
+      });
+
+      const result = await getExecute()("tc", {
+        action: "write-secret",
+        alias: "openai key",
+        filePath: "/work/secrets/.env",
+      });
+      const data = parseText(result);
+
+      // resolve is use-time: called with the bot token + alias.
+      expect(resolveSecret).toHaveBeenCalledWith({
+        apiUrl: "http://api.test",
+        botToken: "tok-secret",
+        alias: "openai key",
+      });
+      // raw value written verbatim (no template).
+      expect(writeFile).toHaveBeenCalledWith("/work/secrets/.env", PLAINTEXT, "utf8");
+      expect(appendFile).not.toHaveBeenCalled();
+
+      expect(data.written).toBe(true);
+      expect(data.path).toBe("/work/secrets/.env");
+      expect(data.mode).toBe("overwrite");
+      expect(data.display_name).toBe("openai key");
+      expect(data.bytesWritten).toBe(Buffer.byteLength(PLAINTEXT, "utf8"));
+    });
+
+    it("substitutes {{secret}} inside the caller template", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({
+        status: "resolved",
+        value: PLAINTEXT,
+      });
+
+      await getExecute()("tc", {
+        action: "write-secret",
+        alias: "openai key",
+        filePath: "/work/.env",
+        template: "OPENAI_API_KEY={{secret}}\n",
+      });
+
+      expect(writeFile).toHaveBeenCalledWith(
+        "/work/.env",
+        `OPENAI_API_KEY=${PLAINTEXT}\n`,
+        "utf8",
+      );
+    });
+
+    it("appends when mode=append", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+
+      const result = await getExecute()("tc", {
+        action: "write-secret",
+        alias: "k",
+        filePath: "/work/.env",
+        mode: "append",
+      });
+      const data = parseText(result);
+
+      expect(appendFile).toHaveBeenCalledWith("/work/.env", PLAINTEXT, "utf8");
+      expect(writeFile).not.toHaveBeenCalled();
+      expect(data.mode).toBe("append");
+    });
+
+    it("creates the parent directory before writing", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+
+      await getExecute()("tc", {
+        action: "write-secret",
+        alias: "k",
+        filePath: "/work/nested/dir/.env",
+      });
+
+      expect(mkdir).toHaveBeenCalledWith("/work/nested/dir", { recursive: true });
+    });
+
+    // 🔴 RED LINE: plaintext must never appear in the LLM-visible return value.
+    it("NEVER returns the plaintext value (red line)", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({
+        status: "resolved",
+        value: PLAINTEXT,
+        secret_id: "sec_1",
+        display_name: "openai key",
+      });
+
+      const result = await getExecute()("tc", {
+        action: "write-secret",
+        alias: "openai key",
+        filePath: "/work/.env",
+        template: "OPENAI_API_KEY={{secret}}\n",
+      });
+
+      // Check BOTH the text channel and the structured details — every path the
+      // LLM / transcript can observe.
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain(PLAINTEXT);
+      expect(result.content[0].text).not.toContain(PLAINTEXT);
+      expect(JSON.stringify(result.details)).not.toContain(PLAINTEXT);
+    });
+
+    it("not_found → guides the user to add the key, no plaintext", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "not_found" });
+
+      const result = await getExecute()("tc", {
+        action: "write-secret",
+        alias: "ghost key",
+        filePath: "/work/.env",
+      });
+      const data = parseText(result);
+
+      expect(data.error).toContain("No stored secret matches");
+      expect(data.error).toContain("ghost key");
+      expect(writeFile).not.toHaveBeenCalled();
+      expect(appendFile).not.toHaveBeenCalled();
+    });
+
+    it("ambiguous → returns label-only candidates, never plaintext, no write", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({
+        status: "ambiguous",
+        candidates: [
+          { secret_id: "a", display_name: "openai prod" },
+          { secret_id: "b", display_name: "openai test" },
+        ],
+      });
+
+      const result = await getExecute()("tc", {
+        action: "write-secret",
+        alias: "openai",
+        filePath: "/work/.env",
+      });
+      const data = parseText(result);
+
+      expect(data.written).toBe(false);
+      expect(data.ambiguous).toBe(true);
+      expect(data.candidates).toHaveLength(2);
+      expect(data.candidates[0].display_name).toBe("openai prod");
+      // Candidates carry no secret value.
+      expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+      expect(writeFile).not.toHaveBeenCalled();
+    });
+
+    it("resolve failure → actionable re-set hint, no write", async () => {
+      vi.mocked(resolveSecret).mockRejectedValue(
+        new Error("resolveSecret failed (500): boom"),
+      );
+
+      const result = await getExecute()("tc", {
+        action: "write-secret",
+        alias: "k",
+        filePath: "/work/.env",
+      });
+      const data = parseText(result);
+
+      expect(data.error).toContain("Could not resolve secret");
+      expect(data.error).toContain("re-add");
+      expect(writeFile).not.toHaveBeenCalled();
+    });
+
+    it("write failure after resolve → error mentions path but not the value", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+      vi.mocked(writeFile).mockRejectedValueOnce(new Error("EACCES: permission denied"));
+
+      const result = await getExecute()("tc", {
+        action: "write-secret",
+        alias: "k",
+        filePath: "/root/.env",
+      });
+      const data = parseText(result);
+
+      expect(data.error).toContain("failed to write");
+      expect(data.error).toContain("/root/.env");
+      expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+    });
+
+    it("requires alias", async () => {
+      const result = await getExecute()("tc", {
+        action: "write-secret",
+        filePath: "/work/.env",
+      });
+      expect(parseText(result).error).toContain("alias is required");
+      expect(resolveSecret).not.toHaveBeenCalled();
+    });
+
+    it("requires filePath", async () => {
+      const result = await getExecute()("tc", {
+        action: "write-secret",
+        alias: "k",
+      });
+      expect(parseText(result).error).toContain("filePath is required");
+      expect(resolveSecret).not.toHaveBeenCalled();
+    });
+
+    it("rejects an invalid mode", async () => {
+      const result = await getExecute()("tc", {
+        action: "write-secret",
+        alias: "k",
+        filePath: "/work/.env",
+        mode: "sideways",
+      });
+      expect(parseText(result).error).toContain("Invalid mode");
+      expect(resolveSecret).not.toHaveBeenCalled();
+    });
+
+    it("resolves use-time on every call (latest value, no caching)", async () => {
+      vi.mocked(resolveSecret)
+        .mockResolvedValueOnce({ status: "resolved", value: "old-value" })
+        .mockResolvedValueOnce({ status: "resolved", value: "rotated-value" });
+
+      const execute = getExecute();
+      await execute("tc", { action: "write-secret", alias: "k", filePath: "/work/.env" });
+      await execute("tc", { action: "write-secret", alias: "k", filePath: "/work/.env" });
+
+      expect(resolveSecret).toHaveBeenCalledTimes(2);
+      expect(writeFile).toHaveBeenNthCalledWith(1, "/work/.env", "old-value", "utf8");
+      expect(writeFile).toHaveBeenNthCalledWith(2, "/work/.env", "rotated-value", "utf8");
     });
   });
 });

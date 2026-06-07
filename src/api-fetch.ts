@@ -879,6 +879,139 @@ export async function getBotOboGrant(params: {
   };
 }
 
+// ---- Secret Resolve API (user-managed external keys) ----
+
+/**
+ * One candidate when an alias matches more than one stored secret.
+ *
+ * 🔴 SECURITY: candidates carry ONLY non-sensitive identifiers
+ * (display_name + secret_id). The plaintext secret value is NEVER part of a
+ * candidate — disambiguation happens on labels alone so nothing sensitive is
+ * surfaced while the caller is still deciding which secret to use.
+ */
+export interface SecretCandidate {
+  /** Stable opaque id of the secret (safe to echo back for re-resolution). */
+  secret_id?: string;
+  /** Human-facing label the owner gave the secret. Safe to show. */
+  display_name: string;
+}
+
+/**
+ * Result of resolving a secret alias for the bot's owner.
+ *
+ * Discriminated on `status`:
+ *  - `resolved`   → exactly one match; `value` holds the plaintext secret.
+ *  - `not_found`  → no secret matches the alias; the owner must add it first.
+ *  - `ambiguous`  → multiple matches; `candidates` lists labels for the caller
+ *                   to re-resolve against (no plaintext).
+ *
+ * 🔴 RED LINE: the `value` field on the `resolved` variant is the ONLY place
+ * plaintext appears. Callers must consume it internally (e.g. write it to a
+ * local file) and MUST NOT propagate it into any LLM-visible return value,
+ * transcript, message, or log. See agent-tools.ts `write-secret`.
+ */
+export type ResolveSecretResult =
+  | { status: "resolved"; value: string; secret_id?: string; display_name?: string }
+  | { status: "not_found" }
+  | { status: "ambiguous"; candidates: SecretCandidate[] };
+
+/**
+ * Resolve a user-managed external-key alias to its current plaintext value.
+ *
+ * POST /v1/bot/secrets/resolve  (octo-server YUJ-3538)
+ *
+ * Auth & ownership: the request carries only the plugin's bot token
+ * (`bf_...`). The server authenticates the bot and resolves the alias against
+ * the secrets owned by THAT bot's owner — the plugin never sends, sees, or
+ * needs the owner's identity beyond the token it already holds.
+ *
+ * Use-time resolution: this is called on every write so the latest plaintext
+ * is always fetched. If the owner rotates the key, the next call picks it up
+ * with zero restart and zero cache invalidation.
+ *
+ * Contract:
+ *  - 200 `{ status: "resolved", value, secret_id?, display_name? }`
+ *  - 200 `{ status: "ambiguous", candidates: [{ secret_id?, display_name }] }`
+ *  - 200 `{ status: "not_found" }` OR 404 → normalized to `{ status: "not_found" }`
+ *  - any other non-2xx → throws (caller surfaces a non-plaintext "resolve
+ *    failed, please re-set" message)
+ *
+ * 🔴 SECURITY: on a non-2xx the thrown Error message contains only the HTTP
+ * status and the (resolve-failure) response body — never a resolved value,
+ * because a resolved value is only ever delivered inside a 2xx body that we
+ * parse rather than throw.
+ */
+export async function resolveSecret(params: {
+  apiUrl: string;
+  botToken: string;
+  /** Alias the owner referenced: a display_name or a secret_id. */
+  alias: string;
+  signal?: AbortSignal;
+}): Promise<ResolveSecretResult> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/secrets/resolve`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      ...DEFAULT_HEADERS,
+      Authorization: `Bearer ${params.botToken}`,
+    },
+    body: JSON.stringify({ alias: params.alias }),
+    signal: params.signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+
+  // 404 = alias not found for this owner (or endpoint not deployed yet during
+  // rollout). Both degrade to a benign "not_found" so the caller can guide the
+  // user to add the secret rather than surfacing a hard error.
+  if (resp.status === 404) {
+    return { status: "not_found" };
+  }
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(
+      `resolveSecret failed (${resp.status}): ${text || resp.statusText}`,
+    );
+  }
+
+  const raw = (await resp.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!raw || typeof raw !== "object") {
+    throw new Error("resolveSecret returned an unparseable response");
+  }
+
+  const status = raw.status;
+
+  if (status === "not_found") {
+    return { status: "not_found" };
+  }
+
+  if (status === "ambiguous") {
+    const rawCandidates = Array.isArray(raw.candidates) ? raw.candidates : [];
+    const candidates: SecretCandidate[] = rawCandidates
+      .map((c) => {
+        const obj = (c ?? {}) as Record<string, unknown>;
+        const displayName = typeof obj.display_name === "string" ? obj.display_name : "";
+        const secretId = typeof obj.secret_id === "string" ? obj.secret_id : undefined;
+        return { display_name: displayName, secret_id: secretId };
+      })
+      // Drop entries with no label — a candidate the caller can't show is useless.
+      .filter((c) => c.display_name.length > 0);
+    return { status: "ambiguous", candidates };
+  }
+
+  if (status === "resolved") {
+    if (typeof raw.value !== "string") {
+      throw new Error("resolveSecret resolved a secret with no value");
+    }
+    return {
+      status: "resolved",
+      value: raw.value,
+      secret_id: typeof raw.secret_id === "string" ? raw.secret_id : undefined,
+      display_name: typeof raw.display_name === "string" ? raw.display_name : undefined,
+    };
+  }
+
+  throw new Error(`resolveSecret returned an unknown status: ${String(status)}`);
+}
+
 /** Decoded payload from base64 message content */
 interface SyncMessagePayload {
   type?: number;

@@ -38,11 +38,23 @@ import {
   deleteVoiceContext,
   getThreadMd,
   updateThreadMd,
+  resolveSecret,
 } from "./api-fetch.js";
 import { broadcastGroupMdUpdate, broadcastThreadMdUpdate } from "./group-md.js";
+import { mkdir, writeFile, appendFile } from "node:fs/promises";
+import { dirname } from "node:path";
 
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
+
+/**
+ * Placeholder token replaced by the resolved plaintext secret inside the
+ * caller-supplied write template. Using an explicit token keeps the LLM in
+ * control of *how* the secret is laid out in the file (env line, JSON field,
+ * raw value, …) while the plaintext itself only ever materializes inside the
+ * tool, never in the tool's arguments or return value.
+ */
+const SECRET_PLACEHOLDER = "{{secret}}";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -88,7 +100,11 @@ export function createOctoManagementTools(params: {
     description:
       "Manage Octo groups and personal voice correction context: list groups, get group info/members, " +
       "read or update GROUP.md (group-level and thread-level), and manage personal voice correction context. " +
-      "Use this tool for any Octo management operations.",
+      "Use this tool for any Octo management operations. " +
+      "It also handles user-managed secrets (external API keys): when the user asks to write one of THEIR " +
+      "stored keys into a local file, call action 'write-secret' and pass the user's ALIAS for the key " +
+      "(the display name they used, e.g. \"my openai key\"), never a raw secret value. The tool fetches the " +
+      "current value internally and writes it to the file; the plaintext is NEVER returned to you.",
     parameters: {
       type: "object",
       properties: {
@@ -117,6 +133,7 @@ export function createOctoManagementTools(params: {
             "voice-context-read",
             "voice-context-update",
             "voice-context-delete",
+            "write-secret",
           ],
           description: "The management action to perform.",
         },
@@ -174,6 +191,34 @@ export function createOctoManagementTools(params: {
           type: "string",
           description:
             "Required when multiple Octo accounts are configured. Use the exact accountId from the current Octo context; casing is normalized when unambiguous. Omit when only one account is configured.",
+        },
+        alias: {
+          type: "string",
+          description:
+            "For write-secret only. The user's alias for one of THEIR stored secrets — the display name they " +
+            "referred to it by (e.g. \"openai key\"), or a secret_id returned by a previous ambiguous result. " +
+            "🔴 Pass the alias, NEVER a raw secret value: the tool resolves the current plaintext internally.",
+        },
+        filePath: {
+          type: "string",
+          description:
+            "For write-secret only. Absolute or workspace-relative path of the local file to write the secret into. " +
+            "Choose the path based on the user's instruction (e.g. a .env file, a config file).",
+        },
+        template: {
+          type: "string",
+          description:
+            "For write-secret only. Optional layout for what gets written, with the placeholder " +
+            "'{{secret}}' marking where the resolved value goes (e.g. \"OPENAI_API_KEY={{secret}}\\n\" " +
+            "or '{\"apiKey\":\"{{secret}}\"}'). If omitted, the raw secret value is written verbatim. " +
+            "🔴 Do NOT put the secret value here — only the '{{secret}}' placeholder.",
+        },
+        mode: {
+          type: "string",
+          enum: ["overwrite", "append"],
+          description:
+            "For write-secret only. 'overwrite' (default) replaces the file contents; 'append' adds to the end " +
+            "(useful for adding a line to an existing .env). Omit to overwrite.",
         },
       },
       required: ["action"],
@@ -491,6 +536,32 @@ export function createOctoManagementTools(params: {
           case "voice-context-delete":
             return await handleVoiceContextDelete({ apiUrl, botToken });
 
+          case "write-secret": {
+            const alias = (args.alias as string | undefined)?.trim();
+            if (!alias) {
+              return makeError("alias is required for write-secret");
+            }
+            const filePath = (args.filePath as string | undefined)?.trim();
+            if (!filePath) {
+              return makeError("filePath is required for write-secret");
+            }
+            const template = args.template as string | undefined;
+            const rawMode = args.mode as string | undefined;
+            if (rawMode !== undefined && rawMode !== "overwrite" && rawMode !== "append") {
+              return makeError(
+                `Invalid mode "${rawMode}" for write-secret; use "overwrite" or "append"`,
+              );
+            }
+            return await handleWriteSecret({
+              apiUrl,
+              botToken,
+              alias,
+              filePath,
+              template,
+              mode: rawMode === "append" ? "append" : "overwrite",
+            });
+          }
+
           default:
             return makeError(`Unknown action: ${action}`);
         }
@@ -707,6 +778,111 @@ async function handleVoiceContextDelete(params: {
     botToken: params.botToken,
   });
   return makeSuccess({ deleted: true });
+}
+
+// ---------------------------------------------------------------------------
+// Secret Write Handler
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve a user-managed secret alias and write its current plaintext into a
+ * local file.
+ *
+ * 🔴 RED LINE — plaintext containment:
+ * The resolved secret value is read from resolveSecret(), substituted into the
+ * (optional) caller template, and written to disk. It is consumed ENTIRELY
+ * inside this function. The ToolResult returned to the LLM contains only:
+ *   - success: { written: true, path, bytesWritten, display_name?, mode }
+ *   - structured non-plaintext feedback for the not_found / ambiguous /
+ *     resolve-failure cases.
+ * The plaintext value, the rendered file content, and the template-with-secret
+ * are NEVER placed in the return value, so they cannot reach the transcript /
+ * Octo. `bytesWritten` is a length only — it carries no secret material.
+ *
+ * Use-time resolution: resolveSecret is called on every invocation, so the
+ * latest value is always written (owner key rotation takes effect with no
+ * restart and no cache to invalidate).
+ */
+async function handleWriteSecret(params: {
+  apiUrl: string;
+  botToken: string;
+  alias: string;
+  filePath: string;
+  template?: string;
+  mode: "overwrite" | "append";
+}): Promise<ToolResult> {
+  let resolved;
+  try {
+    resolved = await resolveSecret({
+      apiUrl: params.apiUrl,
+      botToken: params.botToken,
+      alias: params.alias,
+    });
+  } catch (err) {
+    // resolve failure (5xx / malformed / transport). Surface a non-plaintext,
+    // actionable hint — never the underlying value (a failure has none).
+    return makeError(
+      `Could not resolve secret "${params.alias}". The key service is unavailable or the secret may need to be re-set. Ask the user to re-add the key, then retry. (${
+        err instanceof Error ? err.message : String(err)
+      })`,
+    );
+  }
+
+  // not_found → guide the user to add the secret first. Echo only the alias the
+  // user already typed (not sensitive).
+  if (resolved.status === "not_found") {
+    return makeError(
+      `No stored secret matches "${params.alias}". Ask the user to add this key first (e.g. via the Octo secrets settings), then try again.`,
+    );
+  }
+
+  // ambiguous → hand back ONLY the labels so the LLM can ask the user which one.
+  // 🔴 candidates carry display_name (+ secret_id) only, never the value.
+  if (resolved.status === "ambiguous") {
+    return makeSuccess({
+      written: false,
+      ambiguous: true,
+      message: `Multiple stored secrets match "${params.alias}". Ask the user which one, then retry write-secret with the chosen display_name (or its secret_id).`,
+      candidates: resolved.candidates,
+    });
+  }
+
+  // resolved → substitute into template (or use raw value) and write to disk.
+  // From here the plaintext lives only in local variables and the file.
+  const content =
+    params.template && params.template.includes(SECRET_PLACEHOLDER)
+      ? params.template.split(SECRET_PLACEHOLDER).join(resolved.value)
+      : resolved.value;
+
+  const bytesWritten = Buffer.byteLength(content, "utf8");
+
+  try {
+    const dir = dirname(params.filePath);
+    if (dir && dir !== "." && dir !== params.filePath) {
+      await mkdir(dir, { recursive: true });
+    }
+    if (params.mode === "append") {
+      await appendFile(params.filePath, content, "utf8");
+    } else {
+      await writeFile(params.filePath, content, "utf8");
+    }
+  } catch (err) {
+    // A write error message can include the path but never the content.
+    return makeError(
+      `Resolved the secret but failed to write it to "${params.filePath}": ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
+  // 🔴 Success payload is plaintext-free by construction.
+  return makeSuccess({
+    written: true,
+    path: params.filePath,
+    mode: params.mode,
+    bytesWritten,
+    ...(resolved.display_name ? { display_name: resolved.display_name } : {}),
+  });
 }
 
 // ---------------------------------------------------------------------------
