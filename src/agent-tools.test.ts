@@ -1419,6 +1419,73 @@ describe("createOctoManagementTools", () => {
       }
     });
 
+    // 🔴 P0 REGRESSION — dangling-symlink jail escape. The earlier guard only
+    // rejected symlinks whose target ALREADY existed; a symlink pointing OUT of
+    // the jail at a target that does NOT yet exist (dangling) slipped through,
+    // and writeFile() then created the plaintext secret at the out-of-jail
+    // target via O_CREAT. The two tests below are real PoCs against the real
+    // exported handler: they build a genuine dangling symlink in the jail, call
+    // write-secret, and assert (a) it is rejected, (b) resolveSecret is never
+    // called, (c) NO file appears at the out-of-jail target.
+    it("rejects when the target itself is a DANGLING symlink escaping the jail", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+      const outside = await mkdtemp(join(tmpdir(), "octo-outside-"));
+      try {
+        // Target does NOT exist yet (dangling). link inside jail → outside.
+        const danglingTarget = join(outside, "not-yet.txt");
+        await symlink(danglingTarget, join(root, "evil.txt"), "file");
+
+        const result = await writeSecret({ alias: "k", filePath: "evil.txt" });
+
+        expect(parseText(result).error).toMatch(/symlink|verified|outside the allowed/i);
+        // Never resolved → plaintext never fetched.
+        expect(resolveSecret).not.toHaveBeenCalled();
+        // 🔴 The out-of-jail target must NOT have been created.
+        await expect(readFile(danglingTarget, "utf8")).rejects.toThrow();
+        // And no plaintext anywhere in the LLM-visible return.
+        expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects a DANGLING symlinked DIRECTORY escaping the jail", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+      const outside = await mkdtemp(join(tmpdir(), "octo-outside-"));
+      try {
+        // An intermediate dir symlink pointing to a not-yet-existing out-of-jail
+        // location. Writing "link/secret.txt" would otherwise create the file
+        // (and the dir) outside the jail.
+        const danglingDir = join(outside, "does-not-exist-dir");
+        await symlink(danglingDir, join(root, "link"), "dir");
+
+        const result = await writeSecret({ alias: "k", filePath: "link/secret.txt" });
+
+        expect(parseText(result).error).toMatch(/symlink|verified|outside the allowed/i);
+        expect(resolveSecret).not.toHaveBeenCalled();
+        // 🔴 Nothing created at the out-of-jail location.
+        await expect(readFile(join(danglingDir, "secret.txt"), "utf8")).rejects.toThrow();
+        expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects a DANGLING symlink that points back INSIDE the jail too (unverifiable → deny)", async () => {
+      // Even a dangling link whose lexical target is inside the jail cannot be
+      // proven safe (realpath throws), so we deny it. Conservative but correct:
+      // the caller can just write the plain path directly.
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+      const inJailButMissing = join(root, "later.txt");
+      await symlink(inJailButMissing, join(root, "ptr.txt"), "file");
+
+      const result = await writeSecret({ alias: "k", filePath: "ptr.txt" });
+
+      expect(parseText(result).error).toMatch(/symlink|verified|outside the allowed/i);
+      expect(resolveSecret).not.toHaveBeenCalled();
+      await expect(readFile(inJailButMissing, "utf8")).rejects.toThrow();
+    });
+
     it("allows the jail root itself as a relative '.' is not valid but a file at root is", async () => {
       vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
       const result = await writeSecret({ alias: "k", filePath: "atroot.txt" });

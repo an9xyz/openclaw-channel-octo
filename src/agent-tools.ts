@@ -41,7 +41,8 @@ import {
   resolveSecret,
 } from "./api-fetch.js";
 import { broadcastGroupMdUpdate, broadcastThreadMdUpdate } from "./group-md.js";
-import { mkdir, writeFile, appendFile, chmod, realpath, lstat } from "node:fs/promises";
+import { mkdir, realpath, lstat, open } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import { dirname, resolve as resolvePath, sep } from "node:path";
 
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
@@ -72,7 +73,9 @@ const SECRET_FILE_MODE = 0o600;
  * / a web root). We therefore resolve the requested path against a fixed root
  * (`secretsFileRoot` from config, else the plugin process CWD) and reject
  * anything that escapes it — including `..` traversal, absolute paths pointing
- * elsewhere, and symlink escapes.
+ * elsewhere, and symlink escapes (resolved, dangling, or otherwise
+ * unverifiable). The actual write additionally uses O_NOFOLLOW to defeat a
+ * TOCTOU swap between this check and the write.
  *
  * Returns the safe absolute path, or an error string describing the rejection
  * (never echoing secret material — only the caller-typed path).
@@ -108,47 +111,54 @@ async function confineSecretPath(
     };
   }
 
-  // Symlink-escape guard: walk up to the nearest existing ancestor and
-  // canonicalize it. If a real path component is a symlink pointing out of the
-  // jail, the canonical form will fall outside root and we reject.
-  let probe = candidate;
-  // Find the deepest ancestor that exists on disk.
-  // (candidate itself may not exist yet for overwrite/append-create.)
-  // We stop at root because root is already canonical.
-  while (probe !== root && probe.startsWith(root + sep)) {
+  // Symlink-escape guard: walk the path one component at a time, from the root
+  // down to the target. At each component that exists on disk:
+  //   • a symlink whose canonical target stays inside the jail → keep walking;
+  //   • a symlink whose canonical target escapes the jail       → reject;
+  //   • a symlink that does NOT resolve (dangling / unverifiable) → reject
+  //     UNCONDITIONALLY. This is the key fix: a dangling symlink inside the jail
+  //     (lstat() succeeds, isSymbolicLink()=true, but realpath() throws ENOENT
+  //     because the target does not exist yet) would otherwise be mistaken for
+  //     "a plain file that will be created here". writeFile() FOLLOWS the link
+  //     and creates the plaintext secret at the link's out-of-jail target. We
+  //     never trust a symlink we cannot prove lands inside the jail.
+  //   • a component that simply does not exist (ENOENT on lstat itself, not a
+  //     symlink) → it and everything below it will be freshly created as plain
+  //     entries inside the already-validated jail, so we can stop walking.
+  const rel = candidate === root ? "" : candidate.slice(root.length + sep.length);
+  const segments = rel ? rel.split(sep) : [];
+  let current = root;
+  for (const seg of segments) {
+    current = `${current}${sep}${seg}`;
+    let st;
     try {
-      const real = await realpath(probe);
+      st = await lstat(current);
+    } catch {
+      // This component does not exist. Deeper components don't either; they will
+      // be created as plain files/dirs inside the validated jail. Safe to stop.
+      break;
+    }
+    if (st.isSymbolicLink()) {
+      let real: string;
+      try {
+        real = await realpath(current);
+      } catch {
+        // Dangling or otherwise unverifiable symlink — never trust it.
+        return {
+          ok: false,
+          error: `Refusing to write the secret: "${filePath}" passes through a symlink that cannot be verified to stay inside the allowed directory.`,
+        };
+      }
       if (real !== root && !real.startsWith(root + sep)) {
         return {
           ok: false,
           error: `Refusing to write the secret: "${filePath}" resolves through a symlink that escapes the allowed directory.`,
         };
       }
-      break; // first existing ancestor is contained → safe
-    } catch {
-      // probe doesn't exist; step up one level and retry.
-      const parent = dirname(probe);
-      if (parent === probe) break;
-      probe = parent;
+      // Symlink stays inside the jail: deeper components are re-checked on the
+      // next iterations (lstat naturally follows this contained intermediate
+      // link), so continue.
     }
-  }
-
-  // If the final target already exists, make sure it isn't itself a symlink out
-  // of the jail (realpath above only canonicalizes existing ancestors; an
-  // existing target symlink is caught here for the overwrite/append case).
-  try {
-    const st = await lstat(candidate);
-    if (st.isSymbolicLink()) {
-      const real = await realpath(candidate);
-      if (real !== root && !real.startsWith(root + sep)) {
-        return {
-          ok: false,
-          error: `Refusing to write the secret: "${filePath}" is a symlink that escapes the allowed directory.`,
-        };
-      }
-    }
-  } catch {
-    // Target doesn't exist yet — fine, it will be created inside the jail.
   }
 
   return { ok: true, abs: candidate };
@@ -914,8 +924,10 @@ async function handleVoiceContextDelete(params: {
  *   2. Filesystem: `filePath` is attacker-influenceable (the tool is reachable
  *      from inbound chat). confineSecretPath() jails every write under an
  *      operator-approved root, rejecting `..`, absolute-elsewhere, and symlink
- *      escapes BEFORE the secret is ever resolved. The file is created 0o600 so
- *      a plaintext key is not left world/group readable.
+ *      escapes (including dangling/unverifiable links) BEFORE the secret is ever
+ *      resolved. The write opens the target with O_NOFOLLOW to close any TOCTOU
+ *      symlink swap, and the file is created 0o600 so a plaintext key is not
+ *      left world/group readable.
  *
  * Use-time resolution: resolveSecret is called on every invocation, so the
  * latest value is always written (owner key rotation takes effect with no
@@ -989,15 +1001,27 @@ async function handleWriteSecret(params: {
     if (dir && dir !== "." && dir !== absPath) {
       await mkdir(dir, { recursive: true });
     }
-    if (params.mode === "append") {
-      await appendFile(absPath, content, { encoding: "utf8", mode: SECRET_FILE_MODE });
-    } else {
-      await writeFile(absPath, content, { encoding: "utf8", mode: SECRET_FILE_MODE });
+    // 🔴 TOCTOU close-out: confineSecretPath() validated the path, but between
+    // that check and the write an attacker with filesystem access could swap the
+    // target for a symlink. We open the final component with O_NOFOLLOW so the
+    // kernel refuses to follow a symlink AT the target — the write either lands
+    // on the real in-jail file or fails (ELOOP), never on a redirected target.
+    // O_CREAT applies the 0o600 mode atomically on creation.
+    const flags =
+      (params.mode === "append"
+        ? fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_APPEND
+        : fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC) |
+      fsConstants.O_NOFOLLOW;
+    const handle = await open(absPath, flags, SECRET_FILE_MODE);
+    try {
+      await handle.write(content, null, "utf8");
+      // writeFile/open's `mode` only applies when CREATING the file; a
+      // pre-existing target keeps its old perms. fchmod unconditionally so a
+      // plaintext key is always owner-only (0o600), never world-readable.
+      await handle.chmod(SECRET_FILE_MODE);
+    } finally {
+      await handle.close();
     }
-    // writeFile/appendFile's `mode` only applies when CREATING the file; a
-    // pre-existing target keeps its old perms. chmod unconditionally so a
-    // plaintext key is always owner-only (0o600), never world-readable.
-    await chmod(absPath, SECRET_FILE_MODE);
   } catch (err) {
     // A write error message can include the path but never the content.
     return makeError(
