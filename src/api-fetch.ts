@@ -936,10 +936,10 @@ export type ResolveSecretResult =
  *  - any other non-2xx → throws (caller surfaces a non-plaintext "resolve
  *    failed, please re-set" message)
  *
- * 🔴 SECURITY: on a non-2xx the thrown Error message contains only the HTTP
- * status and the (resolve-failure) response body — never a resolved value,
- * because a resolved value is only ever delivered inside a 2xx body that we
- * parse rather than throw.
+ * 🔴 SECURITY: on a non-2xx the thrown Error message contains ONLY the HTTP
+ * status — never the response body and never a resolved value. The body is
+ * deliberately dropped because this error reaches an LLM-visible tool result
+ * and a resolve-endpoint error body could carry secret-bearing diagnostics.
  */
 export async function resolveSecret(params: {
   apiUrl: string;
@@ -966,10 +966,11 @@ export async function resolveSecret(params: {
     return { status: "not_found" };
   }
   if (!resp.ok) {
-    const text = await resp.text().catch(() => "");
-    throw new Error(
-      `resolveSecret failed (${resp.status}): ${text || resp.statusText}`,
-    );
+    // 🔴 SECURITY: never fold the response body into the error. A resolve
+    // endpoint handles plaintext secrets; a 5xx/diagnostic body could echo a
+    // resolved value or other sensitive material. This error bubbles up to an
+    // LLM-visible tool result, so it must carry the HTTP status ONLY — no body.
+    throw new Error(`resolveSecret failed (${resp.status})`);
   }
 
   const raw = (await resp.json().catch(() => null)) as Record<string, unknown> | null;
@@ -998,7 +999,7 @@ export async function resolveSecret(params: {
   }
 
   if (status === "resolved") {
-    if (typeof raw.value !== "string") {
+    if (typeof raw.value !== "string" || raw.value.length === 0) {
       throw new Error("resolveSecret resolved a secret with no value");
     }
     return {

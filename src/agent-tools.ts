@@ -41,8 +41,8 @@ import {
   resolveSecret,
 } from "./api-fetch.js";
 import { broadcastGroupMdUpdate, broadcastThreadMdUpdate } from "./group-md.js";
-import { mkdir, writeFile, appendFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { mkdir, writeFile, appendFile, chmod, realpath, lstat } from "node:fs/promises";
+import { dirname, resolve as resolvePath, isAbsolute, sep } from "node:path";
 
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
@@ -55,6 +55,104 @@ import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
  * tool, never in the tool's arguments or return value.
  */
 const SECRET_PLACEHOLDER = "{{secret}}";
+
+/**
+ * Permissions for a freshly created secret file: owner read/write only (0o600).
+ * A file that now holds a plaintext API key must not be world/group readable.
+ */
+const SECRET_FILE_MODE = 0o600;
+
+/**
+ * Confine a caller-supplied write target to an operator-approved jail root.
+ *
+ * 🔴 SECURITY (P0): `filePath` comes from the LLM tool call, which is reachable
+ * via inbound group-chat messages — an untrusted, prompt-injectable surface.
+ * Without confinement, `write-secret` is an arbitrary-file-write of the owner's
+ * plaintext secret (e.g. "append my key to ~/.bashrc" / ".ssh/authorized_keys"
+ * / a web root). We therefore resolve the requested path against a fixed root
+ * (`secretsFileRoot` from config, else the plugin process CWD) and reject
+ * anything that escapes it — including `..` traversal, absolute paths pointing
+ * elsewhere, and symlink escapes.
+ *
+ * Returns the safe absolute path, or an error string describing the rejection
+ * (never echoing secret material — only the caller-typed path).
+ */
+async function confineSecretPath(
+  filePath: string,
+  rootInput: string | undefined,
+): Promise<{ ok: true; abs: string } | { ok: false; error: string }> {
+  // The jail root: operator config wins; otherwise the plugin's working dir.
+  // Resolve it to an absolute, symlink-free canonical form so containment
+  // checks compare apples to apples.
+  const rootRaw = rootInput && rootInput.trim() ? rootInput.trim() : process.cwd();
+  let root: string;
+  try {
+    root = await realpath(resolvePath(rootRaw));
+  } catch {
+    // Root doesn't exist yet (or isn't reachable): fall back to its lexical
+    // absolute form. We can still enforce containment lexically below.
+    root = resolvePath(rootRaw);
+  }
+
+  // Resolve the requested path against the root. resolvePath collapses any
+  // `..`/`.` segments; an absolute `filePath` replaces the root entirely, which
+  // the containment check below then rejects unless it still lands inside root.
+  const candidate = resolvePath(root, filePath);
+
+  // Lexical containment: candidate must be the root itself or sit strictly
+  // beneath it. This already defeats `..` traversal and absolute-elsewhere.
+  if (candidate !== root && !candidate.startsWith(root + sep)) {
+    return {
+      ok: false,
+      error: `Refusing to write the secret outside the allowed directory. "${filePath}" resolves outside the permitted root. Use a path inside the workspace.`,
+    };
+  }
+
+  // Symlink-escape guard: walk up to the nearest existing ancestor and
+  // canonicalize it. If a real path component is a symlink pointing out of the
+  // jail, the canonical form will fall outside root and we reject.
+  let probe = candidate;
+  // Find the deepest ancestor that exists on disk.
+  // (candidate itself may not exist yet for overwrite/append-create.)
+  // We stop at root because root is already canonical.
+  while (probe !== root && probe.startsWith(root + sep)) {
+    try {
+      const real = await realpath(probe);
+      if (real !== root && !real.startsWith(root + sep)) {
+        return {
+          ok: false,
+          error: `Refusing to write the secret: "${filePath}" resolves through a symlink that escapes the allowed directory.`,
+        };
+      }
+      break; // first existing ancestor is contained → safe
+    } catch {
+      // probe doesn't exist; step up one level and retry.
+      const parent = dirname(probe);
+      if (parent === probe) break;
+      probe = parent;
+    }
+  }
+
+  // If the final target already exists, make sure it isn't itself a symlink out
+  // of the jail (realpath above only canonicalizes existing ancestors; an
+  // existing target symlink is caught here for the overwrite/append case).
+  try {
+    const st = await lstat(candidate);
+    if (st.isSymbolicLink()) {
+      const real = await realpath(candidate);
+      if (real !== root && !real.startsWith(root + sep)) {
+        return {
+          ok: false,
+          error: `Refusing to write the secret: "${filePath}" is a symlink that escapes the allowed directory.`,
+        };
+      }
+    }
+  } catch {
+    // Target doesn't exist yet — fine, it will be created inside the jail.
+  }
+
+  return { ok: true, abs: candidate };
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -202,8 +300,10 @@ export function createOctoManagementTools(params: {
         filePath: {
           type: "string",
           description:
-            "For write-secret only. Absolute or workspace-relative path of the local file to write the secret into. " +
-            "Choose the path based on the user's instruction (e.g. a .env file, a config file).",
+            "For write-secret only. Path of the local file to write the secret into, relative to the " +
+            "configured workspace root (e.g. \".env\" or \"config/keys.json\"). Choose the path based on the " +
+            "user's instruction. Writes are confined to the workspace root: paths that escape it (via '..', " +
+            "an absolute path elsewhere, or a symlink) are rejected.",
         },
         template: {
           type: "string",
@@ -546,6 +646,19 @@ export function createOctoManagementTools(params: {
               return makeError("filePath is required for write-secret");
             }
             const template = args.template as string | undefined;
+            // A provided, non-empty template MUST contain the placeholder.
+            // Otherwise we'd silently discard the caller's intended layout and
+            // write the bare secret — surprising, and prone to malformed config
+            // files. Whitespace-only is treated as "omitted" (write raw).
+            if (
+              template !== undefined &&
+              template.trim().length > 0 &&
+              !template.includes(SECRET_PLACEHOLDER)
+            ) {
+              return makeError(
+                `template was provided but does not contain the ${SECRET_PLACEHOLDER} placeholder. Include ${SECRET_PLACEHOLDER} where the secret should go, or omit template to write the raw value.`,
+              );
+            }
             const rawMode = args.mode as string | undefined;
             if (rawMode !== undefined && rawMode !== "overwrite" && rawMode !== "append") {
               return makeError(
@@ -559,6 +672,7 @@ export function createOctoManagementTools(params: {
               filePath,
               template,
               mode: rawMode === "append" ? "append" : "overwrite",
+              secretsFileRoot: account.config.secretsFileRoot,
             });
           }
 
@@ -788,16 +902,20 @@ async function handleVoiceContextDelete(params: {
  * Resolve a user-managed secret alias and write its current plaintext into a
  * local file.
  *
- * 🔴 RED LINE — plaintext containment:
- * The resolved secret value is read from resolveSecret(), substituted into the
- * (optional) caller template, and written to disk. It is consumed ENTIRELY
- * inside this function. The ToolResult returned to the LLM contains only:
- *   - success: { written: true, path, bytesWritten, display_name?, mode }
- *   - structured non-plaintext feedback for the not_found / ambiguous /
- *     resolve-failure cases.
- * The plaintext value, the rendered file content, and the template-with-secret
- * are NEVER placed in the return value, so they cannot reach the transcript /
- * Octo. `bytesWritten` is a length only — it carries no secret material.
+ * 🔴 RED LINE — plaintext containment (two channels, both closed):
+ *   1. Transcript: the resolved value is read from resolveSecret(), substituted
+ *      into the (optional) caller template, and written to disk. It is consumed
+ *      ENTIRELY inside this function. The ToolResult returned to the LLM
+ *      contains only { written, path, mode, display_name? } on success and
+ *      structured non-plaintext feedback otherwise — never the value, the
+ *      rendered content, or the template-with-secret, so nothing reaches the
+ *      transcript / Octo. (No length field either: a byte count is
+ *      secret-derived metadata, so we omit it.)
+ *   2. Filesystem: `filePath` is attacker-influenceable (the tool is reachable
+ *      from inbound chat). confineSecretPath() jails every write under an
+ *      operator-approved root, rejecting `..`, absolute-elsewhere, and symlink
+ *      escapes BEFORE the secret is ever resolved. The file is created 0o600 so
+ *      a plaintext key is not left world/group readable.
  *
  * Use-time resolution: resolveSecret is called on every invocation, so the
  * latest value is always written (owner key rotation takes effect with no
@@ -810,7 +928,16 @@ async function handleWriteSecret(params: {
   filePath: string;
   template?: string;
   mode: "overwrite" | "append";
+  secretsFileRoot?: string;
 }): Promise<ToolResult> {
+  // Confine the destination BEFORE resolving the secret. If the path is unsafe
+  // we never fetch the plaintext at all — minimizing its lifetime.
+  const confined = await confineSecretPath(params.filePath, params.secretsFileRoot);
+  if (!confined.ok) {
+    return makeError(confined.error);
+  }
+  const absPath = confined.abs;
+
   let resolved;
   try {
     resolved = await resolveSecret({
@@ -820,7 +947,8 @@ async function handleWriteSecret(params: {
     });
   } catch (err) {
     // resolve failure (5xx / malformed / transport). Surface a non-plaintext,
-    // actionable hint — never the underlying value (a failure has none).
+    // actionable hint. The underlying error carries only an HTTP status (the
+    // resolve client deliberately drops response bodies), never a value.
     return makeError(
       `Could not resolve secret "${params.alias}". The key service is unavailable or the secret may need to be re-set. Ask the user to re-add the key, then retry. (${
         err instanceof Error ? err.message : String(err)
@@ -848,24 +976,28 @@ async function handleWriteSecret(params: {
   }
 
   // resolved → substitute into template (or use raw value) and write to disk.
-  // From here the plaintext lives only in local variables and the file.
+  // From here the plaintext lives only in local variables and the file. A
+  // provided template without the placeholder was already rejected upstream, so
+  // here `includes` only gates the "template omitted → write raw" case.
   const content =
     params.template && params.template.includes(SECRET_PLACEHOLDER)
       ? params.template.split(SECRET_PLACEHOLDER).join(resolved.value)
       : resolved.value;
 
-  const bytesWritten = Buffer.byteLength(content, "utf8");
-
   try {
-    const dir = dirname(params.filePath);
-    if (dir && dir !== "." && dir !== params.filePath) {
+    const dir = dirname(absPath);
+    if (dir && dir !== "." && dir !== absPath) {
       await mkdir(dir, { recursive: true });
     }
     if (params.mode === "append") {
-      await appendFile(params.filePath, content, "utf8");
+      await appendFile(absPath, content, { encoding: "utf8", mode: SECRET_FILE_MODE });
     } else {
-      await writeFile(params.filePath, content, "utf8");
+      await writeFile(absPath, content, { encoding: "utf8", mode: SECRET_FILE_MODE });
     }
+    // writeFile/appendFile's `mode` only applies when CREATING the file; a
+    // pre-existing target keeps its old perms. chmod unconditionally so a
+    // plaintext key is always owner-only (0o600), never world-readable.
+    await chmod(absPath, SECRET_FILE_MODE);
   } catch (err) {
     // A write error message can include the path but never the content.
     return makeError(
@@ -875,12 +1007,12 @@ async function handleWriteSecret(params: {
     );
   }
 
-  // 🔴 Success payload is plaintext-free by construction.
+  // 🔴 Success payload is plaintext-free by construction (no value, no rendered
+  // content, no byte length).
   return makeSuccess({
     written: true,
-    path: params.filePath,
+    path: absPath,
     mode: params.mode,
-    bytesWritten,
     ...(resolved.display_name ? { display_name: resolved.display_name } : {}),
   });
 }

@@ -1612,18 +1612,32 @@ describe("resolveSecret", () => {
     }
   });
 
-  it("throws on a 5xx (resolve failure) without leaking a value", async () => {
+  it("throws on a 5xx (resolve failure) without leaking the response body", async () => {
+    // A resolve-endpoint error body could echo a secret-bearing diagnostic.
+    // The thrown error must carry ONLY the HTTP status, never this body.
+    const LEAK = "sk-live-LEAKED-IN-ERROR-BODY";
+    const textSpy = vi.fn().mockResolvedValue(`{"error":"${LEAK}"}`);
     global.fetch = vi.fn().mockResolvedValue({
       ok: false,
       status: 500,
       statusText: "Internal Server Error",
-      text: vi.fn().mockResolvedValue("boom"),
+      text: textSpy,
     }) as unknown as typeof fetch;
 
     const { resolveSecret } = await import("./api-fetch.js");
-    await expect(
-      resolveSecret({ apiUrl: "http://api.test", botToken: "t", alias: "x" }),
-    ).rejects.toThrow(/resolveSecret failed \(500\)/);
+    let caught: unknown;
+    await resolveSecret({ apiUrl: "http://api.test", botToken: "t", alias: "x" }).catch(
+      (e) => {
+        caught = e;
+      },
+    );
+    expect(caught).toBeInstanceOf(Error);
+    const message = (caught as Error).message;
+    expect(message).toMatch(/resolveSecret failed \(500\)/);
+    // 🔴 The body — and anything in it — must not appear in the error.
+    expect(message).not.toContain(LEAK);
+    // We don't even read the body, so it can't leak by accident.
+    expect(textSpy).not.toHaveBeenCalled();
   });
 
   it("throws when a resolved secret has no value", async () => {
@@ -1631,6 +1645,19 @@ describe("resolveSecret", () => {
       ok: true,
       status: 200,
       json: vi.fn().mockResolvedValue({ status: "resolved" }),
+    }) as unknown as typeof fetch;
+
+    const { resolveSecret } = await import("./api-fetch.js");
+    await expect(
+      resolveSecret({ apiUrl: "http://api.test", botToken: "t", alias: "x" }),
+    ).rejects.toThrow(/no value/);
+  });
+
+  it("throws when a resolved secret has an empty value", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockResolvedValue({ status: "resolved", value: "" }),
     }) as unknown as typeof fetch;
 
     const { resolveSecret } = await import("./api-fetch.js");
