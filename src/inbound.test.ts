@@ -20,6 +20,7 @@ import {
   pendingInboundContext,
   sessionAccountMap,
   buildSessionAccountKey,
+  recordSessionAccount,
   segmentHistoryEntries,
   resolveInboundMediaList,
   resolveInboundMediaPaths,
@@ -3366,5 +3367,51 @@ describe("group-path persona system hint decision matrix (GH#64)", () => {
     expect(
       buggy({ from_uid: "bob_uid" }, { onBehalfOf: grantorUid }),
     ).toBeUndefined();
+  });
+});
+
+// ─── issue #33: case-insensitive accountId in sessionAccountMap ─────────────
+
+describe("buildSessionAccountKey case-insensitive accountId (issue #33)", () => {
+  it("produces identical keys for any case form of the same accountId", () => {
+    expect(buildSessionAccountKey("Mixed_Bot", "sess1"))
+      .toBe(buildSessionAccountKey("mixed_bot", "sess1"));
+    expect(buildSessionAccountKey("MIXED_BOT", "sess1"))
+      .toBe(buildSessionAccountKey("mixed_bot", "sess1"));
+  });
+
+  it("key segment uses normalized (lowercase) accountId", () => {
+    expect(buildSessionAccountKey("Mixed_Bot", "sess1")).toBe("mixed_bot:sess1");
+  });
+});
+
+describe("recordSessionAccount normalizes both key AND value", () => {
+  beforeEach(() => sessionAccountMap.clear());
+
+  it("stores normalized accountId at normalized composite key", () => {
+    recordSessionAccount("Mixed_Bot", "sess1");
+    // Lookup via the public key builder hits the entry regardless of input case
+    expect(sessionAccountMap.get(buildSessionAccountKey("Mixed_Bot", "sess1")))
+      .toBe("mixed_bot");
+    expect(sessionAccountMap.get(buildSessionAccountKey("mixed_bot", "sess1")))
+      .toBe("mixed_bot");
+    // Direct lowercase key works too — both segments are normalized
+    expect(sessionAccountMap.get("mixed_bot:sess1")).toBe("mixed_bot");
+  });
+
+  it("repeated registration with different cases is idempotent (single map entry)", () => {
+    recordSessionAccount("Mixed_Bot", "sess1");
+    recordSessionAccount("mixed_bot", "sess1");
+    recordSessionAccount("MIXED_BOT", "sess1");
+    expect(sessionAccountMap.size).toBe(1);
+    expect(sessionAccountMap.get("mixed_bot:sess1")).toBe("mixed_bot");
+  });
+
+  it("different sessionKeys produce distinct entries even for same account", () => {
+    recordSessionAccount("Mixed_Bot", "sess1");
+    recordSessionAccount("Mixed_Bot", "sess2");
+    expect(sessionAccountMap.size).toBe(2);
+    expect(sessionAccountMap.get("mixed_bot:sess1")).toBe("mixed_bot");
+    expect(sessionAccountMap.get("mixed_bot:sess2")).toBe("mixed_bot");
   });
 });

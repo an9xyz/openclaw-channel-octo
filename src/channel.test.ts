@@ -195,8 +195,9 @@ describe("resolveOutboundAccountId", () => {
     registerGroupToAccount("abc", "acct_A");
 
     // "group:abc@uid1,uid2" → should strip @uid1,uid2, resolve group "abc"
+    // Returned accountId is normalized to lowercase (see issue #33).
     const result = resolveOutboundAccountId("group:abc@uid1,uid2", "fallback");
-    expect(result).toBe("acct_A");
+    expect(result).toBe("acct_a");
   });
 
   it("should resolve plain group target without @suffix", async () => {
@@ -204,8 +205,9 @@ describe("resolveOutboundAccountId", () => {
 
     registerGroupToAccount("abc", "acct_B");
 
+    // Returned accountId is normalized to lowercase.
     const result = resolveOutboundAccountId("group:abc", "fallback");
-    expect(result).toBe("acct_B");
+    expect(result).toBe("acct_b");
   });
 
   it("should return fallback for DM targets (no correction)", async () => {

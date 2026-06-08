@@ -35,6 +35,7 @@ import {
 } from "openclaw/plugin-sdk/thread-bindings-runtime";
 import { CHANNEL_ID, THREAD_ID_SEPARATOR } from "./constants.js";
 import { createThread } from "./api-fetch.js";
+import { normalizeAccountId } from "./account-id.js";
 
 // SDK's `thread-bindings-runtime` only re-exports the adapter + record types.
 // Derive the input types from the adapter signature itself to stay loosely
@@ -43,20 +44,9 @@ type SessionBindingBindInput = Parameters<NonNullable<SessionBindingAdapter["bin
 type SessionBindingUnbindInput = Parameters<NonNullable<SessionBindingAdapter["unbind"]>>[0];
 type ConversationRef = Parameters<SessionBindingAdapter["resolveByConversation"]>[0];
 
-/**
- * OpenClaw's session-binding service normalizes account IDs to lowercase
- * before invoking adapter methods (see `normalizeOptionalLowercaseString`
- * inside `session-binding-service`). BotFather can emit mixed-case bot IDs
- * (e.g. `27pBwzf2F6bfa5cd142_bot`), so storing/comparing against the raw
- * registration accountId silently breaks `resolveByConversation` for those
- * accounts — bindings succeed (SDK passes the lowercased id into `bind`)
- * but reverse lookup misses because the closure compares against the
- * mixed-case original. Normalize once at registration and use the result
- * everywhere internal.
- */
-function normalizeAccountId(accountId: string): string {
-  return accountId.toLowerCase();
-}
+// normalizeAccountId moved to ./account-id.ts as the single source of truth
+// for plugin-wide accountId normalization. See that file's doc for context
+// (issue #33). All other modules that key on accountId import from there too.
 
 type Logger = {
   info?: (msg: string) => void;

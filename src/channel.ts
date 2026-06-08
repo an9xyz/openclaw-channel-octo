@@ -38,6 +38,7 @@ import { preloadGroupMemberCache, getGroupMembersFromCache } from "./member-cach
 import { preloadMentionPrefs } from "./mention-prefs.js";
 import { initPersonaPromptCache, stopPersonaPromptCache } from "./persona-prompt.js";
 import { registerOctoThreadBindingAdapter } from "./thread-binding-adapter.js";
+import { normalizeAccountId } from "./account-id.js";
 import path from "node:path";
 import os from "node:os";
 import { mkdir, readFile, writeFile, unlink } from "node:fs/promises";
@@ -120,13 +121,17 @@ async function cleanupOldUploadTempFiles(): Promise<void> {
   } catch { /* dir may not exist */ }
 }
 
-// Module-level history storage — survives auto-restarts
+// Module-level history storage — survives auto-restarts.
+// All accountId-keyed in-memory state below normalizes accountId at the
+// helper boundary (see ./account-id.ts), so mixed-case BotFather IDs
+// (issue #33) cannot split a single bot's cache across two map slots.
 const _historyMaps = new Map<string, Map<string, any[]>>();
 function getOrCreateHistoryMap(accountId: string): Map<string, any[]> {
-  let m = _historyMaps.get(accountId);
+  const id = normalizeAccountId(accountId);
+  let m = _historyMaps.get(id);
   if (!m) {
     m = new Map<string, any[]>();
-    _historyMaps.set(accountId, m);
+    _historyMaps.set(id, m);
   }
   return m;
 }
@@ -136,10 +141,11 @@ function getOrCreateHistoryMap(accountId: string): Map<string, any[]> {
 // NOT the bot's own reply message_seq (sendMessage API returns 0 for that).
 const _lastBotReplySeq = new Map<string, Map<string, number>>();
 function getOrCreateLastBotReplySeqMap(accountId: string): Map<string, number> {
-  let m = _lastBotReplySeq.get(accountId);
+  const id = normalizeAccountId(accountId);
+  let m = _lastBotReplySeq.get(id);
   if (!m) {
     m = new Map<string, number>();
-    _lastBotReplySeq.set(accountId, m);
+    _lastBotReplySeq.set(id, m);
   }
   return m;
 }
@@ -147,6 +153,7 @@ function getOrCreateLastBotReplySeqMap(accountId: string): Map<string, number> {
 const _inboundQueues = new Map<string, Promise<void>>();
 
 function getInboundQueueKey(accountId: string, msg: BotMessage): string {
+  const id = normalizeAccountId(accountId);
   const isGroup =
     typeof msg.channel_id === "string" &&
     msg.channel_id.length > 0 &&
@@ -154,7 +161,7 @@ function getInboundQueueKey(accountId: string, msg: BotMessage): string {
      msg.channel_type === ChannelType.CommunityTopic);
 
   if (isGroup) {
-    return `${accountId}:group:${msg.channel_id}`;
+    return `${id}:group:${msg.channel_id}`;
   }
 
   let spaceId = "";
@@ -175,7 +182,7 @@ function getInboundQueueKey(accountId: string, msg: BotMessage): string {
   const sessionId = spaceId
     ? `${spaceId}:${effectiveChannelId}`
     : effectiveChannelId;
-  return `${accountId}:dm:${sessionId}`;
+  return `${id}:dm:${sessionId}`;
 }
 
 function enqueueInbound(
@@ -208,10 +215,11 @@ function enqueueInbound(
 // Used to resolve @mentions in AI replies
 const _memberMaps = new Map<string, Map<string, string>>();
 export function getOrCreateMemberMap(accountId: string): Map<string, string> {
-  let m = _memberMaps.get(accountId);
+  const id = normalizeAccountId(accountId);
+  let m = _memberMaps.get(id);
   if (!m) {
     m = new Map<string, string>();
-    _memberMaps.set(accountId, m);
+    _memberMaps.set(id, m);
   }
   return m;
 }
@@ -220,10 +228,11 @@ export function getOrCreateMemberMap(accountId: string): Map<string, string> {
 // Used to show display names instead of uids in replies
 const _uidToNameMaps = new Map<string, Map<string, string>>();
 export function getOrCreateUidToNameMap(accountId: string): Map<string, string> {
-  let m = _uidToNameMaps.get(accountId);
+  const id = normalizeAccountId(accountId);
+  let m = _uidToNameMaps.get(id);
   if (!m) {
     m = new Map<string, string>();
-    _uidToNameMaps.set(accountId, m);
+    _uidToNameMaps.set(id, m);
   }
   return m;
 }
@@ -231,10 +240,11 @@ export function getOrCreateUidToNameMap(accountId: string): Map<string, string> 
 // Group member cache timestamps: groupId -> lastFetchedAt (ms)
 const _groupCacheTimestamps = new Map<string, Map<string, number>>();
 function getOrCreateGroupCacheTimestamps(accountId: string): Map<string, number> {
-  let m = _groupCacheTimestamps.get(accountId);
+  const id = normalizeAccountId(accountId);
+  let m = _groupCacheTimestamps.get(id);
   if (!m) {
     m = new Map<string, number>();
-    _groupCacheTimestamps.set(accountId, m);
+    _groupCacheTimestamps.set(id, m);
   }
   return m;
 }
@@ -245,10 +255,11 @@ function getOrCreateGroupCacheTimestamps(accountId: string): Map<string, number>
 // Flat uid→robot map (not keyed by groupId), like uidToNameMap.
 const _memberRobotMaps = new Map<string, Map<string, boolean>>();
 function getOrCreateMemberRobotMap(accountId: string): Map<string, boolean> {
-  let m = _memberRobotMaps.get(accountId);
+  const id = normalizeAccountId(accountId);
+  let m = _memberRobotMaps.get(id);
   if (!m) {
     m = new Map<string, boolean>();
-    _memberRobotMaps.set(accountId, m);
+    _memberRobotMaps.set(id, m);
   }
   return m;
 }
@@ -257,12 +268,17 @@ function getOrCreateMemberRobotMap(accountId: string): Map<string, boolean> {
 // --- Group → Account mapping: tracks which accounts are active in each group ---
 // Used by handleAction to resolve the correct account when framework passes wrong accountId
 // A group may have multiple bots (1:N), so we store a Set of accountIds per group.
-const _groupToAccounts = new Map<string, Set<string>>(); // groupNo → Set of accountIds
+//
+// Both the registration side AND the query side normalize accountId — Set
+// membership checks are case-sensitive, so storing the raw mixed-case form
+// would make later lowercase queries miss (and vice versa). See issue #33.
+const _groupToAccounts = new Map<string, Set<string>>(); // groupNo → Set of <normalized accountIds>
 
 export function registerGroupToAccount(groupNo: string, accountId: string): void {
+  const id = normalizeAccountId(accountId);
   let s = _groupToAccounts.get(groupNo);
   if (!s) { s = new Set(); _groupToAccounts.set(groupNo, s); }
-  s.add(accountId);
+  s.add(id);
 }
 
 /**
@@ -270,6 +286,8 @@ export function registerGroupToAccount(groupNo: string, accountId: string): void
  * - If the group has exactly one registered account → return it (safe to correct).
  * - If the group has multiple accounts (shared group) → return undefined (don't override).
  * - If the group is unknown → return undefined.
+ *
+ * Returned id is always normalized (registration side normalizes).
  */
 export function resolveAccountForGroup(groupNo: string): string | undefined {
   const s = _groupToAccounts.get(groupNo);
@@ -279,7 +297,7 @@ export function resolveAccountForGroup(groupNo: string): string | undefined {
 
 /** Check if a specific accountId is registered for a group. */
 export function isAccountRegisteredForGroup(groupNo: string, accountId: string): boolean {
-  return _groupToAccounts.get(groupNo)?.has(accountId) ?? false;
+  return _groupToAccounts.get(groupNo)?.has(normalizeAccountId(accountId)) ?? false;
 }
 
 // --- Cache cleanup: evict groups inactive for >4 hours ---
@@ -288,8 +306,9 @@ const CACHE_CLEANUP_INTERVAL_MS = 30 * 60 * 1000;
 const _cacheActivity = new Map<string, Map<string, number>>();
 
 function touchCache(accountId: string, groupId: string): void {
-  let m = _cacheActivity.get(accountId);
-  if (!m) { m = new Map(); _cacheActivity.set(accountId, m); }
+  const id = normalizeAccountId(accountId);
+  let m = _cacheActivity.get(id);
+  if (!m) { m = new Map(); _cacheActivity.set(id, m); }
   m.set(groupId, Date.now());
 }
 
@@ -986,6 +1005,22 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
       const log = ctx.log;
       const statusSink: OctoStatusSink = (patch) =>
         ctx.setStatus({ accountId: account.accountId, ...patch });
+
+      // Operator-facing one-shot audit: if any configured accountId contains
+      // uppercase characters, log the count (NOT the IDs themselves — avoids
+      // leaking bot identifiers). All internal storage is normalized so this
+      // is informational only; it helps operators decide whether to clean up
+      // legacy disk dirs or notify users to rotate to lowercase bots. See
+      // issue #33 / octo-server#302.
+      try {
+        const allIds = listOctoAccountIds(ctx.cfg);
+        const mixedCount = allIds.filter((id) => id !== id.toLowerCase()).length;
+        if (mixedCount > 0) {
+          log?.info?.(
+            `octo: detected ${mixedCount} mixed-case Octo accountId(s); internal storage normalized (see openclaw-channel-octo#33)`,
+          );
+        }
+      } catch { /* config snapshot inaccessible — non-fatal */ }
 
       log?.info?.(`[${account.accountId}] registering Octo bot...`);
 

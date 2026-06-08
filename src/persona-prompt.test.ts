@@ -712,3 +712,162 @@ describe("resolvePersonaHintForSession — multi-account isolation (PR#69 R3)", 
     stopPersonaPromptCache("persona_cold");
   });
 });
+
+// ─── issue #33: case-insensitive accountId in persona cache ────────────────
+
+describe("persona-prompt case-insensitive accountId (issue #33)", () => {
+  beforeEach(() => _resetPersonaPromptCacheForTests());
+
+  it("refreshPersonaPromptCache writes under normalized accountId; getPersonaPromptForSession hits either case", async () => {
+    global.fetch = mockFetchOnce({
+      has_grant: true,
+      active: true,
+      persona_prompt: "always reply in English",
+      grantor_name: "Alice",
+      grantor_uid: "alice_uid",
+    });
+
+    await refreshPersonaPromptCache({
+      accountId: "Mixed_Bot",   // mixed-case input
+      apiUrl: "http://api",
+      botToken: "tk",
+      onBehalfOf: "alice_uid",
+    });
+
+    // Lookup with either case form should hit the same cache entry
+    expect(getPersonaPromptForSession("mixed_bot")).toContain("Alice");
+    expect(getPersonaPromptForSession("Mixed_Bot")).toContain("Alice");
+    expect(getPersonaPromptForSession("MIXED_BOT")).toContain("Alice");
+  });
+
+  it("getRegisteredPersonaAccountIds returns normalized ids only", async () => {
+    global.fetch = vi.fn(async () => new Response(JSON.stringify({
+      has_grant: true, active: true,
+      persona_prompt: "x", grantor_name: "G", grantor_uid: "g",
+    }), { status: 200 })) as any;
+
+    initPersonaPromptCache({
+      accountId: "MixedCase_Bot",
+      apiUrl: "http://api",
+      botToken: "tk",
+      onBehalfOf: "g",
+    });
+
+    expect(getRegisteredPersonaAccountIds()).toContain("mixedcase_bot");
+    expect(getRegisteredPersonaAccountIds()).not.toContain("MixedCase_Bot");
+
+    stopPersonaPromptCache("mixedcase_bot");
+  });
+
+  it("stopPersonaPromptCache with mixed-case accountId clears the lowercase entry", async () => {
+    global.fetch = vi.fn(async () => new Response(JSON.stringify({
+      has_grant: true, active: true,
+      persona_prompt: "x", grantor_name: "G", grantor_uid: "g",
+    }), { status: 200 })) as any;
+
+    await refreshPersonaPromptCache({
+      accountId: "MyBot_bot",
+      apiUrl: "http://api",
+      botToken: "tk",
+      onBehalfOf: "g",
+    });
+    expect(getPersonaPromptForSession("mybot_bot")).toBeDefined();
+
+    // Stop using a DIFFERENT case form than what was registered.
+    stopPersonaPromptCache("MYBOT_BOT");
+
+    // Cache should be cleared regardless of original case.
+    expect(getPersonaPromptForSession("mybot_bot")).toBeUndefined();
+    expect(getPersonaPromptForSession("MyBot_bot")).toBeUndefined();
+  });
+
+  it("stop+init race with mixed-case is generation-safe (stop side)", async () => {
+    // Background: bumpGeneration / _currentGeneration take raw accountId; if
+    // either splits the normalized vs raw form into separate counters, the
+    // post-stop refresh fetch would not see a generation mismatch and could
+    // resurrect a stale cache entry. This test asserts the counter is shared.
+    let resolveFetch!: (v: Response) => void;
+    global.fetch = vi.fn(() => new Promise<Response>((res) => { resolveFetch = res; })) as any;
+
+    // Kick off an async refresh under mixed-case (don't await — fetch is gated)
+    const inflight = refreshPersonaPromptCache({
+      accountId: "RaceBot_bot",
+      apiUrl: "http://api",
+      botToken: "tk",
+      onBehalfOf: "g",
+    });
+
+    // Stop with a DIFFERENT case form than the in-flight refresh.
+    // _bumpGeneration normalizes, so the counter bump must invalidate
+    // the in-flight refresh regardless of which case the stop used.
+    stopPersonaPromptCache("racebot_bot");
+
+    // Now let the stale fetch resolve. The refresh should detect the
+    // generation mismatch and bail before writing _cache.
+    resolveFetch(new Response(JSON.stringify({
+      has_grant: true, active: true,
+      persona_prompt: "stale", grantor_name: "X", grantor_uid: "g",
+    }), { status: 200 }));
+    await inflight;
+
+    expect(getPersonaPromptForSession("racebot_bot")).toBeUndefined();
+  });
+
+  it("stop+init race with mixed-case is generation-safe (re-init after stop)", async () => {
+    // Background: after stopping under one case form, an init under a
+    // different case form should produce a fresh, isolated cache entry.
+    // A previously-issued stale fetch must NOT overwrite the new entry.
+    let resolveStaleFetch!: (v: Response) => void;
+    let fetchCallCount = 0;
+    global.fetch = vi.fn(() => {
+      fetchCallCount++;
+      if (fetchCallCount === 1) {
+        // First call — gated, simulates the stale in-flight refresh
+        return new Promise<Response>((res) => { resolveStaleFetch = res; });
+      }
+      // Second call — fresh init's initial fetch resolves immediately
+      return Promise.resolve(new Response(JSON.stringify({
+        has_grant: true, active: true,
+        persona_prompt: "fresh", grantor_name: "FreshOwner", grantor_uid: "g2",
+      }), { status: 200 }));
+    }) as any;
+
+    // 1. Refresh under mixed-case (will hang on first fetch).
+    const stale = refreshPersonaPromptCache({
+      accountId: "RaceBot_bot",
+      apiUrl: "http://api",
+      botToken: "tk",
+      onBehalfOf: "g",
+    });
+
+    // 2. Stop with a different case form.
+    stopPersonaPromptCache("RACEBOT_BOT");
+
+    // 3. Re-init under yet another case form — kicks off a fresh fetch
+    //    that resolves immediately (second mock call).
+    initPersonaPromptCache({
+      accountId: "RACEBOT_BOT",
+      apiUrl: "http://api",
+      botToken: "tk",
+      onBehalfOf: "g2",
+    });
+    // Wait for the fresh init's initial fetch to settle.
+    await vi.waitFor(() => {
+      expect(getPersonaPromptForSession("racebot_bot")).toContain("FreshOwner");
+    });
+
+    // 4. Now resolve the stale fetch from step 1. It should detect the
+    //    generation bump and NOT overwrite the fresh cache entry.
+    resolveStaleFetch(new Response(JSON.stringify({
+      has_grant: true, active: true,
+      persona_prompt: "stale", grantor_name: "OldOwner", grantor_uid: "g",
+    }), { status: 200 }));
+    await stale;
+
+    // Fresh hint must survive.
+    expect(getPersonaPromptForSession("racebot_bot")).toContain("FreshOwner");
+    expect(getPersonaPromptForSession("racebot_bot")).not.toContain("OldOwner");
+
+    stopPersonaPromptCache("racebot_bot");
+  });
+});

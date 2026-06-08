@@ -315,3 +315,45 @@ describe("mention-prefs", () => {
     });
   });
 });
+
+// ─── issue #33: case-insensitive accountId in composite cacheKey ────────────
+
+describe("mention-prefs cacheKey case-insensitive accountId (issue #33)", () => {
+  beforeEach(() => _clearMentionPrefCache());
+
+  it("set mixed-case → get lowercase hits the same entry", () => {
+    _setMentionPrefEntry("Mixed_Bot", "grp1", { effective: true });
+    expect(_hasMentionPrefEntry("mixed_bot", "grp1")).toBe(true);
+  });
+
+  it("set lowercase → get mixed-case hits the same entry", () => {
+    _setMentionPrefEntry("mixed_bot", "grp1", { effective: true });
+    expect(_hasMentionPrefEntry("Mixed_Bot", "grp1")).toBe(true);
+    expect(_hasMentionPrefEntry("MIXED_BOT", "grp1")).toBe(true);
+  });
+
+  it("getMentionPrefFromCache returns same pref regardless of accountId case", async () => {
+    _setMentionPrefEntry("MyBot_bot", "g1", { effective: true });
+
+    const a = await getMentionPrefFromCache({
+      accountId: "MyBot_bot",
+      parentGroupNo: "g1",
+      apiUrl: "http://unused",
+      botToken: "unused",
+    });
+    const b = await getMentionPrefFromCache({
+      accountId: "mybot_bot",
+      parentGroupNo: "g1",
+      apiUrl: "http://unused",
+      botToken: "unused",
+    });
+    expect(a.effective).toBe(true);
+    expect(b.effective).toBe(true);
+  });
+
+  it("invalidate with one case clears the entry for all cases", () => {
+    _setMentionPrefEntry("BotX_bot", "g7", { effective: true });
+    invalidateMentionPref("botx_bot", "g7"); // lowercase invalidate
+    expect(_hasMentionPrefEntry("BotX_bot", "g7")).toBe(false);
+  });
+});
