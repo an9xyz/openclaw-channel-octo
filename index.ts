@@ -85,35 +85,25 @@ export default defineBundledChannelEntry({
       { names: ['octo_management'] },
     );
 
-    // CRITICAL: both setOctoRuntime AND api.registerChannel MUST be called
-    // here, even though the contract's `runtime: {}` and `plugin: {}` fields
-    // would auto-invoke them.
+    // Manual setOctoRuntime + registerChannel — kept as a defensive call even
+    // though contract's `runtime: {}` / `plugin: {}` would auto-invoke them.
     //
-    // Why: defineBundledChannelEntry loads src/channel.js and src/runtime.js
-    // via loadBundledEntryExportSync — an SDK-internal loader cache that
-    // produces module instances DIFFERENT from what our `import` statements
-    // produce at this file's top. Under ESM ("type": "module"), those two
-    // loaders do not share the module map, so the contract's
-    // setChannelRuntime sets _runtime on the SDK-loaded instance, while
-    // src/inbound.ts reads getOctoRuntime from the ESM-static-import
-    // instance — and finds nothing.
+    // History: defineBundledChannelEntry loads src/runtime.js via
+    // loadBundledEntryExportSync. On affected Node versions (older 22.x
+    // before require(esm) cache unification, or jiti fallback paths) this
+    // produces a different module record from ESM static `import`, so
+    // contract-side setChannelRuntime and src/inbound.ts's getOctoRuntime
+    // would target different `let runtime` slots — first inbound crashes
+    // with "Octo runtime not initialized" (1.0.4 regression; issue #77
+    // SIGUSR1 path under OPENCLAW_NO_RESPAWN=1).
     //
-    // The 1.0.4 release "trusted the contract" and dropped these two
-    // manual calls; bot WebSocket connected fine but the FIRST inbound
-    // message crashed with "Octo runtime not initialized". Verified in
-    // /tmp/openclaw/openclaw-2026-05-17.log at 16:16:33.531.
-    //
-    // The contract's `runtime: {}` and `plugin: {}` fields are kept for
-    // contract metadata / non-full registration paths; setup-only entry is
-    // declared separately in setup-entry.ts. The real channel + runtime
-    // wiring used at message-handling time is what we register here, which
-    // OpenClaw's channel registry treats as the authoritative entry (last
-    // writer wins).
+    // src/runtime.ts now stores state on globalThis under a Symbol.for key,
+    // so the dual-instance hazard is neutralized regardless of which loader
+    // wins. This manual call is still useful: it makes the "ESM-side
+    // instance has runtime" ordering explicit and predictable. Cheap, no
+    // regression risk, keeps the registration path obvious.
     //
     // Guard: only wire runtime + channel + hooks in 'full' mode.
-    // In 'tool-discovery' or other non-full modes, running these calls
-    // would register side effects (WebSocket listener, prompt hook) that
-    // are not needed and may interfere with the host's intent.
     if (api.registrationMode !== 'full') return;
 
     setOctoRuntime(api.runtime);
