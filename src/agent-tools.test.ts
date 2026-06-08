@@ -25,9 +25,22 @@ vi.mock("./group-md.js", () => ({
   broadcastThreadMdUpdate: vi.fn(),
 }));
 
-// NOTE: node:fs/promises is intentionally NOT mocked. The write-secret tests
-// exercise the real path-confinement + write path against an OS temp directory
-// so that traversal / absolute-escape / symlink rejection is genuinely tested.
+// NOTE: only mkdir from node:fs/promises is wrapped (see the vi.mock below); all
+// other fs calls run for real. The write-secret tests exercise the real
+// path-confinement + write path against an OS temp directory so that traversal /
+// absolute-escape / symlink rejection is genuinely tested.
+
+// NOTE: node:fs/promises is passed through to the REAL implementation for every
+// call EXCEPT mkdir, which is wrapped in a vi.fn that delegates to the genuine
+// mkdir by default. The write-secret tests still exercise real path-confinement
+// + write against an OS temp directory (so traversal / absolute-escape / symlink
+// rejection is genuinely tested); the wrapper only lets the intermediate-dir
+// TOCTOU regression test inject a symlink swap in the race window between
+// mkdir() and open().
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, mkdir: vi.fn(actual.mkdir) };
+});
 
 import { createOctoManagementTools } from "./agent-tools.js";
 import {
@@ -1242,7 +1255,9 @@ describe("createOctoManagementTools", () => {
       expect(await readFile(target, "utf8")).toBe(PLAINTEXT);
 
       expect(data.written).toBe(true);
-      expect(data.path).toBe(target);
+      // path is jail-relative — the absolute jail root is never disclosed.
+      expect(data.path).toBe(join("secrets", ".env"));
+      expect(data.path).not.toContain(root);
       expect(data.mode).toBe("overwrite");
       expect(data.display_name).toBe("openai key");
       // No secret-derived length field is exposed.
@@ -1484,6 +1499,68 @@ describe("createOctoManagementTools", () => {
       expect(parseText(result).error).toMatch(/symlink|verified|outside the allowed/i);
       expect(resolveSecret).not.toHaveBeenCalled();
       await expect(readFile(inJailButMissing, "utf8")).rejects.toThrow();
+    });
+
+    // 🔴 P1 REGRESSION — intermediate-dir symlink TOCTOU. confineSecretPath()
+    // walks the path BEFORE the parent dirs exist, so it cannot catch a symlink
+    // swapped onto a parent AFTER mkdir creates it. O_NOFOLLOW only guards the
+    // leaf basename, not intermediate components — the kernel still follows a
+    // parent symlink. The fix re-canonicalizes the parent after mkdir and
+    // re-checks containment. This PoC drives the mocked mkdir to swap the
+    // freshly-created parent dir for an out-of-jail symlink in the race window
+    // between mkdir and open, then asserts the write is refused and nothing
+    // lands outside the jail.
+    it("rejects when an intermediate dir is symlink-swapped AFTER mkdir (TOCTOU)", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+      const outside = await mkdtemp(join(tmpdir(), "octo-outside-"));
+      const realMkdir = (await vi.importActual<typeof import("node:fs/promises")>(
+        "node:fs/promises",
+      )).mkdir;
+      try {
+        const subdir = join(root, "sub");
+        vi.mocked(mkdir).mockImplementationOnce(async (...args: any[]) => {
+          // Let the real mkdir create <root>/sub as a genuine directory…
+          const ret = await (realMkdir as any)(...args);
+          // …then, in the race window before open(), swap it for a symlink that
+          // escapes the jail. open() via the canonical parent must refuse it.
+          await rm(subdir, { recursive: true, force: true });
+          await symlink(outside, subdir, "dir");
+          return ret;
+        });
+
+        const result = await writeSecret({ alias: "k", filePath: "sub/secret.env" });
+
+        expect(parseText(result).error).toMatch(/escaped the allowed root|outside the allowed/i);
+        // 🔴 The out-of-jail target must NOT have been created.
+        await expect(readFile(join(outside, "secret.env"), "utf8")).rejects.toThrow();
+        // No plaintext anywhere in the LLM-visible return.
+        expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects a write whose realpath'd parent escapes the root after creation", async () => {
+      // A narrower unit-level check on the post-mkdir containment guard: the
+      // parent resolves outside root → refuse, regardless of how it got there.
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+      const outside = await mkdtemp(join(tmpdir(), "octo-outside-"));
+      try {
+        const subdir = join(root, "deep");
+        vi.mocked(mkdir).mockImplementationOnce(async () => {
+          // Skip creating a real dir; install an escaping symlink as the parent.
+          await symlink(outside, subdir, "dir");
+          return undefined;
+        });
+
+        const result = await writeSecret({ alias: "k", filePath: "deep/k.env" });
+
+        expect(parseText(result).error).toMatch(/escaped the allowed root/i);
+        await expect(readFile(join(outside, "k.env"), "utf8")).rejects.toThrow();
+        expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
     });
 
     it("allows the jail root itself as a relative '.' is not valid but a file at root is", async () => {

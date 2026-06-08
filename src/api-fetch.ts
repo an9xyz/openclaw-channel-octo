@@ -1010,7 +1010,11 @@ export async function resolveSecret(params: {
     };
   }
 
-  throw new Error(`resolveSecret returned an unknown status: ${String(status)}`);
+  // 🔴 SECURITY: never fold the server-supplied status string into the error.
+  // This error bubbles up to an LLM-visible tool result; echoing a
+  // server-controlled value back into the transcript is an injection vector.
+  // Use a fixed message — the unexpected status is unusable to the caller anyway.
+  throw new Error("resolveSecret returned an unknown status");
 }
 
 /** Decoded payload from base64 message content */

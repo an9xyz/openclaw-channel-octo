@@ -43,7 +43,7 @@ import {
 import { broadcastGroupMdUpdate, broadcastThreadMdUpdate } from "./group-md.js";
 import { mkdir, realpath, lstat, open } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
-import { dirname, resolve as resolvePath, sep } from "node:path";
+import { basename, dirname, relative, resolve as resolvePath, sep } from "node:path";
 
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
@@ -83,7 +83,7 @@ const SECRET_FILE_MODE = 0o600;
 async function confineSecretPath(
   filePath: string,
   rootInput: string | undefined,
-): Promise<{ ok: true; abs: string } | { ok: false; error: string }> {
+): Promise<{ ok: true; abs: string; root: string } | { ok: false; error: string }> {
   // The jail root: operator config wins; otherwise the plugin's working dir.
   // Resolve it to an absolute, symlink-free canonical form so containment
   // checks compare apples to apples.
@@ -161,7 +161,7 @@ async function confineSecretPath(
     }
   }
 
-  return { ok: true, abs: candidate };
+  return { ok: true, abs: candidate, root };
 }
 
 // ---------------------------------------------------------------------------
@@ -949,6 +949,7 @@ async function handleWriteSecret(params: {
     return makeError(confined.error);
   }
   const absPath = confined.abs;
+  const root = confined.root;
 
   let resolved;
   try {
@@ -998,21 +999,37 @@ async function handleWriteSecret(params: {
 
   try {
     const dir = dirname(absPath);
+    let openTarget = absPath;
     if (dir && dir !== "." && dir !== absPath) {
       await mkdir(dir, { recursive: true });
+      // 🔴 TOCTOU close-out for INTERMEDIATE components. O_NOFOLLOW below only
+      // protects the final basename — the kernel still follows any symlink on
+      // the parent path. confineSecretPath() walked the path BEFORE mkdir, when
+      // the parent dirs did not yet exist, so a symlink swapped onto a parent
+      // AFTER mkdir creates it (and before open) would redirect the write out of
+      // the jail. Re-canonicalize the parent now that it is on disk and re-check
+      // containment, then open via the canonical parent + basename so every
+      // component is proven to stay inside the root.
+      const realDir = await realpath(dir);
+      if (realDir !== root && !realDir.startsWith(root + sep)) {
+        return makeError(
+          "Refusing to write the secret: the destination directory escaped the allowed root after creation.",
+        );
+      }
+      openTarget = resolvePath(realDir, basename(absPath));
     }
-    // 🔴 TOCTOU close-out: confineSecretPath() validated the path, but between
-    // that check and the write an attacker with filesystem access could swap the
-    // target for a symlink. We open the final component with O_NOFOLLOW so the
-    // kernel refuses to follow a symlink AT the target — the write either lands
-    // on the real in-jail file or fails (ELOOP), never on a redirected target.
-    // O_CREAT applies the 0o600 mode atomically on creation.
+    // 🔴 TOCTOU close-out for the LEAF: confineSecretPath() validated the path,
+    // but between that check and the write an attacker with filesystem access
+    // could swap the target for a symlink. We open the final component with
+    // O_NOFOLLOW so the kernel refuses to follow a symlink AT the target — the
+    // write either lands on the real in-jail file or fails (ELOOP), never on a
+    // redirected target. O_CREAT applies the 0o600 mode atomically on creation.
     const flags =
       (params.mode === "append"
         ? fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_APPEND
         : fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC) |
       fsConstants.O_NOFOLLOW;
-    const handle = await open(absPath, flags, SECRET_FILE_MODE);
+    const handle = await open(openTarget, flags, SECRET_FILE_MODE);
     try {
       await handle.write(content, null, "utf8");
       // writeFile/open's `mode` only applies when CREATING the file; a
@@ -1023,19 +1040,22 @@ async function handleWriteSecret(params: {
       await handle.close();
     }
   } catch (err) {
-    // A write error message can include the path but never the content.
+    // A write error message can include the path but never the content. Echo the
+    // jail-relative path only — never the absolute path, which would leak the
+    // operator's jail root into the LLM-visible transcript.
     return makeError(
-      `Resolved the secret but failed to write it to "${params.filePath}": ${
+      `Resolved the secret but failed to write it to "${relative(root, absPath)}": ${
         err instanceof Error ? err.message : String(err)
       }`,
     );
   }
 
   // 🔴 Success payload is plaintext-free by construction (no value, no rendered
-  // content, no byte length).
+  // content, no byte length). The path is jail-relative so the absolute jail
+  // root is never disclosed to the LLM / transcript.
   return makeSuccess({
     written: true,
-    path: absPath,
+    path: relative(root, absPath),
     mode: params.mode,
     ...(resolved.display_name ? { display_name: resolved.display_name } : {}),
   });
