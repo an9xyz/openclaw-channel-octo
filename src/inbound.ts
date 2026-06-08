@@ -3,6 +3,7 @@ import type { ChannelLogSink } from "openclaw/plugin-sdk/channel-contract";
 import { DEFAULT_GROUP_HISTORY_LIMIT } from "openclaw/plugin-sdk/reply-history";
 import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson, sendMediaMessage, inferContentType, ensureTextCharset, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS, fetchUserInfo } from "./api-fetch.js";
 import { getMentionPrefFromCache, invalidateMentionPref } from "./mention-prefs.js";
+import { normalizeAccountId } from "./account-id.js";
 import type { ResolvedOctoAccount } from "./accounts.js";
 import type { BotMessage } from "./types.js";
 import { ChannelType, MessageType, RICH_TEXT_BLOCK_IMAGE, RICH_TEXT_BLOCK_TEXT, RICH_TEXT_IMAGE_PLACEHOLDER } from "./types.js";
@@ -62,11 +63,32 @@ export const pendingInboundContext = new Map<string, { historyPrefix: string; me
 // Sessions are bounded by accounts, so the map size is bounded by
 // (active accounts × active session keys per account) — no unbounded growth
 // in practice.
+//
+// All entries are stored with NORMALIZED (lowercase) accountId in both the
+// composite key AND the stored value, so mixed-case BotFather IDs (see
+// issue #33) cannot split a single bot's presence across two map entries.
+// Use the helpers below instead of touching the map directly.
 export const sessionAccountMap = new Map<string, string>();
 
-/** Build the composite key used to record `(accountId, sessionKey)` pairs. */
+/**
+ * Build the composite key used to record `(accountId, sessionKey)` pairs.
+ * Normalizes accountId so callers passing any case form hit the same entry.
+ */
 export function buildSessionAccountKey(accountId: string, sessionKey: string): string {
-  return `${accountId}:${sessionKey}`;
+  return `${normalizeAccountId(accountId)}:${sessionKey}`;
+}
+
+/**
+ * Register an account's presence on a session.
+ *
+ * Encapsulates the write to `sessionAccountMap` so both the composite key
+ * AND the stored value are normalized — and so unit tests can exercise this
+ * single helper instead of mocking the full `handleInboundMessage` flow.
+ * Called from the inbound dispatch right after the route is resolved.
+ */
+export function recordSessionAccount(accountId: string, sessionKey: string): void {
+  const id = normalizeAccountId(accountId);
+  sessionAccountMap.set(buildSessionAccountKey(id, sessionKey), id);
 }
 
 export type OctoStatusSink = (patch: {
@@ -1975,7 +1997,9 @@ export async function handleInboundMessage(params: {
   // accountId). The composite key is required for multi-account isolation —
   // see the doc comment on sessionAccountMap above.
   // Required by persona-prompt injection (GH octo-adapters#68).
-  sessionAccountMap.set(buildSessionAccountKey(account.accountId, route.sessionKey), account.accountId);
+  // recordSessionAccount normalizes both key AND value so mixed-case bot
+  // ids (issue #33) cannot split a single bot's presence across two entries.
+  recordSessionAccount(account.accountId, route.sessionKey);
 
   const finalBody = quotePrefix ? (quotePrefix + rawBody) : rawBody;
 

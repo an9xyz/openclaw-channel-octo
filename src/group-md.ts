@@ -8,6 +8,15 @@
  * Memory maps (rebuilt from inbound messages after restart):
  *   _groupAccountMap: "agentId:groupNo" → accountId
  *   _checkedGroups: Set<"accountId/groupNo"> — tracks groups checked this session
+ *
+ * accountId case-insensitivity (issue #33):
+ *   octo-server BotFather historically emitted mixed-case bot IDs (e.g.
+ *   `27pBwzf2F6bfa5cd142_bot`). OpenClaw normalizes them to lowercase at the
+ *   routing boundary, so any disk path / cache key / Set key here that uses
+ *   accountId verbatim would split a single bot's storage across two
+ *   directories or two cache slots. All path helpers and exported APIs that
+ *   take `accountId` normalize at entry via `normalizeAccountId` to keep one
+ *   bot → one directory / one cache key.
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, readdirSync } from "node:fs";
@@ -15,6 +24,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import type { ChannelLogSink } from "openclaw/plugin-sdk/channel-contract";
 import { CHANNEL_ID } from "./constants.js";
+import { normalizeAccountId } from "./account-id.js";
 
 // --- Channel ID helpers ---
 
@@ -86,22 +96,28 @@ const _checkedGroups = new Set<string>();
 const _groupMdCache = new Map<string, Map<string, { content: string; version: number }>>();
 
 export function getOrCreateGroupMdCache(accountId: string): Map<string, { content: string; version: number }> {
-  let m = _groupMdCache.get(accountId);
+  const id = normalizeAccountId(accountId);
+  let m = _groupMdCache.get(id);
   if (!m) {
     m = new Map<string, { content: string; version: number }>();
-    _groupMdCache.set(accountId, m);
+    _groupMdCache.set(id, m);
   }
   return m;
 }
 
 // --- Path helpers ---
+//
+// All three normalize accountId at entry so disk paths are always
+// `~/.openclaw/.../<lowercased-accountId>/...`. This is the single
+// chokepoint that guarantees one bot → one directory tree, even when
+// callers pass mixed-case accountIds (BotFather legacy, see issue #33).
 
 function workspaceBase(): string {
   return join(homedir(), ".openclaw", "workspace", CHANNEL_ID);
 }
 
 function groupDir(accountId: string, groupNo: string): string {
-  return join(workspaceBase(), accountId, "groups", groupNo);
+  return join(workspaceBase(), normalizeAccountId(accountId), "groups", groupNo);
 }
 
 function groupMdPath(accountId: string, groupNo: string): string {
@@ -120,7 +136,9 @@ function groupMetaPath(accountId: string, groupNo: string): string {
  */
 export function registerGroupAccount(groupNo: string, accountId: string, agentId?: string): void {
   if (agentId) {
-    _groupAccountMap.set(`${agentId}:${groupNo}`, accountId);
+    // Store the normalized accountId so downstream resolveAccountId callers
+    // see the canonical form regardless of which case the inbound carried.
+    _groupAccountMap.set(`${agentId}:${groupNo}`, normalizeAccountId(accountId));
   }
   // Do NOT register bare groupNo key — it causes cross-agent contamination on multi-bot nodes
 }
@@ -128,6 +146,11 @@ export function registerGroupAccount(groupNo: string, accountId: string, agentId
 /**
  * Scan disk for accountId when memory map misses.
  * Looks through all accountId directories for a matching groupNo with a meta file.
+ *
+ * NOTE: path helpers normalize accountId, so this only finds bots whose
+ * persisted disk dir is already lowercase. Legacy mixed-case directories
+ * left over from pre-fix writes become orphaned (will not be discovered
+ * here, but a fresh API fetch on next inbound will rebuild a lowercase entry).
  */
 export function scanForAccountId(agentId: string, groupNo: string): string | null {
   const base = workspaceBase();
@@ -148,8 +171,11 @@ export function scanForAccountId(agentId: string, groupNo: string): string | nul
       try {
         const meta = JSON.parse(readFileSync(metaFile, "utf-8")) as GroupMdMeta;
         if (meta.account_id) {
-          _groupAccountMap.set(`${agentId}:${groupNo}`, meta.account_id);
-          return meta.account_id;
+          // Normalize what we store so resolveAccountId always returns
+          // canonical form, even if a legacy meta still holds mixed-case.
+          const normalizedAcct = normalizeAccountId(meta.account_id);
+          _groupAccountMap.set(`${agentId}:${groupNo}`, normalizedAcct);
+          return normalizedAcct;
         }
       } catch {
         // corrupted meta, skip
@@ -201,6 +227,11 @@ async function fetchGroupMdFromApi(params: {
 
 /**
  * Write GROUP.md and meta to disk.
+ *
+ * Normalizes accountId at the boundary so meta.account_id stored on disk
+ * is always canonical (lowercase), even if a caller passes mixed-case.
+ * Path helpers below also normalize, but persisting normalized meta means
+ * scanForAccountId returning a meta read still sees the canonical form.
  */
 export function writeGroupMdToDisk(params: {
   accountId: string;
@@ -208,10 +239,15 @@ export function writeGroupMdToDisk(params: {
   content: string;
   meta: GroupMdMeta;
 }): void {
-  const dir = groupDir(params.accountId, params.groupNo);
+  const accountId = normalizeAccountId(params.accountId);
+  const dir = groupDir(accountId, params.groupNo);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(groupMdPath(params.accountId, params.groupNo), params.content, "utf-8");
-  writeFileSync(groupMetaPath(params.accountId, params.groupNo), JSON.stringify(params.meta, null, 2), "utf-8");
+  writeFileSync(groupMdPath(accountId, params.groupNo), params.content, "utf-8");
+  // Override meta.account_id with the normalized form so the persisted JSON
+  // matches the disk path it lives in. Any caller-supplied mixed-case value
+  // is replaced — this is intentional, per the issue #33 contract.
+  const meta: GroupMdMeta = { ...params.meta, account_id: accountId };
+  writeFileSync(groupMetaPath(accountId, params.groupNo), JSON.stringify(meta, null, 2), "utf-8");
 }
 
 /**
@@ -259,7 +295,8 @@ export async function ensureGroupMd(params: {
   botToken: string;
   log?: ChannelLogSink;
 }): Promise<void> {
-  const { agentId, accountId, groupNo, apiUrl, botToken, log } = params;
+  const { agentId, groupNo, apiUrl, botToken, log } = params;
+  const accountId = normalizeAccountId(params.accountId);
   const key = `${accountId}/${groupNo}`;
   if (_checkedGroups.has(key)) return;
   _checkedGroups.add(key);
@@ -302,7 +339,8 @@ export async function handleGroupMdEvent(params: {
   botToken: string;
   log?: ChannelLogSink;
 }): Promise<void> {
-  const { agentId, accountId, groupNo, eventType, apiUrl, botToken, log } = params;
+  const { groupNo, eventType, apiUrl, botToken, log } = params;
+  const accountId = normalizeAccountId(params.accountId);
 
   if (eventType === "group_md_deleted") {
     deleteGroupMdFromDisk(accountId, groupNo);
@@ -371,7 +409,7 @@ export function getGroupMdForPrompt(ctx: {
  * Clear the checked flag for a group, forcing re-fetch on next encounter.
  */
 export function clearGroupMdChecked(accountId: string, groupNo: string): void {
-  _checkedGroups.delete(`${accountId}/${groupNo}`);
+  _checkedGroups.delete(`${normalizeAccountId(accountId)}/${groupNo}`);
 }
 
 /**
@@ -384,7 +422,8 @@ export function broadcastGroupMdUpdate(params: {
   content: string;
   version: number;
 }): void {
-  const { accountId, groupNo, content, version } = params;
+  const { groupNo, content, version } = params;
+  const accountId = normalizeAccountId(params.accountId);
   const meta: GroupMdMeta = {
     version,
     updated_at: new Date().toISOString(),
@@ -426,10 +465,10 @@ export function getKnownGroupIds(): Set<string> {
 // --- Thread (子区) THREAD.md disk cache ---
 
 /** Tracks threads checked this session to avoid redundant API calls */
-const _checkedThreads = new Set<string>(); // "accountId/groupNo/shortId"
+const _checkedThreads = new Set<string>(); // "<lowercased-accountId>/<groupNo>/<shortId>"
 
 function threadDir(accountId: string, groupNo: string, shortId: string): string {
-  return join(workspaceBase(), accountId, "groups", groupNo, "threads", shortId);
+  return join(workspaceBase(), normalizeAccountId(accountId), "groups", groupNo, "threads", shortId);
 }
 
 function threadMdPath(accountId: string, groupNo: string, shortId: string): string {
@@ -447,10 +486,13 @@ export function writeThreadMdToDisk(params: {
   content: string;
   meta: GroupMdMeta;
 }): void {
-  const dir = threadDir(params.accountId, params.groupNo, params.shortId);
+  const accountId = normalizeAccountId(params.accountId);
+  const dir = threadDir(accountId, params.groupNo, params.shortId);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(threadMdPath(params.accountId, params.groupNo, params.shortId), params.content, "utf-8");
-  writeFileSync(threadMetaPath(params.accountId, params.groupNo, params.shortId), JSON.stringify(params.meta, null, 2), "utf-8");
+  writeFileSync(threadMdPath(accountId, params.groupNo, params.shortId), params.content, "utf-8");
+  // Persist normalized meta.account_id (see writeGroupMdToDisk comment).
+  const meta: GroupMdMeta = { ...params.meta, account_id: accountId };
+  writeFileSync(threadMetaPath(accountId, params.groupNo, params.shortId), JSON.stringify(meta, null, 2), "utf-8");
 }
 
 export function readThreadMdFromDisk(accountId: string, groupNo: string, shortId: string): string | null {
@@ -524,7 +566,8 @@ export async function ensureThreadMd(params: {
   botToken: string;
   log?: ChannelLogSink;
 }): Promise<void> {
-  const { accountId, groupNo, shortId, apiUrl, botToken, log } = params;
+  const { groupNo, shortId, apiUrl, botToken, log } = params;
+  const accountId = normalizeAccountId(params.accountId);
   const key = `${accountId}/${groupNo}/${shortId}`;
   if (_checkedThreads.has(key)) return;
   _checkedThreads.add(key);
@@ -563,7 +606,8 @@ export async function handleThreadMdEvent(params: {
   botToken: string;
   log?: ChannelLogSink;
 }): Promise<void> {
-  const { accountId, groupNo, shortId, eventType, apiUrl, botToken, log } = params;
+  const { groupNo, shortId, eventType, apiUrl, botToken, log } = params;
+  const accountId = normalizeAccountId(params.accountId);
 
   if (eventType === "thread_md_deleted") {
     deleteThreadMdFromDisk(accountId, groupNo, shortId);
@@ -604,7 +648,8 @@ export function broadcastThreadMdUpdate(params: {
   content: string;
   version: number;
 }): void {
-  const { accountId, groupNo, shortId, content, version } = params;
+  const { groupNo, shortId, content, version } = params;
+  const accountId = normalizeAccountId(params.accountId);
   const meta: GroupMdMeta = {
     version,
     updated_at: new Date().toISOString(),

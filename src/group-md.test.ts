@@ -943,3 +943,99 @@ describe("handleThreadMdEvent", () => {
     fetchSpy.mockRestore();
   });
 });
+
+// ─── issue #33: case-insensitive accountId across GROUP/THREAD chains ──────
+
+import * as path from "node:path";
+import { homedir } from "node:os";
+import { readdirSync, existsSync as _exists } from "node:fs";
+
+describe("group-md case-insensitive accountId — disk path single directory (issue #33)", () => {
+  // Reuse the file-level beforeEach which redirects HOME to a tmpdir, so we
+  // don't pollute the real workspace. workspaceRoot is captured per-test
+  // (inside the test body) AFTER HOME has been swapped — capturing at
+  // describe-level would lock in the pre-swap real HOME and the path
+  // assertions below would never match writeGroupMdToDisk's actual target.
+  const groupNo = `caseTest_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+  const lowerAcct = `case_acct_bot_${Date.now()}`;
+  const mixedAcct = lowerAcct.replace("acct", "Acct").replace("bot", "BOT");
+
+  it("writeGroupMdToDisk with mixed-case accountId persists under lowercase dir; read with either case hits it", () => {
+    const workspaceRoot = join(homedir(), ".openclaw", "workspace", "octo");
+    const meta = {
+      version: 1,
+      updated_at: "2026-06-08T00:00:00Z",
+      updated_by: "test",
+      fetched_at: "2026-06-08T00:00:00Z",
+      account_id: mixedAcct,
+    };
+    writeGroupMdToDisk({ accountId: mixedAcct, groupNo, content: "hello", meta });
+
+    // Reading with the SAME mixed-case input should succeed (paths normalize).
+    expect(readGroupMdFromDisk(mixedAcct, groupNo)).toBe("hello");
+    // Reading with the lowercase form should also succeed (same dir).
+    expect(readGroupMdFromDisk(lowerAcct, groupNo)).toBe("hello");
+
+    // Verify the on-disk directory name has the EXPECTED case form (lowercase).
+    // We can't use `existsSync(mixedPath)` to assert non-existence because
+    // macOS APFS is case-insensitive by default — both case forms resolve to
+    // the same inode. Instead, readdirSync returns the actual stored name,
+    // which preserves the case the dir was created with.
+    const dirs = readdirSync(workspaceRoot, { withFileTypes: true })
+      .filter(d => d.isDirectory())
+      .map(d => d.name);
+    // The lowercase form must be present.
+    expect(dirs).toContain(lowerAcct);
+    // The mixed-case form must NOT — production code normalized before mkdir.
+    expect(dirs).not.toContain(mixedAcct);
+  });
+
+  it("getOrCreateGroupMdCache returns the same Map for mixed-case and lowercase accountIds", () => {
+    const a = getOrCreateGroupMdCache(mixedAcct);
+    const b = getOrCreateGroupMdCache(lowerAcct);
+    expect(a).toBe(b);
+
+    // Sanity: mutating a is observable via b
+    a.set(groupNo, { content: "x", version: 1 });
+    expect(b.get(groupNo)?.content).toBe("x");
+  });
+});
+
+describe("group-md case-insensitive accountId — THREAD chain (issue #33)", () => {
+  const shortId = `thr_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+  const lowerAcct = `thread_acct_bot_${Date.now()}`;
+  const mixedAcct = lowerAcct.replace("acct", "Acct").replace("bot", "BOT");
+  // Use a distinct groupNo to keep this test independent of the GROUP test above.
+  const groupNo = `threadgrp_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+
+  it("writeThreadMdToDisk with mixed-case accountId persists under lowercase dir; read with either case hits it", () => {
+    const workspaceRoot = join(homedir(), ".openclaw", "workspace", "octo");
+    const meta = {
+      version: 1,
+      updated_at: "2026-06-08T00:00:00Z",
+      updated_by: "test",
+      fetched_at: "2026-06-08T00:00:00Z",
+      account_id: mixedAcct,
+    };
+    writeThreadMdToDisk({ accountId: mixedAcct, groupNo, shortId, content: "thread-hello", meta });
+
+    // Reads with either case form hit the same dir.
+    expect(readThreadMdFromDisk(mixedAcct, groupNo, shortId)).toBe("thread-hello");
+    expect(readThreadMdFromDisk(lowerAcct, groupNo, shortId)).toBe("thread-hello");
+
+    // Directory name on disk is the lowercase form (readdirSync preserves
+    // case even on case-insensitive FS).
+    const dirs = readdirSync(workspaceRoot, { withFileTypes: true })
+      .filter(d => d.isDirectory())
+      .map(d => d.name);
+    expect(dirs).toContain(lowerAcct);
+    expect(dirs).not.toContain(mixedAcct);
+
+    // The persisted meta JSON must also carry the normalized account_id —
+    // otherwise downstream consumers of meta (e.g. scanForAccountId) would
+    // see mixed-case and re-split.
+    const metaPath = join(workspaceRoot, lowerAcct, "groups", groupNo, "threads", shortId, "THREAD.meta.json");
+    const parsed = JSON.parse(readFileSync(metaPath, "utf-8"));
+    expect(parsed.account_id).toBe(lowerAcct);
+  });
+});

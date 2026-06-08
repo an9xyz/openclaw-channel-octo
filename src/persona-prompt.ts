@@ -27,6 +27,7 @@
 
 import type { ChannelLogSink } from "openclaw/plugin-sdk/channel-contract";
 import { getBotOboGrant, type BotOboGrant } from "./api-fetch.js";
+import { normalizeAccountId } from "./account-id.js";
 
 const DEFAULT_REFRESH_INTERVAL_MS = 60_000;
 
@@ -67,14 +68,31 @@ const _firstFetchLogged = new Set<string>();
  */
 const _generation = new Map<string, number>();
 
+/**
+ * Clone the input with `accountId` normalized to lowercase. Used at the
+ * top of every exported function that takes a PersonaAccountInput so all
+ * downstream Map/Set/log lookups speak the canonical id. PersonaAccountInput
+ * only contains string/optional-string fields, so the spread is safe.
+ *
+ * See ./account-id.ts for the normalize contract (issue #33 / octo-server#302).
+ */
+function withNormalizedAccount(account: PersonaAccountInput): PersonaAccountInput {
+  return { ...account, accountId: normalizeAccountId(account.accountId) };
+}
+
 function _bumpGeneration(accountId: string): number {
-  const next = (_generation.get(accountId) ?? 0) + 1;
-  _generation.set(accountId, next);
+  // Defense in depth — callers should already pass normalized form, but
+  // we normalize here too so a stray raw-id callsite cannot split the
+  // generation counter into two parallel sequences.
+  const id = normalizeAccountId(accountId);
+  const next = (_generation.get(id) ?? 0) + 1;
+  _generation.set(id, next);
   return next;
 }
 
 function _currentGeneration(accountId: string): number {
-  return _generation.get(accountId) ?? 0;
+  const id = normalizeAccountId(accountId);
+  return _generation.get(id) ?? 0;
 }
 
 /**
@@ -136,20 +154,21 @@ export async function refreshPersonaPromptCache(
   account: PersonaAccountInput,
   log?: ChannelLogSink,
 ): Promise<void> {
-  if (!account.onBehalfOf) return;
-  const myGeneration = _currentGeneration(account.accountId);
+  const acc = withNormalizedAccount(account);
+  if (!acc.onBehalfOf) return;
+  const myGeneration = _currentGeneration(acc.accountId);
   let grant: BotOboGrant | null;
   try {
     grant = await getBotOboGrant({
-      apiUrl: account.apiUrl,
-      botToken: account.botToken,
+      apiUrl: acc.apiUrl,
+      botToken: acc.botToken,
     });
   } catch (err) {
     // Even logging on a superseded fetch is noise — but skipping it
     // could mask real failures. Keep the warn but suppress cache writes.
-    if (_currentGeneration(account.accountId) !== myGeneration) return;
+    if (_currentGeneration(acc.accountId) !== myGeneration) return;
     log?.warn?.(
-      `octo: persona_prompt fetch failed for ${account.accountId}: ${err instanceof Error ? err.message : String(err)}`,
+      `octo: persona_prompt fetch failed for ${acc.accountId}: ${err instanceof Error ? err.message : String(err)}`,
     );
     return;
   }
@@ -157,28 +176,28 @@ export async function refreshPersonaPromptCache(
   // Drop this result if the account was stopped or reconfigured while
   // the fetch was outstanding. Without this check, a stale grant could
   // overwrite the cleared cache or the next init's fresh entry.
-  if (_currentGeneration(account.accountId) !== myGeneration) return;
+  if (_currentGeneration(acc.accountId) !== myGeneration) return;
 
   const hint = grant ? composePersonaHint(grant) : undefined;
-  const prev = _cache.get(account.accountId);
-  _cache.set(account.accountId, { hint, fetchedAt: Date.now() });
+  const prev = _cache.get(acc.accountId);
+  _cache.set(acc.accountId, { hint, fetchedAt: Date.now() });
 
-  if (!_firstFetchLogged.has(account.accountId)) {
-    _firstFetchLogged.add(account.accountId);
+  if (!_firstFetchLogged.has(acc.accountId)) {
+    _firstFetchLogged.add(acc.accountId);
     if (hint) {
       log?.info?.(
-        `octo: persona_prompt loaded for ${account.accountId} (grantor=${account.onBehalfOf}, ${hint.length} chars)`,
+        `octo: persona_prompt loaded for ${acc.accountId} (grantor=${acc.onBehalfOf}, ${hint.length} chars)`,
       );
     } else {
       log?.info?.(
-        `octo: persona_prompt not active for ${account.accountId} (grantor=${account.onBehalfOf}); cache will retry every ${_refreshIntervalMs}ms`,
+        `octo: persona_prompt not active for ${acc.accountId} (grantor=${acc.onBehalfOf}); cache will retry every ${_refreshIntervalMs}ms`,
       );
     }
     return;
   }
   if (prev?.hint !== hint) {
     log?.info?.(
-      `octo: persona_prompt refreshed for ${account.accountId} (changed=${prev?.hint !== hint}, hasHint=${Boolean(hint)})`,
+      `octo: persona_prompt refreshed for ${acc.accountId} (changed=${prev?.hint !== hint}, hasHint=${Boolean(hint)})`,
     );
   }
 }
@@ -195,26 +214,27 @@ export function initPersonaPromptCache(
   account: PersonaAccountInput,
   log?: ChannelLogSink,
 ): void {
-  if (!account.onBehalfOf) {
+  const acc = withNormalizedAccount(account);
+  if (!acc.onBehalfOf) {
     // PR#69 R4 (Jerry-Xin) Blocking 1: when an account is reconfigured
     // from persona-clone (`onBehalfOf` set) to a regular bot (`onBehalfOf`
     // cleared), a bare early return would leave the previous timer and
     // cached hint in place, so the before_prompt_build hook would keep
     // injecting the old grantor's persona prompt into a now-plain bot.
     // Tear down any prior state for this accountId before bailing out.
-    stopPersonaPromptCache(account.accountId);
+    stopPersonaPromptCache(acc.accountId);
     return;
   }
 
   // Drop any pre-existing timer for this account so repeated calls
   // (hot reload, account reconfigure) don't leak intervals.
-  const existing = _timers.get(account.accountId);
+  const existing = _timers.get(acc.accountId);
   if (existing) clearInterval(existing);
 
   // Bump generation so any fetch from a previous init/start-cycle that
   // is still in flight will see a generation mismatch when it resolves
   // and bail out before mutating _cache.
-  _bumpGeneration(account.accountId);
+  _bumpGeneration(acc.accountId);
 
   // PR#69 R4 (Jerry-Xin) Blocking 2: on reconfigure (e.g. grantor
   // switched from A to B), the previous grantor's hint is still sitting
@@ -223,22 +243,25 @@ export function initPersonaPromptCache(
   // grantor's prompt. Clear the cache eagerly so the hook fails safe
   // (returns undefined → no persona injection) during the refetch
   // window, rather than leaking stale identity into the new context.
-  _cache.delete(account.accountId);
+  _cache.delete(acc.accountId);
   // Allow the next successful fetch for this account to re-emit the
   // one-shot "loaded" / "not active" info log, so operators can see the
   // post-reconfigure state in logs.
-  _firstFetchLogged.delete(account.accountId);
+  _firstFetchLogged.delete(acc.accountId);
 
   // Fire-and-forget initial fetch. We deliberately don't await
   // because account start should not block on persona init.
-  void refreshPersonaPromptCache(account, log);
+  // Pass the already-normalized acc so refreshPersonaPromptCache doesn't
+  // re-clone (it would still normalize internally; passing acc just avoids
+  // an extra spread per timer tick).
+  void refreshPersonaPromptCache(acc, log);
 
   const timer = setInterval(() => {
-    void refreshPersonaPromptCache(account, log);
+    void refreshPersonaPromptCache(acc, log);
   }, _refreshIntervalMs);
   // Refresh timer alone must not keep the Node process alive.
   timer.unref?.();
-  _timers.set(account.accountId, timer);
+  _timers.set(acc.accountId, timer);
 }
 
 /**
@@ -246,14 +269,15 @@ export function initPersonaPromptCache(
  * Called when the account is shut down or reconfigured.
  */
 export function stopPersonaPromptCache(accountId: string): void {
+  const id = normalizeAccountId(accountId);
   // Bump generation BEFORE clearing state so any fetch that resolves
   // after this point sees the mismatch and skips its cache write.
-  _bumpGeneration(accountId);
-  const timer = _timers.get(accountId);
+  _bumpGeneration(id);
+  const timer = _timers.get(id);
   if (timer) clearInterval(timer);
-  _timers.delete(accountId);
-  _cache.delete(accountId);
-  _firstFetchLogged.delete(accountId);
+  _timers.delete(id);
+  _cache.delete(id);
+  _firstFetchLogged.delete(id);
 }
 
 /**
@@ -271,7 +295,7 @@ export function stopPersonaPromptCache(accountId: string): void {
 export function getPersonaPromptForSession(
   accountId: string,
 ): string | undefined {
-  return _cache.get(accountId)?.hint;
+  return _cache.get(normalizeAccountId(accountId))?.hint;
 }
 
 /**
@@ -279,6 +303,10 @@ export function getPersonaPromptForSession(
  * via `initPersonaPromptCache`. This is the set of accounts the
  * `before_prompt_build` hook should consider when resolving persona identity
  * for a given sessionKey.
+ *
+ * The returned ids are always normalized to lowercase (init stores them that
+ * way), so callers can compare them directly against other normalized ids
+ * without doing case folding themselves.
  *
  * Returning only persona-clone accounts (those with `account.config.onBehalfOf`
  * set, since `initPersonaPromptCache` is a no-op for non-persona accounts)

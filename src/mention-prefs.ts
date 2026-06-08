@@ -27,6 +27,7 @@
  */
 
 import { getMentionPref, fetchBotGroups, type MentionPref } from "./api-fetch.js";
+import { normalizeAccountId } from "./account-id.js";
 import type { LogSink } from "./types.js";
 
 const CACHE_TTL_MS = 30 * 1000; // 30 seconds (positive: effective=true)
@@ -48,9 +49,17 @@ interface CacheEntry {
 
 const _prefCache = new Map<string, CacheEntry>();
 
-/** Build the composite per-bot cache key. */
+/**
+ * Build the composite per-bot cache key.
+ *
+ * Centralizes accountId normalization for the whole module: every callsite
+ * that reads/writes _prefCache routes through this builder, so mixed-case
+ * accountIds emitted by octo-server BotFather (see issue #33) cannot
+ * silently bypass cache hits or leave stale entries unreachable to invalidate.
+ * The _set/_has test helpers below inherit this guarantee transitively.
+ */
 function cacheKey(accountId: string, parentGroupNo: string): string {
-  return `${accountId}:${parentGroupNo}`;
+  return `${normalizeAccountId(accountId)}:${parentGroupNo}`;
 }
 
 /**

@@ -20,7 +20,8 @@ describe("registerGroupToAccount + resolveAccountForGroup", () => {
 
     registerGroupToAccount("group-001", "botA");
 
-    expect(resolveAccountForGroup("group-001")).toBe("botA");
+    // Returned accountId is normalized to lowercase (see issue #33).
+    expect(resolveAccountForGroup("group-001")).toBe("bota");
   });
 
   it("multi-bot same group — resolveAccountForGroup returns undefined", async () => {
@@ -44,8 +45,8 @@ describe("registerGroupToAccount + resolveAccountForGroup", () => {
     registerGroupToAccount("group-001", "botA");
     registerGroupToAccount("group-001", "botA");
 
-    // Still size 1 → should return the accountId
-    expect(resolveAccountForGroup("group-001")).toBe("botA");
+    // Still size 1 → should return the accountId (normalized).
+    expect(resolveAccountForGroup("group-001")).toBe("bota");
   });
 
   it("different groups with different bots resolve independently", async () => {
@@ -54,8 +55,8 @@ describe("registerGroupToAccount + resolveAccountForGroup", () => {
     registerGroupToAccount("group-001", "botA");
     registerGroupToAccount("group-002", "botB");
 
-    expect(resolveAccountForGroup("group-001")).toBe("botA");
-    expect(resolveAccountForGroup("group-002")).toBe("botB");
+    expect(resolveAccountForGroup("group-001")).toBe("bota");
+    expect(resolveAccountForGroup("group-002")).toBe("botb");
   });
 });
 
