@@ -19,6 +19,7 @@ export type ResolvedOctoAccount = {
     historyLimit?: number;  // 群聊历史消息条数限制
     historyPromptTemplate?: string;  // Template for group history context injection
     onBehalfOf?: string;  // Persona clone: grantor uid
+    secretsFileRoot?: string;  // Jail root for write-secret file writes
   };
 };
 
@@ -100,6 +101,7 @@ export function resolveOctoAccount(params: {
       historyLimit: accountConfig.historyLimit ?? channel.historyLimit ?? 20,
       historyPromptTemplate: accountConfig.historyPromptTemplate ?? channel.historyPromptTemplate,
       onBehalfOf: accountConfig.onBehalfOf ?? channel.onBehalfOf,
+      secretsFileRoot: accountConfig.secretsFileRoot ?? channel.secretsFileRoot,
     },
   };
 }

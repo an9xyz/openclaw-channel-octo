@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("./accounts.js", () => ({
   listOctoAccountIds: vi.fn(),
@@ -17,12 +17,30 @@ vi.mock("./api-fetch.js", () => ({
   deleteVoiceContext: vi.fn(),
   getThreadMd: vi.fn(),
   updateThreadMd: vi.fn(),
+  resolveSecret: vi.fn(),
 }));
 
 vi.mock("./group-md.js", () => ({
   broadcastGroupMdUpdate: vi.fn(),
   broadcastThreadMdUpdate: vi.fn(),
 }));
+
+// NOTE: only mkdir from node:fs/promises is wrapped (see the vi.mock below); all
+// other fs calls run for real. The write-secret tests exercise the real
+// path-confinement + write path against an OS temp directory so that traversal /
+// absolute-escape / symlink rejection is genuinely tested.
+
+// NOTE: node:fs/promises is passed through to the REAL implementation for every
+// call EXCEPT mkdir, which is wrapped in a vi.fn that delegates to the genuine
+// mkdir by default. The write-secret tests still exercise real path-confinement
+// + write against an OS temp directory (so traversal / absolute-escape / symlink
+// rejection is genuinely tested); the wrapper only lets the intermediate-dir
+// TOCTOU regression test inject a symlink swap in the race window between
+// mkdir() and open().
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, mkdir: vi.fn(actual.mkdir) };
+});
 
 import { createOctoManagementTools } from "./agent-tools.js";
 import {
@@ -41,8 +59,20 @@ import {
   deleteVoiceContext,
   getThreadMd,
   updateThreadMd,
+  resolveSecret,
 } from "./api-fetch.js";
 import { broadcastGroupMdUpdate, broadcastThreadMdUpdate } from "./group-md.js";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile as fsWriteFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // Minimal config stub — mocked account functions don't inspect it
 const mockCfg = { channels: { octo: { botToken: "tok-secret" } } } as any;
@@ -52,12 +82,14 @@ function setupMocks(overrides?: {
   configured?: boolean;
   botToken?: string;
   apiUrl?: string;
+  secretsFileRoot?: string;
 }) {
   const {
     enabled = true,
     configured = true,
     botToken = "tok-secret",
     apiUrl = "http://api.test",
+    secretsFileRoot,
   } = overrides ?? {};
 
   vi.mocked(listOctoAccountIds).mockReturnValue(["default"]);
@@ -71,6 +103,7 @@ function setupMocks(overrides?: {
       apiUrl,
       pollIntervalMs: 2000,
       heartbeatIntervalMs: 30000,
+      ...(secretsFileRoot ? { secretsFileRoot } : {}),
     },
   });
 }
@@ -1165,6 +1198,474 @@ describe("createOctoManagementTools", () => {
       });
       const data = parseText(result);
       expect(data.error).toContain("thread-md-update failed");
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // write-secret (user-managed external keys; internal deref)
+  // -----------------------------------------------------------------------
+  describe("execute — write-secret", () => {
+    // The plaintext value any resolved secret yields. The whole point of this
+    // feature is that THIS string never appears in a tool return value.
+    const PLAINTEXT = "sk-live-SUPER-SECRET-VALUE-123";
+
+    // Real OS temp dir used as the operator-configured jail root. Using the
+    // real filesystem (not a mock) is what makes the traversal / absolute /
+    // symlink rejection tests meaningful.
+    let root: string;
+
+    beforeEach(async () => {
+      root = await mkdtemp(join(tmpdir(), "octo-secret-test-"));
+      // Re-arm mocks with this run's jail root.
+      setupMocks({ secretsFileRoot: root });
+    });
+
+    afterEach(async () => {
+      await rm(root, { recursive: true, force: true });
+    });
+
+    const writeSecret = (args: Record<string, unknown>) =>
+      getExecute()("tc", { action: "write-secret", ...args });
+
+    it("tool schema includes the write-secret action", () => {
+      const tools = createOctoManagementTools({ cfg: mockCfg });
+      expect(tools[0].parameters.properties.action.enum).toContain("write-secret");
+    });
+
+    it("resolves the alias and writes the raw value into the jail", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({
+        status: "resolved",
+        value: PLAINTEXT,
+        secret_id: "sec_1",
+        display_name: "openai key",
+      });
+
+      const result = await writeSecret({ alias: "openai key", filePath: "secrets/.env" });
+      const data = parseText(result);
+
+      // resolve is use-time: called with the bot token + alias.
+      expect(resolveSecret).toHaveBeenCalledWith({
+        apiUrl: "http://api.test",
+        botToken: "tok-secret",
+        alias: "openai key",
+      });
+
+      // raw value written verbatim (no template) under the jail root.
+      const target = join(root, "secrets/.env");
+      expect(await readFile(target, "utf8")).toBe(PLAINTEXT);
+
+      expect(data.written).toBe(true);
+      // path is jail-relative — the absolute jail root is never disclosed.
+      expect(data.path).toBe(join("secrets", ".env"));
+      expect(data.path).not.toContain(root);
+      expect(data.mode).toBe("overwrite");
+      expect(data.display_name).toBe("openai key");
+      // No secret-derived length field is exposed.
+      expect(data).not.toHaveProperty("bytesWritten");
+    });
+
+    it("creates the secret file 0o600 (owner-only)", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+
+      await writeSecret({ alias: "k", filePath: "key.txt" });
+
+      const st = await stat(join(root, "key.txt"));
+      // Mask to permission bits. Skipped on platforms without POSIX perms.
+      if (process.platform !== "win32") {
+        expect(st.mode & 0o777).toBe(0o600);
+      }
+    });
+
+    it("substitutes {{secret}} inside the caller template", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+
+      await writeSecret({
+        alias: "openai key",
+        filePath: ".env",
+        template: "OPENAI_API_KEY={{secret}}\n",
+      });
+
+      expect(await readFile(join(root, ".env"), "utf8")).toBe(
+        `OPENAI_API_KEY=${PLAINTEXT}\n`,
+      );
+    });
+
+    it("substitutes every {{secret}} occurrence (multi-placeholder)", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+
+      await writeSecret({
+        alias: "k",
+        filePath: "dup.txt",
+        template: "a={{secret}};b={{secret}}",
+      });
+
+      expect(await readFile(join(root, "dup.txt"), "utf8")).toBe(
+        `a=${PLAINTEXT};b=${PLAINTEXT}`,
+      );
+    });
+
+    it("handles a resolved value that itself contains {{secret}}", async () => {
+      // The single-pass split/join must not re-expand a literal placeholder
+      // that happens to live inside the secret value.
+      vi.mocked(resolveSecret).mockResolvedValue({
+        status: "resolved",
+        value: "val-{{secret}}-end",
+      });
+
+      await writeSecret({ alias: "k", filePath: "weird.txt", template: "X={{secret}}" });
+
+      expect(await readFile(join(root, "weird.txt"), "utf8")).toBe("X=val-{{secret}}-end");
+    });
+
+    it("rejects a template that lacks the {{secret}} placeholder", async () => {
+      const result = await writeSecret({
+        alias: "k",
+        filePath: ".env",
+        template: "OPENAI_API_KEY=", // no placeholder → would silently write raw
+      });
+      expect(parseText(result).error).toContain("{{secret}} placeholder");
+      // Never resolved nor wrote anything.
+      expect(resolveSecret).not.toHaveBeenCalled();
+    });
+
+    it("appends when mode=append", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+
+      // seed an existing file inside the jail
+      await fsWriteFile(join(root, ".env"), "EXISTING\n", "utf8");
+
+      const result = await writeSecret({ alias: "k", filePath: ".env", mode: "append" });
+      const data = parseText(result);
+
+      expect(await readFile(join(root, ".env"), "utf8")).toBe(`EXISTING\n${PLAINTEXT}`);
+      expect(data.mode).toBe("append");
+    });
+
+    it("creates the parent directory before writing", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+
+      await writeSecret({ alias: "k", filePath: "nested/dir/.env" });
+
+      expect(await readFile(join(root, "nested/dir/.env"), "utf8")).toBe(PLAINTEXT);
+    });
+
+    // 🔴 RED LINE: plaintext must never appear in the LLM-visible return value,
+    // on ANY branch (templated, raw, append).
+    it("NEVER returns the plaintext value — templated path (red line)", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({
+        status: "resolved",
+        value: PLAINTEXT,
+        secret_id: "sec_1",
+        display_name: "openai key",
+      });
+
+      const result = await writeSecret({
+        alias: "openai key",
+        filePath: ".env",
+        template: "OPENAI_API_KEY={{secret}}\n",
+      });
+
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain(PLAINTEXT);
+      expect(result.content[0].text).not.toContain(PLAINTEXT);
+      expect(JSON.stringify(result.details)).not.toContain(PLAINTEXT);
+    });
+
+    it("NEVER returns the plaintext value — raw write (red line)", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+      const result = await writeSecret({ alias: "k", filePath: "k.txt" });
+      expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+    });
+
+    it("NEVER returns the plaintext value — append (red line)", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+      const result = await writeSecret({ alias: "k", filePath: "k.txt", mode: "append" });
+      expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+    });
+
+    // -------------------------------------------------------------------
+    // 🔴 PATH CONFINEMENT (P0): the file destination must stay in the jail.
+    // -------------------------------------------------------------------
+    it("rejects parent-directory traversal, no resolve, no write", async () => {
+      const result = await writeSecret({ alias: "k", filePath: "../escape.txt" });
+      expect(parseText(result).error).toMatch(/outside the allowed directory/i);
+      expect(resolveSecret).not.toHaveBeenCalled();
+    });
+
+    it("rejects a deep traversal that climbs past the root", async () => {
+      const result = await writeSecret({ alias: "k", filePath: "a/b/../../../etc/passwd" });
+      expect(parseText(result).error).toMatch(/outside the allowed directory/i);
+      expect(resolveSecret).not.toHaveBeenCalled();
+    });
+
+    it("rejects an absolute path outside the jail", async () => {
+      const result = await writeSecret({ alias: "k", filePath: "/etc/cron.d/x" });
+      expect(parseText(result).error).toMatch(/outside the allowed directory/i);
+      expect(resolveSecret).not.toHaveBeenCalled();
+    });
+
+    it("rejects a write through a symlinked dir that escapes the jail", async () => {
+      // outside/  ← real target outside the jail
+      // root/link → outside  (symlink inside the jail pointing out)
+      const outside = await mkdtemp(join(tmpdir(), "octo-outside-"));
+      try {
+        await symlink(outside, join(root, "link"), "dir");
+        const result = await writeSecret({ alias: "k", filePath: "link/pwn.txt" });
+        expect(parseText(result).error).toMatch(/symlink|outside the allowed/i);
+        expect(resolveSecret).not.toHaveBeenCalled();
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects when the target itself is a symlink escaping the jail", async () => {
+      const outside = await mkdtemp(join(tmpdir(), "octo-outside-"));
+      try {
+        const realTarget = join(outside, "victim.txt");
+        await fsWriteFile(realTarget, "orig", "utf8");
+        await symlink(realTarget, join(root, "evil.txt"), "file");
+        const result = await writeSecret({ alias: "k", filePath: "evil.txt" });
+        expect(parseText(result).error).toMatch(/symlink|outside the allowed/i);
+        expect(resolveSecret).not.toHaveBeenCalled();
+        // The out-of-jail victim must be untouched.
+        expect(await readFile(realTarget, "utf8")).toBe("orig");
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    });
+
+    // 🔴 P0 REGRESSION — dangling-symlink jail escape. The earlier guard only
+    // rejected symlinks whose target ALREADY existed; a symlink pointing OUT of
+    // the jail at a target that does NOT yet exist (dangling) slipped through,
+    // and writeFile() then created the plaintext secret at the out-of-jail
+    // target via O_CREAT. The two tests below are real PoCs against the real
+    // exported handler: they build a genuine dangling symlink in the jail, call
+    // write-secret, and assert (a) it is rejected, (b) resolveSecret is never
+    // called, (c) NO file appears at the out-of-jail target.
+    it("rejects when the target itself is a DANGLING symlink escaping the jail", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+      const outside = await mkdtemp(join(tmpdir(), "octo-outside-"));
+      try {
+        // Target does NOT exist yet (dangling). link inside jail → outside.
+        const danglingTarget = join(outside, "not-yet.txt");
+        await symlink(danglingTarget, join(root, "evil.txt"), "file");
+
+        const result = await writeSecret({ alias: "k", filePath: "evil.txt" });
+
+        expect(parseText(result).error).toMatch(/symlink|verified|outside the allowed/i);
+        // Never resolved → plaintext never fetched.
+        expect(resolveSecret).not.toHaveBeenCalled();
+        // 🔴 The out-of-jail target must NOT have been created.
+        await expect(readFile(danglingTarget, "utf8")).rejects.toThrow();
+        // And no plaintext anywhere in the LLM-visible return.
+        expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects a DANGLING symlinked DIRECTORY escaping the jail", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+      const outside = await mkdtemp(join(tmpdir(), "octo-outside-"));
+      try {
+        // An intermediate dir symlink pointing to a not-yet-existing out-of-jail
+        // location. Writing "link/secret.txt" would otherwise create the file
+        // (and the dir) outside the jail.
+        const danglingDir = join(outside, "does-not-exist-dir");
+        await symlink(danglingDir, join(root, "link"), "dir");
+
+        const result = await writeSecret({ alias: "k", filePath: "link/secret.txt" });
+
+        expect(parseText(result).error).toMatch(/symlink|verified|outside the allowed/i);
+        expect(resolveSecret).not.toHaveBeenCalled();
+        // 🔴 Nothing created at the out-of-jail location.
+        await expect(readFile(join(danglingDir, "secret.txt"), "utf8")).rejects.toThrow();
+        expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects a DANGLING symlink that points back INSIDE the jail too (unverifiable → deny)", async () => {
+      // Even a dangling link whose lexical target is inside the jail cannot be
+      // proven safe (realpath throws), so we deny it. Conservative but correct:
+      // the caller can just write the plain path directly.
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+      const inJailButMissing = join(root, "later.txt");
+      await symlink(inJailButMissing, join(root, "ptr.txt"), "file");
+
+      const result = await writeSecret({ alias: "k", filePath: "ptr.txt" });
+
+      expect(parseText(result).error).toMatch(/symlink|verified|outside the allowed/i);
+      expect(resolveSecret).not.toHaveBeenCalled();
+      await expect(readFile(inJailButMissing, "utf8")).rejects.toThrow();
+    });
+
+    // 🔴 P1 REGRESSION — intermediate-dir symlink TOCTOU. confineSecretPath()
+    // walks the path BEFORE the parent dirs exist, so it cannot catch a symlink
+    // swapped onto a parent AFTER mkdir creates it. O_NOFOLLOW only guards the
+    // leaf basename, not intermediate components — the kernel still follows a
+    // parent symlink. The fix re-canonicalizes the parent after mkdir and
+    // re-checks containment. This PoC drives the mocked mkdir to swap the
+    // freshly-created parent dir for an out-of-jail symlink in the race window
+    // between mkdir and open, then asserts the write is refused and nothing
+    // lands outside the jail.
+    it("rejects when an intermediate dir is symlink-swapped AFTER mkdir (TOCTOU)", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+      const outside = await mkdtemp(join(tmpdir(), "octo-outside-"));
+      const realMkdir = (await vi.importActual<typeof import("node:fs/promises")>(
+        "node:fs/promises",
+      )).mkdir;
+      try {
+        const subdir = join(root, "sub");
+        vi.mocked(mkdir).mockImplementationOnce(async (...args: any[]) => {
+          // Let the real mkdir create <root>/sub as a genuine directory…
+          const ret = await (realMkdir as any)(...args);
+          // …then, in the race window before open(), swap it for a symlink that
+          // escapes the jail. open() via the canonical parent must refuse it.
+          await rm(subdir, { recursive: true, force: true });
+          await symlink(outside, subdir, "dir");
+          return ret;
+        });
+
+        const result = await writeSecret({ alias: "k", filePath: "sub/secret.env" });
+
+        expect(parseText(result).error).toMatch(/escaped the allowed root|outside the allowed/i);
+        // 🔴 The out-of-jail target must NOT have been created.
+        await expect(readFile(join(outside, "secret.env"), "utf8")).rejects.toThrow();
+        // No plaintext anywhere in the LLM-visible return.
+        expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects a write whose realpath'd parent escapes the root after creation", async () => {
+      // A narrower unit-level check on the post-mkdir containment guard: the
+      // parent resolves outside root → refuse, regardless of how it got there.
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+      const outside = await mkdtemp(join(tmpdir(), "octo-outside-"));
+      try {
+        const subdir = join(root, "deep");
+        vi.mocked(mkdir).mockImplementationOnce(async () => {
+          // Skip creating a real dir; install an escaping symlink as the parent.
+          await symlink(outside, subdir, "dir");
+          return undefined;
+        });
+
+        const result = await writeSecret({ alias: "k", filePath: "deep/k.env" });
+
+        expect(parseText(result).error).toMatch(/escaped the allowed root/i);
+        await expect(readFile(join(outside, "k.env"), "utf8")).rejects.toThrow();
+        expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    });
+
+    it("allows the jail root itself as a relative '.' is not valid but a file at root is", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+      const result = await writeSecret({ alias: "k", filePath: "atroot.txt" });
+      expect(parseText(result).written).toBe(true);
+      expect(await readFile(join(root, "atroot.txt"), "utf8")).toBe(PLAINTEXT);
+    });
+
+    it("defaults the jail root to process.cwd() when secretsFileRoot is unset", async () => {
+      // No secretsFileRoot configured → CWD is the root. A path that escapes
+      // CWD must still be rejected.
+      setupMocks(); // no secretsFileRoot
+      const result = await writeSecret({ alias: "k", filePath: "../../../../etc/passwd" });
+      expect(parseText(result).error).toMatch(/outside the allowed directory/i);
+      expect(resolveSecret).not.toHaveBeenCalled();
+    });
+
+    it("not_found → guides the user to add the key, no plaintext, no write", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "not_found" });
+
+      const result = await writeSecret({ alias: "ghost key", filePath: ".env" });
+      const data = parseText(result);
+
+      expect(data.error).toContain("No stored secret matches");
+      expect(data.error).toContain("ghost key");
+      // nothing written into the jail
+      await expect(readFile(join(root, ".env"), "utf8")).rejects.toThrow();
+    });
+
+    it("ambiguous → returns label-only candidates, never plaintext, no write", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({
+        status: "ambiguous",
+        candidates: [
+          { secret_id: "a", display_name: "openai prod" },
+          { secret_id: "b", display_name: "openai test" },
+        ],
+      });
+
+      const result = await writeSecret({ alias: "openai", filePath: ".env" });
+      const data = parseText(result);
+
+      expect(data.written).toBe(false);
+      expect(data.ambiguous).toBe(true);
+      expect(data.candidates).toHaveLength(2);
+      expect(data.candidates[0].display_name).toBe("openai prod");
+      expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+      await expect(readFile(join(root, ".env"), "utf8")).rejects.toThrow();
+    });
+
+    it("resolve failure → actionable re-set hint, no write", async () => {
+      vi.mocked(resolveSecret).mockRejectedValue(
+        new Error("resolveSecret failed (500)"),
+      );
+
+      const result = await writeSecret({ alias: "k", filePath: ".env" });
+      const data = parseText(result);
+
+      expect(data.error).toContain("Could not resolve secret");
+      expect(data.error).toContain("re-add");
+      await expect(readFile(join(root, ".env"), "utf8")).rejects.toThrow();
+    });
+
+    it("write failure after resolve → error mentions path but not the value", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+      // Make the target unwritable: create a directory where the file should go.
+      await mkdir(join(root, "isdir"), { recursive: true });
+
+      const result = await writeSecret({ alias: "k", filePath: "isdir" });
+      const data = parseText(result);
+
+      expect(data.error).toContain("failed to write");
+      expect(data.error).toContain("isdir");
+      expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+    });
+
+    it("requires alias", async () => {
+      const result = await writeSecret({ filePath: ".env" });
+      expect(parseText(result).error).toContain("alias is required");
+      expect(resolveSecret).not.toHaveBeenCalled();
+    });
+
+    it("requires filePath", async () => {
+      const result = await writeSecret({ alias: "k" });
+      expect(parseText(result).error).toContain("filePath is required");
+      expect(resolveSecret).not.toHaveBeenCalled();
+    });
+
+    it("rejects an invalid mode", async () => {
+      const result = await writeSecret({ alias: "k", filePath: ".env", mode: "sideways" });
+      expect(parseText(result).error).toContain("Invalid mode");
+      expect(resolveSecret).not.toHaveBeenCalled();
+    });
+
+    it("resolves use-time on every call (latest value, no caching)", async () => {
+      vi.mocked(resolveSecret)
+        .mockResolvedValueOnce({ status: "resolved", value: "old-value" })
+        .mockResolvedValueOnce({ status: "resolved", value: "rotated-value" });
+
+      await writeSecret({ alias: "k", filePath: ".env" });
+      await writeSecret({ alias: "k", filePath: ".env" });
+
+      expect(resolveSecret).toHaveBeenCalledTimes(2);
+      // overwrite mode → file ends up with the latest value.
+      expect(await readFile(join(root, ".env"), "utf8")).toBe("rotated-value");
     });
   });
 });

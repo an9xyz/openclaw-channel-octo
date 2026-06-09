@@ -38,11 +38,131 @@ import {
   deleteVoiceContext,
   getThreadMd,
   updateThreadMd,
+  resolveSecret,
 } from "./api-fetch.js";
 import { broadcastGroupMdUpdate, broadcastThreadMdUpdate } from "./group-md.js";
+import { mkdir, realpath, lstat, open } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { basename, dirname, relative, resolve as resolvePath, sep } from "node:path";
 
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
+
+/**
+ * Placeholder token replaced by the resolved plaintext secret inside the
+ * caller-supplied write template. Using an explicit token keeps the LLM in
+ * control of *how* the secret is laid out in the file (env line, JSON field,
+ * raw value, …) while the plaintext itself only ever materializes inside the
+ * tool, never in the tool's arguments or return value.
+ */
+const SECRET_PLACEHOLDER = "{{secret}}";
+
+/**
+ * Permissions for a freshly created secret file: owner read/write only (0o600).
+ * A file that now holds a plaintext API key must not be world/group readable.
+ */
+const SECRET_FILE_MODE = 0o600;
+
+/**
+ * Confine a caller-supplied write target to an operator-approved jail root.
+ *
+ * 🔴 SECURITY (P0): `filePath` comes from the LLM tool call, which is reachable
+ * via inbound group-chat messages — an untrusted, prompt-injectable surface.
+ * Without confinement, `write-secret` is an arbitrary-file-write of the owner's
+ * plaintext secret (e.g. "append my key to ~/.bashrc" / ".ssh/authorized_keys"
+ * / a web root). We therefore resolve the requested path against a fixed root
+ * (`secretsFileRoot` from config, else the plugin process CWD) and reject
+ * anything that escapes it — including `..` traversal, absolute paths pointing
+ * elsewhere, and symlink escapes (resolved, dangling, or otherwise
+ * unverifiable). The actual write additionally uses O_NOFOLLOW to defeat a
+ * TOCTOU swap between this check and the write.
+ *
+ * Returns the safe absolute path, or an error string describing the rejection
+ * (never echoing secret material — only the caller-typed path).
+ */
+async function confineSecretPath(
+  filePath: string,
+  rootInput: string | undefined,
+): Promise<{ ok: true; abs: string; root: string } | { ok: false; error: string }> {
+  // The jail root: operator config wins; otherwise the plugin's working dir.
+  // Resolve it to an absolute, symlink-free canonical form so containment
+  // checks compare apples to apples.
+  const rootRaw = rootInput && rootInput.trim() ? rootInput.trim() : process.cwd();
+  let root: string;
+  try {
+    root = await realpath(resolvePath(rootRaw));
+  } catch {
+    // Root doesn't exist yet (or isn't reachable): fall back to its lexical
+    // absolute form. We can still enforce containment lexically below.
+    root = resolvePath(rootRaw);
+  }
+
+  // Resolve the requested path against the root. resolvePath collapses any
+  // `..`/`.` segments; an absolute `filePath` replaces the root entirely, which
+  // the containment check below then rejects unless it still lands inside root.
+  const candidate = resolvePath(root, filePath);
+
+  // Lexical containment: candidate must be the root itself or sit strictly
+  // beneath it. This already defeats `..` traversal and absolute-elsewhere.
+  if (candidate !== root && !candidate.startsWith(root + sep)) {
+    return {
+      ok: false,
+      error: `Refusing to write the secret outside the allowed directory. "${filePath}" resolves outside the permitted root. Use a path inside the workspace.`,
+    };
+  }
+
+  // Symlink-escape guard: walk the path one component at a time, from the root
+  // down to the target. At each component that exists on disk:
+  //   • a symlink whose canonical target stays inside the jail → keep walking;
+  //   • a symlink whose canonical target escapes the jail       → reject;
+  //   • a symlink that does NOT resolve (dangling / unverifiable) → reject
+  //     UNCONDITIONALLY. This is the key fix: a dangling symlink inside the jail
+  //     (lstat() succeeds, isSymbolicLink()=true, but realpath() throws ENOENT
+  //     because the target does not exist yet) would otherwise be mistaken for
+  //     "a plain file that will be created here". writeFile() FOLLOWS the link
+  //     and creates the plaintext secret at the link's out-of-jail target. We
+  //     never trust a symlink we cannot prove lands inside the jail.
+  //   • a component that simply does not exist (ENOENT on lstat itself, not a
+  //     symlink) → it and everything below it will be freshly created as plain
+  //     entries inside the already-validated jail, so we can stop walking.
+  const rel = candidate === root ? "" : candidate.slice(root.length + sep.length);
+  const segments = rel ? rel.split(sep) : [];
+  let current = root;
+  for (const seg of segments) {
+    current = `${current}${sep}${seg}`;
+    let st;
+    try {
+      st = await lstat(current);
+    } catch {
+      // This component does not exist. Deeper components don't either; they will
+      // be created as plain files/dirs inside the validated jail. Safe to stop.
+      break;
+    }
+    if (st.isSymbolicLink()) {
+      let real: string;
+      try {
+        real = await realpath(current);
+      } catch {
+        // Dangling or otherwise unverifiable symlink — never trust it.
+        return {
+          ok: false,
+          error: `Refusing to write the secret: "${filePath}" passes through a symlink that cannot be verified to stay inside the allowed directory.`,
+        };
+      }
+      if (real !== root && !real.startsWith(root + sep)) {
+        return {
+          ok: false,
+          error: `Refusing to write the secret: "${filePath}" resolves through a symlink that escapes the allowed directory.`,
+        };
+      }
+      // Symlink stays inside the jail: deeper components are re-checked on the
+      // next iterations (lstat naturally follows this contained intermediate
+      // link), so continue.
+    }
+  }
+
+  return { ok: true, abs: candidate, root };
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -88,7 +208,11 @@ export function createOctoManagementTools(params: {
     description:
       "Manage Octo groups and personal voice correction context: list groups, get group info/members, " +
       "read or update GROUP.md (group-level and thread-level), and manage personal voice correction context. " +
-      "Use this tool for any Octo management operations.",
+      "Use this tool for any Octo management operations. " +
+      "It also handles user-managed secrets (external API keys): when the user asks to write one of THEIR " +
+      "stored keys into a local file, call action 'write-secret' and pass the user's ALIAS for the key " +
+      "(the display name they used, e.g. \"my openai key\"), never a raw secret value. The tool fetches the " +
+      "current value internally and writes it to the file; the plaintext is NEVER returned to you.",
     parameters: {
       type: "object",
       properties: {
@@ -117,6 +241,7 @@ export function createOctoManagementTools(params: {
             "voice-context-read",
             "voice-context-update",
             "voice-context-delete",
+            "write-secret",
           ],
           description: "The management action to perform.",
         },
@@ -174,6 +299,36 @@ export function createOctoManagementTools(params: {
           type: "string",
           description:
             "Required when multiple Octo accounts are configured. Use the exact accountId from the current Octo context; casing is normalized when unambiguous. Omit when only one account is configured.",
+        },
+        alias: {
+          type: "string",
+          description:
+            "For write-secret only. The user's alias for one of THEIR stored secrets — the display name they " +
+            "referred to it by (e.g. \"openai key\"), or a secret_id returned by a previous ambiguous result. " +
+            "🔴 Pass the alias, NEVER a raw secret value: the tool resolves the current plaintext internally.",
+        },
+        filePath: {
+          type: "string",
+          description:
+            "For write-secret only. Path of the local file to write the secret into, relative to the " +
+            "configured workspace root (e.g. \".env\" or \"config/keys.json\"). Choose the path based on the " +
+            "user's instruction. Writes are confined to the workspace root: paths that escape it (via '..', " +
+            "an absolute path elsewhere, or a symlink) are rejected.",
+        },
+        template: {
+          type: "string",
+          description:
+            "For write-secret only. Optional layout for what gets written, with the placeholder " +
+            "'{{secret}}' marking where the resolved value goes (e.g. \"OPENAI_API_KEY={{secret}}\\n\" " +
+            "or '{\"apiKey\":\"{{secret}}\"}'). If omitted, the raw secret value is written verbatim. " +
+            "🔴 Do NOT put the secret value here — only the '{{secret}}' placeholder.",
+        },
+        mode: {
+          type: "string",
+          enum: ["overwrite", "append"],
+          description:
+            "For write-secret only. 'overwrite' (default) replaces the file contents; 'append' adds to the end " +
+            "(useful for adding a line to an existing .env). Omit to overwrite.",
         },
       },
       required: ["action"],
@@ -491,6 +646,46 @@ export function createOctoManagementTools(params: {
           case "voice-context-delete":
             return await handleVoiceContextDelete({ apiUrl, botToken });
 
+          case "write-secret": {
+            const alias = (args.alias as string | undefined)?.trim();
+            if (!alias) {
+              return makeError("alias is required for write-secret");
+            }
+            const filePath = (args.filePath as string | undefined)?.trim();
+            if (!filePath) {
+              return makeError("filePath is required for write-secret");
+            }
+            const template = args.template as string | undefined;
+            // A provided, non-empty template MUST contain the placeholder.
+            // Otherwise we'd silently discard the caller's intended layout and
+            // write the bare secret — surprising, and prone to malformed config
+            // files. Whitespace-only is treated as "omitted" (write raw).
+            if (
+              template !== undefined &&
+              template.trim().length > 0 &&
+              !template.includes(SECRET_PLACEHOLDER)
+            ) {
+              return makeError(
+                `template was provided but does not contain the ${SECRET_PLACEHOLDER} placeholder. Include ${SECRET_PLACEHOLDER} where the secret should go, or omit template to write the raw value.`,
+              );
+            }
+            const rawMode = args.mode as string | undefined;
+            if (rawMode !== undefined && rawMode !== "overwrite" && rawMode !== "append") {
+              return makeError(
+                `Invalid mode "${rawMode}" for write-secret; use "overwrite" or "append"`,
+              );
+            }
+            return await handleWriteSecret({
+              apiUrl,
+              botToken,
+              alias,
+              filePath,
+              template,
+              mode: rawMode === "append" ? "append" : "overwrite",
+              secretsFileRoot: account.config.secretsFileRoot,
+            });
+          }
+
           default:
             return makeError(`Unknown action: ${action}`);
         }
@@ -707,6 +902,163 @@ async function handleVoiceContextDelete(params: {
     botToken: params.botToken,
   });
   return makeSuccess({ deleted: true });
+}
+
+// ---------------------------------------------------------------------------
+// Secret Write Handler
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve a user-managed secret alias and write its current plaintext into a
+ * local file.
+ *
+ * 🔴 RED LINE — plaintext containment (two channels, both closed):
+ *   1. Transcript: the resolved value is read from resolveSecret(), substituted
+ *      into the (optional) caller template, and written to disk. It is consumed
+ *      ENTIRELY inside this function. The ToolResult returned to the LLM
+ *      contains only { written, path, mode, display_name? } on success and
+ *      structured non-plaintext feedback otherwise — never the value, the
+ *      rendered content, or the template-with-secret, so nothing reaches the
+ *      transcript / Octo. (No length field either: a byte count is
+ *      secret-derived metadata, so we omit it.)
+ *   2. Filesystem: `filePath` is attacker-influenceable (the tool is reachable
+ *      from inbound chat). confineSecretPath() jails every write under an
+ *      operator-approved root, rejecting `..`, absolute-elsewhere, and symlink
+ *      escapes (including dangling/unverifiable links) BEFORE the secret is ever
+ *      resolved. The write opens the target with O_NOFOLLOW to close any TOCTOU
+ *      symlink swap, and the file is created 0o600 so a plaintext key is not
+ *      left world/group readable.
+ *
+ * Use-time resolution: resolveSecret is called on every invocation, so the
+ * latest value is always written (owner key rotation takes effect with no
+ * restart and no cache to invalidate).
+ */
+async function handleWriteSecret(params: {
+  apiUrl: string;
+  botToken: string;
+  alias: string;
+  filePath: string;
+  template?: string;
+  mode: "overwrite" | "append";
+  secretsFileRoot?: string;
+}): Promise<ToolResult> {
+  // Confine the destination BEFORE resolving the secret. If the path is unsafe
+  // we never fetch the plaintext at all — minimizing its lifetime.
+  const confined = await confineSecretPath(params.filePath, params.secretsFileRoot);
+  if (!confined.ok) {
+    return makeError(confined.error);
+  }
+  const absPath = confined.abs;
+  const root = confined.root;
+
+  let resolved;
+  try {
+    resolved = await resolveSecret({
+      apiUrl: params.apiUrl,
+      botToken: params.botToken,
+      alias: params.alias,
+    });
+  } catch (err) {
+    // resolve failure (5xx / malformed / transport). Surface a non-plaintext,
+    // actionable hint. The underlying error carries only an HTTP status (the
+    // resolve client deliberately drops response bodies), never a value.
+    return makeError(
+      `Could not resolve secret "${params.alias}". The key service is unavailable or the secret may need to be re-set. Ask the user to re-add the key, then retry. (${
+        err instanceof Error ? err.message : String(err)
+      })`,
+    );
+  }
+
+  // not_found → guide the user to add the secret first. Echo only the alias the
+  // user already typed (not sensitive).
+  if (resolved.status === "not_found") {
+    return makeError(
+      `No stored secret matches "${params.alias}". Ask the user to add this key first (e.g. via the Octo secrets settings), then try again.`,
+    );
+  }
+
+  // ambiguous → hand back ONLY the labels so the LLM can ask the user which one.
+  // 🔴 candidates carry display_name (+ secret_id) only, never the value.
+  if (resolved.status === "ambiguous") {
+    return makeSuccess({
+      written: false,
+      ambiguous: true,
+      message: `Multiple stored secrets match "${params.alias}". Ask the user which one, then retry write-secret with the chosen display_name (or its secret_id).`,
+      candidates: resolved.candidates,
+    });
+  }
+
+  // resolved → substitute into template (or use raw value) and write to disk.
+  // From here the plaintext lives only in local variables and the file. A
+  // provided template without the placeholder was already rejected upstream, so
+  // here `includes` only gates the "template omitted → write raw" case.
+  const content =
+    params.template && params.template.includes(SECRET_PLACEHOLDER)
+      ? params.template.split(SECRET_PLACEHOLDER).join(resolved.value)
+      : resolved.value;
+
+  try {
+    const dir = dirname(absPath);
+    let openTarget = absPath;
+    if (dir && dir !== "." && dir !== absPath) {
+      await mkdir(dir, { recursive: true });
+      // 🔴 TOCTOU close-out for INTERMEDIATE components. O_NOFOLLOW below only
+      // protects the final basename — the kernel still follows any symlink on
+      // the parent path. confineSecretPath() walked the path BEFORE mkdir, when
+      // the parent dirs did not yet exist, so a symlink swapped onto a parent
+      // AFTER mkdir creates it (and before open) would redirect the write out of
+      // the jail. Re-canonicalize the parent now that it is on disk and re-check
+      // containment, then open via the canonical parent + basename so every
+      // component is proven to stay inside the root.
+      const realDir = await realpath(dir);
+      if (realDir !== root && !realDir.startsWith(root + sep)) {
+        return makeError(
+          "Refusing to write the secret: the destination directory escaped the allowed root after creation.",
+        );
+      }
+      openTarget = resolvePath(realDir, basename(absPath));
+    }
+    // 🔴 TOCTOU close-out for the LEAF: confineSecretPath() validated the path,
+    // but between that check and the write an attacker with filesystem access
+    // could swap the target for a symlink. We open the final component with
+    // O_NOFOLLOW so the kernel refuses to follow a symlink AT the target — the
+    // write either lands on the real in-jail file or fails (ELOOP), never on a
+    // redirected target. O_CREAT applies the 0o600 mode atomically on creation.
+    const flags =
+      (params.mode === "append"
+        ? fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_APPEND
+        : fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC) |
+      fsConstants.O_NOFOLLOW;
+    const handle = await open(openTarget, flags, SECRET_FILE_MODE);
+    try {
+      await handle.write(content, null, "utf8");
+      // writeFile/open's `mode` only applies when CREATING the file; a
+      // pre-existing target keeps its old perms. fchmod unconditionally so a
+      // plaintext key is always owner-only (0o600), never world-readable.
+      await handle.chmod(SECRET_FILE_MODE);
+    } finally {
+      await handle.close();
+    }
+  } catch (err) {
+    // A write error message can include the path but never the content. Echo the
+    // jail-relative path only — never the absolute path, which would leak the
+    // operator's jail root into the LLM-visible transcript.
+    return makeError(
+      `Resolved the secret but failed to write it to "${relative(root, absPath)}": ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
+  // 🔴 Success payload is plaintext-free by construction (no value, no rendered
+  // content, no byte length). The path is jail-relative so the absolute jail
+  // root is never disclosed to the LLM / transcript.
+  return makeSuccess({
+    written: true,
+    path: relative(root, absPath),
+    mode: params.mode,
+    ...(resolved.display_name ? { display_name: resolved.display_name } : {}),
+  });
 }
 
 // ---------------------------------------------------------------------------
