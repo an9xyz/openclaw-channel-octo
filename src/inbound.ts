@@ -2566,6 +2566,11 @@ export async function handleInboundMessage(params: {
               channelType: replyChannelType,
               content: "⚠️ 抱歉，处理您的消息时遇到了问题，请稍后重试。",
               ...(effectiveOnBehalfOf ? { onBehalfOf: effectiveOnBehalfOf } : {}),
+              // Same bounded signal as the timeout-path apology: if upstream
+              // signals an error AND the Octo API is also sick, this recovery
+              // sendMessage would otherwise hold the per-group queue until
+              // the outer dispatch timeout kicks in (5min). PR #83 review.
+              signal: AbortSignal.timeout(DISPATCH_TIMEOUT_APOLOGY_MS),
             });
           } catch (sendErr) {
             log?.error?.(`octo: failed to send error message: ${String(sendErr)}`);
@@ -2577,11 +2582,14 @@ export async function handleInboundMessage(params: {
     ]);
   } catch (err) {
     // Timeout: dispatch never returned within DISPATCH_TIMEOUT_MS. Tell the
-    // user, suppress any stale buffered text + any late deliver/onError
-    // callbacks from the still-running upstream dispatch, then rethrow so the
-    // per-group queue's outer .catch() (channel.ts#enqueueInbound) can
-    // advance to the next message (otherwise this group stays stuck forever
-    // — see issue #75).
+    // user, suppress any stale buffered text (so the finally-flush branch
+    // does not double-send), then rethrow so the per-group queue's outer
+    // .catch() (channel.ts#enqueueInbound) can advance to the next message
+    // — otherwise this group stays stuck forever, see issue #75.
+    //
+    // We do NOT gate late deliver/onError callbacks from the still-running
+    // upstream dispatch — that "ghost reply" suppression is intentionally
+    // out of scope for #75 (see scope-note comment above timeoutError).
     if (err === timeoutError) {
       clearInterval(typingInterval);
       log?.warn?.(
