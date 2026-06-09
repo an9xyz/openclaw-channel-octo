@@ -1611,6 +1611,19 @@ describe("createOctoManagementTools", () => {
       await expect(readFile(join(root, ".env"), "utf8")).rejects.toThrow();
     });
 
+    it("rate_limited → back-off hint, no body in the error, no write", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "rate_limited" });
+
+      const result = await writeSecret({ alias: "openai key", filePath: ".env" });
+      const data = parseText(result);
+
+      expect(data.error).toMatch(/rate limited|busy/i);
+      expect(data.error).toContain("openai key");
+      // 🔴 The 429 path reads no body, so nothing server-controlled leaks here.
+      expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+      await expect(readFile(join(root, ".env"), "utf8")).rejects.toThrow();
+    });
+
     it("resolve failure → actionable re-set hint, no write", async () => {
       vi.mocked(resolveSecret).mockRejectedValue(
         new Error("resolveSecret failed (500)"),

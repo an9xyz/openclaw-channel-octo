@@ -977,6 +977,15 @@ async function handleWriteSecret(params: {
     );
   }
 
+  // rate_limited → the resolve endpoint's per-IP limiter rejected the call.
+  // Surface a transient, actionable hint. 🔴 No body is read on a 429, so this
+  // message carries no server-controlled string — only a fixed back-off prompt.
+  if (resolved.status === "rate_limited") {
+    return makeError(
+      `The key service is busy right now (rate limited). Wait a moment and retry write-secret for "${params.alias}".`,
+    );
+  }
+
   // ambiguous → hand back ONLY the labels so the LLM can ask the user which one.
   // 🔴 candidates carry display_name (+ secret_id) only, never the value.
   if (resolved.status === "ambiguous") {
