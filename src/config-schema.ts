@@ -14,7 +14,6 @@ export interface OctoAccountConfig {
   historyLimit?: number;  // 群聊历史消息条数限制（默认20）
   historyPromptTemplate?: string;  // Template for group history context injection
   onBehalfOf?: string;  // Persona clone: grantor uid — bot acts on behalf of this human
-  secretsFileRoot?: string;  // Jail root for write-secret: secret files may only be written under this absolute path (defaults to the plugin process CWD)
 }
 
 export interface OctoConfig {
@@ -31,7 +30,6 @@ export interface OctoConfig {
   historyLimit?: number;  // 群聊历史消息条数限制（默认20）
   historyPromptTemplate?: string;  // Template for group history context injection
   onBehalfOf?: string;  // Persona clone: grantor uid — bot acts on behalf of this human
-  secretsFileRoot?: string;  // Jail root for write-secret (see OctoAccountConfig)
   accounts?: Record<string, OctoAccountConfig | undefined>;
 }
 
@@ -57,7 +55,6 @@ export const OctoConfigJsonSchema = {
       historyLimit: { type: "number", minimum: 1, maximum: 100 },
       historyPromptTemplate: { type: "string" },
       onBehalfOf: { type: "string" },
-      secretsFileRoot: { type: "string" },
       accounts: {
         type: "object",
         additionalProperties: {
@@ -76,7 +73,6 @@ export const OctoConfigJsonSchema = {
             historyLimit: { type: "number", minimum: 1, maximum: 100 },
             historyPromptTemplate: { type: "string" },
             onBehalfOf: { type: "string" },
-            secretsFileRoot: { type: "string" },
           },
         },
       },

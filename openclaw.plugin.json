@@ -123,10 +123,6 @@
                 "onBehalfOf": {
                   "type": "string",
                   "description": "Persona clone: grantor uid — bot acts on behalf of this human"
-                },
-                "secretsFileRoot": {
-                  "type": "string",
-                  "description": "Jail root for write-secret: secret files may only be written under this path (defaults to the plugin process working directory)"
                 }
               }
             }
@@ -134,10 +130,6 @@
           "onBehalfOf": {
             "type": "string",
             "description": "Persona clone: grantor uid — bot acts on behalf of this human"
-          },
-          "secretsFileRoot": {
-            "type": "string",
-            "description": "Jail root for write-secret: secret files may only be written under this path (defaults to the plugin process working directory)"
           }
         }
       }
