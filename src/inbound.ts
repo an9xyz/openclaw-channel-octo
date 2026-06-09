@@ -30,6 +30,38 @@ import { mkdir, unlink, readdir, stat } from "node:fs/promises";
 import { join, basename } from "node:path";
 import { randomUUID } from "node:crypto";
 
+// Per-inbound dispatch timeout (issue #75). The upstream OpenClaw runtime call
+// `core.channel.reply.dispatchReplyWithBufferedBlockDispatcher` is observed to
+// occasionally hang indefinitely (no resolve, no reject, no onError) — likely
+// in agent/runtime layers, not in this plugin. Combined with the per-group
+// serial inbound queue (`enqueueInbound` in channel.ts), a single hang locks
+// the entire group: no further messages get processed until the gateway
+// restarts. This wrapper turns "silent permanent block" into "single-message
+// timeout with a warn log + user-facing apology + queue advances".
+//
+// 5 minutes is intentionally generous — longer than any normal LLM round-trip,
+// short enough that a stuck group recovers within one user attention span.
+// Tests override via `_setDispatchTimeoutForTests` to keep the suite fast.
+const DISPATCH_TIMEOUT_DEFAULT_MS = 5 * 60 * 1000;
+let DISPATCH_TIMEOUT_MS = DISPATCH_TIMEOUT_DEFAULT_MS;
+// How long we wait for the user-facing "处理超时" apology to post, AND for the
+// happy-path buffered-text final flush, before giving up. The whole point of
+// issue #75 is that an Octo API call can hang; these recovery/flush calls hit
+// the same Octo API, so they MUST themselves be bounded or
+// `handleInboundMessage` is still vulnerable to the same hang. 10s is long
+// enough for a healthy API round-trip and short enough that a sick API
+// releases the per-group queue promptly.
+const DISPATCH_TIMEOUT_APOLOGY_DEFAULT_MS = 10_000;
+let DISPATCH_TIMEOUT_APOLOGY_MS = DISPATCH_TIMEOUT_APOLOGY_DEFAULT_MS;
+
+export function _setDispatchTimeoutForTests(ms: number | null): void {
+  DISPATCH_TIMEOUT_MS = ms === null ? DISPATCH_TIMEOUT_DEFAULT_MS : ms;
+}
+
+export function _setDispatchApologyTimeoutForTests(ms: number | null): void {
+  DISPATCH_TIMEOUT_APOLOGY_MS = ms === null ? DISPATCH_TIMEOUT_APOLOGY_DEFAULT_MS : ms;
+}
+
 // Pending inbound context for before_prompt_build hook injection.
 // handleInboundMessage writes here; the hook reads and clears per sessionKey.
 export const pendingInboundContext = new Map<string, { historyPrefix: string; memberListPrefix: string }>();
@@ -2319,7 +2351,7 @@ export async function handleInboundMessage(params: {
   const sentMediaUrls = new Set<string>();
 
   // --- Shared helper: resolve mentions and send text ---
-  const resolveAndSendText = async (content: string): Promise<SendMessageResult | undefined> => {
+  const resolveAndSendText = async (content: string, signal?: AbortSignal): Promise<SendMessageResult | undefined> => {
     let replyMentionUids: string[] = [];
     let replyMentionEntities: MentionEntity[] = [];
     let finalContent = content;
@@ -2427,6 +2459,7 @@ export async function handleInboundMessage(params: {
       ...(replyMentionEntities.length > 0 ? { mentionEntities: replyMentionEntities } : {}),
       mentionAll: hasAtAll || undefined,
       ...(effectiveOnBehalfOf ? { onBehalfOf: effectiveOnBehalfOf } : {}),
+      ...(signal ? { signal } : {}),
     });
     statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
     return result;
@@ -2434,8 +2467,34 @@ export async function handleInboundMessage(params: {
 
   let replySucceeded = false;
 
+  // Timeout guard: see DISPATCH_TIMEOUT_MS at top of file. Without this, an
+  // upstream dispatch hang would leave the per-group queue's Promise chain
+  // unresolved forever — see issue #75.
+  //
+  // Scope note: we intentionally do NOT try to cancel an already-in-flight
+  // dispatch or gate late deliver/onError callbacks from a "woken up" old
+  // dispatch. Those are second-order consistency concerns, not the reported
+  // symptom (silent permanent stuck). If a hung dispatch resumes after our
+  // timeout, the worst outcome is a delayed real reply arriving after the
+  // "处理超时" apology — annoying, not broken. Adding cancel/gate semantics
+  // is tracked separately and intentionally kept out of this issue.
+  //
+  // timeoutError: a per-invocation Error so the outer catch identifies "this
+  // is OUR timeout" by reference equality, never by string comparison —
+  // protects against a same-text upstream error being misclassified.
+  let dispatchTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const timeoutError = new Error(
+    `octo: dispatch timed out after ${DISPATCH_TIMEOUT_MS}ms`,
+  );
+  const dispatchTimeoutPromise = new Promise<never>((_, reject) => {
+    dispatchTimeoutHandle = setTimeout(() => {
+      reject(timeoutError);
+    }, DISPATCH_TIMEOUT_MS);
+  });
+
   try {
-    await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
+    await Promise.race([
+      core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
       ctx: ctxPayload,
       cfg: config,
       replyOptions: {},
@@ -2507,14 +2566,57 @@ export async function handleInboundMessage(params: {
               channelType: replyChannelType,
               content: "⚠️ 抱歉，处理您的消息时遇到了问题，请稍后重试。",
               ...(effectiveOnBehalfOf ? { onBehalfOf: effectiveOnBehalfOf } : {}),
+              // Same bounded signal as the timeout-path apology: if upstream
+              // signals an error AND the Octo API is also sick, this recovery
+              // sendMessage would otherwise hold the per-group queue until
+              // the outer dispatch timeout kicks in (5min). PR #83 review.
+              signal: AbortSignal.timeout(DISPATCH_TIMEOUT_APOLOGY_MS),
             });
           } catch (sendErr) {
             log?.error?.(`octo: failed to send error message: ${String(sendErr)}`);
           }
         },
       },
-    });
+      }),
+      dispatchTimeoutPromise,
+    ]);
+  } catch (err) {
+    // Timeout: dispatch never returned within DISPATCH_TIMEOUT_MS. Tell the
+    // user, suppress any stale buffered text (so the finally-flush branch
+    // does not double-send), then rethrow so the per-group queue's outer
+    // .catch() (channel.ts#enqueueInbound) can advance to the next message
+    // — otherwise this group stays stuck forever, see issue #75.
+    //
+    // We do NOT gate late deliver/onError callbacks from the still-running
+    // upstream dispatch — that "ghost reply" suppression is intentionally
+    // out of scope for #75 (see scope-note comment above timeoutError).
+    if (err === timeoutError) {
+      clearInterval(typingInterval);
+      log?.warn?.(
+        `octo: dispatch hung past ${DISPATCH_TIMEOUT_MS}ms, aborting to unblock per-group queue (session=${route?.sessionKey ?? "?"})`,
+      );
+      deliverBuffer.lastText = null;
+      deliverBuffer.textSent = true;
+      try {
+        // The apology call itself MUST be bounded — otherwise a sick Octo API
+        // hangs this sendMessage too, defeating the whole timeout fix. See
+        // DISPATCH_TIMEOUT_APOLOGY_MS above.
+        await sendMessage({
+          apiUrl,
+          botToken,
+          channelId: replyChannelId,
+          channelType: replyChannelType,
+          content: "⚠️ 处理超时，请稍后重试。",
+          ...(effectiveOnBehalfOf ? { onBehalfOf: effectiveOnBehalfOf } : {}),
+          signal: AbortSignal.timeout(DISPATCH_TIMEOUT_APOLOGY_MS),
+        });
+      } catch (sendErr) {
+        log?.error?.(`octo: failed to send timeout message: ${String(sendErr)}`);
+      }
+    }
+    throw err;
   } finally {
+    if (dispatchTimeoutHandle) clearTimeout(dispatchTimeoutHandle);
     // --- Debug: log dispatch outcome ---
     log?.debug?.(`octo: [dispatch-result] replySucceeded=${replySucceeded} bufferedText=${deliverBuffer.lastText?.length ?? 0} textSent=${deliverBuffer.textSent} effectiveOBO=${effectiveOnBehalfOf ?? 'none'}`);
 
@@ -2522,7 +2624,14 @@ export async function handleInboundMessage(params: {
     if (deliverBuffer.lastText && !deliverBuffer.textSent) {
       deliverBuffer.textSent = true;
       try {
-        await resolveAndSendText(deliverBuffer.lastText);
+        // Bounded signal so a sick Octo API can't strand the per-group queue
+        // on the happy path either — dispatch may have completed normally
+        // but if the final POST hangs, handleInboundMessage would never
+        // settle. See DISPATCH_TIMEOUT_APOLOGY_MS comment at top of file.
+        await resolveAndSendText(
+          deliverBuffer.lastText,
+          AbortSignal.timeout(DISPATCH_TIMEOUT_APOLOGY_MS),
+        );
         replySucceeded = true;
         log?.info?.(`octo: [deliver-buffer] fallback text sent (${deliverBuffer.lastText.length} chars)`);
       } catch (finalSendErr) {
