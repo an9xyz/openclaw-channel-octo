@@ -43,7 +43,14 @@ import {
 import { broadcastGroupMdUpdate, broadcastThreadMdUpdate } from "./group-md.js";
 import { mkdir, realpath, lstat, open } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
-import { basename, dirname, relative, resolve as resolvePath, sep } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  relative,
+  resolve as resolvePath,
+  sep,
+} from "node:path";
 
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
@@ -64,18 +71,52 @@ const SECRET_PLACEHOLDER = "{{secret}}";
 const SECRET_FILE_MODE = 0o600;
 
 /**
+ * Containment test: is `candidate` the jail `root` itself or a path strictly
+ * beneath it?
+ *
+ * We use `path.relative(root, candidate)` rather than string-prefix matching on
+ * `root + sep`. The prefix form has two failure modes that BOTH bit us in
+ * production:
+ *   • `root === "/"` makes `root + sep === "//"`, so `candidate.startsWith("//")`
+ *     is false for every real path → the jail rejects everything (self-lock).
+ *   • Patching that special-case the other way (treating `/` as "always inside")
+ *     turns the jail into a no-op fail-open.
+ * `path.relative` has neither pathology: the candidate is inside the root iff
+ * the relative path is empty (candidate === root), does not start with `..`
+ * (would climb out), and is not itself absolute (different root / drive on
+ * Windows). The same predicate is reused at every containment site (lexical
+ * check, symlink walk, post-mkdir re-check) so they cannot drift apart.
+ */
+function isInsideRoot(root: string, candidate: string): boolean {
+  if (candidate === root) return true;
+  const rel = relative(root, candidate);
+  return rel !== "" && !rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel);
+}
+
+/**
  * Confine a caller-supplied write target to an operator-approved jail root.
  *
  * 🔴 SECURITY (P0): `filePath` comes from the LLM tool call, which is reachable
  * via inbound group-chat messages — an untrusted, prompt-injectable surface.
  * Without confinement, `write-secret` is an arbitrary-file-write of the owner's
  * plaintext secret (e.g. "append my key to ~/.bashrc" / ".ssh/authorized_keys"
- * / a web root). We therefore resolve the requested path against a fixed root
- * (`secretsFileRoot` from config, else the plugin process CWD) and reject
- * anything that escapes it — including `..` traversal, absolute paths pointing
- * elsewhere, and symlink escapes (resolved, dangling, or otherwise
- * unverifiable). The actual write additionally uses O_NOFOLLOW to defeat a
- * TOCTOU swap between this check and the write.
+ * / a web root). The OWNER may have triggered the conversation, but the caller
+ * that actually picks `filePath`/`template` is a prompt-injectable LLM driven by
+ * arbitrary group-chat members, so OS-level "owner can write anyway" reasoning
+ * does NOT make the jail redundant — it is the only boundary between an injected
+ * instruction and an arbitrary owner-writable file.
+ *
+ * 🔴 FAIL-CLOSED: the jail root comes ONLY from `secretsFileRoot` config. There
+ * is deliberately NO fallback to `process.cwd()`: a CWD of `/` is exactly what
+ * produced the historical self-lock and fail-open bugs, and silently writing
+ * owner secrets under whatever directory the process happens to run in is itself
+ * unsafe. If the operator has not configured a root, we refuse the write
+ * outright rather than guess one.
+ *
+ * When a root IS configured, we reject anything that escapes it — `..`
+ * traversal, absolute paths pointing elsewhere, and symlink escapes (resolved,
+ * dangling, or otherwise unverifiable). The actual write additionally uses
+ * O_NOFOLLOW to defeat a TOCTOU swap between this check and the write.
  *
  * Returns the safe absolute path, or an error string describing the rejection
  * (never echoing secret material — only the caller-typed path).
@@ -84,10 +125,19 @@ async function confineSecretPath(
   filePath: string,
   rootInput: string | undefined,
 ): Promise<{ ok: true; abs: string; root: string } | { ok: false; error: string }> {
-  // The jail root: operator config wins; otherwise the plugin's working dir.
-  // Resolve it to an absolute, symlink-free canonical form so containment
-  // checks compare apples to apples.
-  const rootRaw = rootInput && rootInput.trim() ? rootInput.trim() : process.cwd();
+  // 🔴 FAIL-CLOSED: no operator-configured root → refuse. Never fall back to
+  // process.cwd() (the source of the `/`-degenerate self-lock + fail-open bugs).
+  const rootRaw = rootInput?.trim();
+  if (!rootRaw) {
+    return {
+      ok: false,
+      error:
+        "write-secret is not configured: the operator must explicitly set secretsFileRoot (the directory secrets may be written under) before this action can be used.",
+    };
+  }
+
+  // Resolve the configured root to an absolute, symlink-free canonical form so
+  // containment checks compare apples to apples.
   let root: string;
   try {
     root = await realpath(resolvePath(rootRaw));
@@ -102,9 +152,10 @@ async function confineSecretPath(
   // the containment check below then rejects unless it still lands inside root.
   const candidate = resolvePath(root, filePath);
 
-  // Lexical containment: candidate must be the root itself or sit strictly
-  // beneath it. This already defeats `..` traversal and absolute-elsewhere.
-  if (candidate !== root && !candidate.startsWith(root + sep)) {
+  // Lexical containment (path.relative form): candidate must be the root itself
+  // or sit strictly beneath it. This defeats `..` traversal and
+  // absolute-elsewhere without the `root + sep` self-lock/fail-open pitfalls.
+  if (!isInsideRoot(root, candidate)) {
     return {
       ok: false,
       error: `Refusing to write the secret outside the allowed directory. "${filePath}" resolves outside the permitted root. Use a path inside the workspace.`,
@@ -125,7 +176,7 @@ async function confineSecretPath(
   //   • a component that simply does not exist (ENOENT on lstat itself, not a
   //     symlink) → it and everything below it will be freshly created as plain
   //     entries inside the already-validated jail, so we can stop walking.
-  const rel = candidate === root ? "" : candidate.slice(root.length + sep.length);
+  const rel = candidate === root ? "" : relative(root, candidate);
   const segments = rel ? rel.split(sep) : [];
   let current = root;
   for (const seg of segments) {
@@ -149,7 +200,7 @@ async function confineSecretPath(
           error: `Refusing to write the secret: "${filePath}" passes through a symlink that cannot be verified to stay inside the allowed directory.`,
         };
       }
-      if (real !== root && !real.startsWith(root + sep)) {
+      if (!isInsideRoot(root, real)) {
         return {
           ok: false,
           error: `Refusing to write the secret: "${filePath}" resolves through a symlink that escapes the allowed directory.`,
@@ -1011,7 +1062,7 @@ async function handleWriteSecret(params: {
       // containment, then open via the canonical parent + basename so every
       // component is proven to stay inside the root.
       const realDir = await realpath(dir);
-      if (realDir !== root && !realDir.startsWith(root + sep)) {
+      if (!isInsideRoot(root, realDir)) {
         return makeError(
           "Refusing to write the secret: the destination directory escaped the allowed root after creation.",
         );

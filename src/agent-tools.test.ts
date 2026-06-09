@@ -72,7 +72,7 @@ import {
   writeFile as fsWriteFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 
 // Minimal config stub — mocked account functions don't inspect it
 const mockCfg = { channels: { octo: { botToken: "tok-secret" } } } as any;
@@ -1570,13 +1570,52 @@ describe("createOctoManagementTools", () => {
       expect(await readFile(join(root, "atroot.txt"), "utf8")).toBe(PLAINTEXT);
     });
 
-    it("defaults the jail root to process.cwd() when secretsFileRoot is unset", async () => {
-      // No secretsFileRoot configured → CWD is the root. A path that escapes
-      // CWD must still be rejected.
+    // 🔴 FAIL-CLOSED (P0): no secretsFileRoot configured → refuse every write.
+    // There is deliberately NO process.cwd() fallback (that fallback was the
+    // root cause of the `/`-degenerate self-lock + fail-open bugs).
+    it("fails closed when secretsFileRoot is unset — no resolve, no write", async () => {
       setupMocks(); // no secretsFileRoot
-      const result = await writeSecret({ alias: "k", filePath: "../../../../etc/passwd" });
-      expect(parseText(result).error).toMatch(/outside the allowed directory/i);
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+      const result = await writeSecret({ alias: "k", filePath: "key.txt" });
+      const data = parseText(result);
+      // Explicit, operator-actionable message about the missing config.
+      expect(data.error).toMatch(/not configured/i);
+      expect(data.error).toMatch(/secretsFileRoot/);
+      // Plaintext is never fetched and never leaks into the error.
       expect(resolveSecret).not.toHaveBeenCalled();
+      expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+    });
+
+    it("fails closed for ANY filePath when secretsFileRoot is unset (even a plain name)", async () => {
+      setupMocks(); // no secretsFileRoot
+      for (const filePath of [".env", "secrets/.env", "/etc/passwd", "../x"]) {
+        const result = await writeSecret({ alias: "k", filePath });
+        expect(parseText(result).error).toMatch(/not configured/i);
+      }
+      expect(resolveSecret).not.toHaveBeenCalled();
+    });
+
+    // 🔴 REGRESSION: the old `root + sep` containment self-locked when root="/"
+    // (`//` prefix matched nothing → reject everything) and a later patch made
+    // root="/" fail-open. The path.relative containment has neither pathology.
+    // The fail-closed default means a degenerate root="/" can never arise from
+    // an unset config, but an operator could still set it explicitly, so pin the
+    // behavior: a path inside "/" is contained, an absolute-elsewhere is not
+    // (here everything is under "/", so it is accepted — the point is the jail
+    // does NOT self-lock and does NOT crash).
+    it("does not self-lock when secretsFileRoot is explicitly '/'", async () => {
+      setupMocks({ secretsFileRoot: "/" });
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+      const target = join(root, "explicit-root-slash.txt");
+      // Use the real temp path (which is under "/") as the relative target so we
+      // do not actually write to a sensitive location.
+      const rel = relative("/", target);
+      const result = await writeSecret({ alias: "k", filePath: rel });
+      const data = parseText(result);
+      expect(data.written).toBe(true);
+      expect(await readFile(target, "utf8")).toBe(PLAINTEXT);
+      // jail-relative path never leaks the absolute root layout.
+      expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
     });
 
     it("not_found → guides the user to add the key, no plaintext, no write", async () => {
