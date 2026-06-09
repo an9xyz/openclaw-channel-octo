@@ -1579,6 +1579,83 @@ describe("createOctoManagementTools", () => {
       expect(resolveSecret).not.toHaveBeenCalled();
     });
 
+    // 🔴 P0 REGRESSION — jail root="/" self-lock. In Docker / prod the gateway
+    // CWD is frequently "/". The old `root + sep` containment degenerated to a
+    // "//" prefix that NO normal absolute path matches, so EVERY write was
+    // rejected with "resolves outside the permitted root" even for legitimate
+    // in-jail targets. These cases lock in that root="/" behaves like any other
+    // jail: in-jail paths are accepted, out-of-jail is impossible (everything is
+    // under "/"), and traversal that climbs above "/" still normalizes to "/".
+    describe("jail root = '/' (containment must not self-lock)", () => {
+      it("accepts a legitimate in-jail absolute path when root is '/'", async () => {
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        // root="/" → the candidate sits under it. We must NOT actually write to
+        // the real /tmp during the unit test, so stub fs writes and assert the
+        // confinement check (the thing this bug was about) passes: resolveSecret
+        // runs only AFTER confinement succeeds.
+        setupMocks({ secretsFileRoot: "/" });
+        const target = join(root, "in-jail-secret.env");
+        const result = await writeSecret({ alias: "k", filePath: target });
+        const data = parseText(result);
+        // Confinement passed → it proceeded to resolve + write the secret.
+        expect(data.written).toBe(true);
+        expect(resolveSecret).toHaveBeenCalled();
+        // path is reported jail-relative to "/", i.e. without the leading slash.
+        expect(data.path).toBe(target.replace(/^\//, ""));
+        expect(await readFile(target, "utf8")).toBe(PLAINTEXT);
+        await rm(target, { force: true });
+      });
+
+      it("accepts a relative in-jail path when root is '/'", async () => {
+        // A relative filePath resolves against root="/"; e.g. "tmp/..." lands at
+        // "/tmp/...". Reuse the per-test temp dir (which lives under /tmp) and
+        // pass it as a root-relative path (no leading slash).
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        setupMocks({ secretsFileRoot: "/" });
+        const rel = root.replace(/^\//, "") + "/rel-secret.env";
+        const result = await writeSecret({ alias: "k", filePath: rel });
+        const data = parseText(result);
+        expect(data.written).toBe(true);
+        expect(data.path).toBe(rel);
+        expect(await readFile(join("/", rel), "utf8")).toBe(PLAINTEXT);
+        await rm(join("/", rel), { force: true });
+      });
+
+      it("normalizes traversal above '/' back to '/' (cannot escape the FS root)", async () => {
+        // Climbing past the filesystem root is meaningless: "/../../etc" → "/etc".
+        // It stays in-jail (everything is under "/"), so confinement accepts it.
+        // We don't actually write to /etc — point at our temp dir via excess "..".
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        setupMocks({ secretsFileRoot: "/" });
+        const target = join(root, "climb.env");
+        const result = await writeSecret({
+          alias: "k",
+          filePath: "../../../../../.." + target,
+        });
+        const data = parseText(result);
+        expect(data.written).toBe(true);
+        expect(await readFile(target, "utf8")).toBe(PLAINTEXT);
+        await rm(target, { force: true });
+      });
+
+      it("still enforces the symlink guard even when root is '/'", async () => {
+        // The symlink walk must keep working with root="/" — the prefix-bug fix
+        // must not weaken it. Build a leaf symlink pointing at a not-yet-existing
+        // target: the realpath walk can't verify it stays in-jail (dangling), so
+        // it is rejected UNCONDITIONALLY, exactly as at any other root. This
+        // proves the symlink defenses survive the root="/" containment change.
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        setupMocks({ secretsFileRoot: "/" });
+        const realTarget = join(root, "real.env"); // never created → dangling
+        const linkPath = join(root, "link.env");
+        await symlink(realTarget, linkPath, "file");
+        const result = await writeSecret({ alias: "k", filePath: linkPath });
+        expect(parseText(result).error).toMatch(/symlink|outside the allowed/i);
+        expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+        await rm(linkPath, { force: true });
+      });
+    });
+
     it("not_found → guides the user to add the key, no plaintext, no write", async () => {
       vi.mocked(resolveSecret).mockResolvedValue({ status: "not_found" });
 

@@ -43,7 +43,14 @@ import {
 import { broadcastGroupMdUpdate, broadcastThreadMdUpdate } from "./group-md.js";
 import { mkdir, realpath, lstat, open } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
-import { basename, dirname, relative, resolve as resolvePath, sep } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  relative,
+  resolve as resolvePath,
+  sep,
+} from "node:path";
 
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
@@ -62,6 +69,29 @@ const SECRET_PLACEHOLDER = "{{secret}}";
  * A file that now holds a plaintext API key must not be world/group readable.
  */
 const SECRET_FILE_MODE = 0o600;
+
+/**
+ * True when `candidate` is the jail `root` itself or sits strictly beneath it.
+ *
+ * 🔴 Containment is computed with `path.relative` rather than a `root + sep`
+ * string prefix. The prefix form silently degenerates when `root` is the
+ * filesystem root (`/`): `root + sep` becomes `//`, so NO normal absolute path
+ * (`/home`, `/tmp`, …) `startsWith("//")`, and `candidate !== "/"` is always
+ * true — the jail rejects every path and `write-secret` self-locks. In Docker /
+ * production the gateway CWD is often `/`, so any deployment without an explicit
+ * `secretsFileRoot` hits this. `path.relative` has no such edge case:
+ *   • candidate === root          → "" (relative path to itself) → inside
+ *   • candidate beneath root      → e.g. "a/b", never absolute / never "../…"
+ *   • candidate outside root      → starts with ".." or is absolute → outside
+ * This single predicate replaces all three former `root + sep` checks.
+ */
+function isInsideRoot(root: string, candidate: string): boolean {
+  if (candidate === root) return true;
+  const rel = relative(root, candidate);
+  // Empty rel means same path; a rel that is absolute or climbs out via ".."
+  // escapes the jail. Everything else descends into it.
+  return rel !== "" && !rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel);
+}
 
 /**
  * Confine a caller-supplied write target to an operator-approved jail root.
@@ -104,7 +134,9 @@ async function confineSecretPath(
 
   // Lexical containment: candidate must be the root itself or sit strictly
   // beneath it. This already defeats `..` traversal and absolute-elsewhere.
-  if (candidate !== root && !candidate.startsWith(root + sep)) {
+  // isInsideRoot() uses path.relative so a root of "/" is handled correctly
+  // (the old `root + sep` prefix degenerated to "//" and rejected everything).
+  if (!isInsideRoot(root, candidate)) {
     return {
       ok: false,
       error: `Refusing to write the secret outside the allowed directory. "${filePath}" resolves outside the permitted root. Use a path inside the workspace.`,
@@ -125,11 +157,17 @@ async function confineSecretPath(
   //   • a component that simply does not exist (ENOENT on lstat itself, not a
   //     symlink) → it and everything below it will be freshly created as plain
   //     entries inside the already-validated jail, so we can stop walking.
-  const rel = candidate === root ? "" : candidate.slice(root.length + sep.length);
+  // Use path.relative so a root of "/" yields the right segment list. The old
+  // `candidate.slice(root.length + sep.length)` over-sliced by one char when
+  // root === "/" (root.length=1 + sep.length=1 = 2, but "/" + "home" only has
+  // one separator), corrupting the walk. relative() is root-length-agnostic.
+  const rel = candidate === root ? "" : relative(root, candidate);
   const segments = rel ? rel.split(sep) : [];
   let current = root;
   for (const seg of segments) {
-    current = `${current}${sep}${seg}`;
+    // resolvePath joins cleanly even when root === "/" (avoids a "//seg" double
+    // separator that a literal `${current}${sep}${seg}` would produce there).
+    current = resolvePath(current, seg);
     let st;
     try {
       st = await lstat(current);
@@ -149,7 +187,7 @@ async function confineSecretPath(
           error: `Refusing to write the secret: "${filePath}" passes through a symlink that cannot be verified to stay inside the allowed directory.`,
         };
       }
-      if (real !== root && !real.startsWith(root + sep)) {
+      if (!isInsideRoot(root, real)) {
         return {
           ok: false,
           error: `Refusing to write the secret: "${filePath}" resolves through a symlink that escapes the allowed directory.`,
@@ -1011,7 +1049,7 @@ async function handleWriteSecret(params: {
       // containment, then open via the canonical parent + basename so every
       // component is proven to stay inside the root.
       const realDir = await realpath(dir);
-      if (realDir !== root && !realDir.startsWith(root + sep)) {
+      if (!isInsideRoot(root, realDir)) {
         return makeError(
           "Refusing to write the secret: the destination directory escaped the allowed root after creation.",
         );
