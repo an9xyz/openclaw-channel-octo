@@ -250,8 +250,12 @@ jobs:
             $DRY \
             octo-*.tgz
 
-      - name: publish GitHub Release (upload tarball, or create if missing)
-        if: github.event_name == 'push' && needs.verify.outputs.dry_run != 'true'
+      - name: publish GitHub Release (upload tarball, sync notes from CHANGELOG.md)
+        # `always()` so we still upload the tarball and sync notes even when
+        # `publish to ClawHub` above times out — that step has known server-side
+        # response issues where the package lands but the HTTP response hangs,
+        # and we don't want a ClawHub timeout to also strand the Release.
+        if: always() && github.event_name == 'push' && needs.verify.outputs.dry_run != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
@@ -263,15 +267,14 @@ jobs:
             echo "[publish] uploading tarball to existing release $TAG (created by release-please)"
             gh release upload "$TAG" octo-*.tgz --clobber
 
-            # Backfill release notes if the existing release body is empty.
-            # release-please normally populates the body from generated changelog,
-            # but a configuration hiccup (all commits hidden, generator error, etc.)
-            # can leave it empty — in which case ship the CHANGELOG.md section.
-            EXISTING_BODY=$(gh release view "$TAG" --json body --jq '.body // ""')
-            if [ -z "$EXISTING_BODY" ]; then
-              echo "[publish] existing release body is empty — backfilling from CHANGELOG.md"
-              gh release edit "$TAG" --notes-file /tmp/notes.md
-            fi
+            # Always overwrite the release body with our CHANGELOG.md section.
+            # release-please auto-generates a one-line-per-commit body that
+            # does not match the project's prose style (现象/根因/修复/兼容性).
+            # We rewrite CHANGELOG.md on the release-please PR before merging,
+            # and the release body should mirror that — every release, not
+            # just when the body happens to be empty.
+            echo "[publish] overwriting release body with CHANGELOG.md section"
+            gh release edit "$TAG" --notes-file /tmp/notes.md
 
             # If the existing release is a draft (left over from prior failed run
             # or future release-please config drift), flip to published. Without
