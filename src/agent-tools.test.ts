@@ -71,7 +71,7 @@ import {
   symlink,
   writeFile as fsWriteFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join, relative } from "node:path";
 
 // Minimal config stub — mocked account functions don't inspect it
@@ -1724,9 +1724,10 @@ describe("createOctoManagementTools", () => {
       const executeWithAgents = (
         agents: unknown,
         agentAccountId: string | undefined,
+        agentId?: string,
       ) => {
         const cfg = { ...mockCfg, agents } as any;
-        const tools = createOctoManagementTools({ cfg, agentAccountId });
+        const tools = createOctoManagementTools({ cfg, agentAccountId, agentId });
         expect(tools).toHaveLength(1);
         return (args: Record<string, unknown>) =>
           (tools[0].execute as any)("tc", { action: "write-secret", ...args });
@@ -1865,6 +1866,175 @@ describe("createOctoManagementTools", () => {
         const result = await exec({ alias: "k", filePath: "key.env" });
         expect(parseText(result).error).toMatch(/not configured/i);
         expect(resolveSecret).not.toHaveBeenCalled();
+      });
+
+      // 🔴 BLOCKING REGRESSION (Jerry-Xin) — symlink-to-`/` fail-open.
+      // The old guard checked the LEXICAL form (`resolvePath(workspace) === sep`),
+      // so a workspace configured as a symlink whose REAL target is "/" slipped
+      // past it (the lexical path is the link, ≠ "/") and only degenerated into a
+      // root-wide jail later inside confineSecretPath's realpath(). The fix moves
+      // the degenerate-root check to AFTER realpath canonicalization, so a
+      // workspace that resolves to "/" now fails closed here.
+      it("fails closed when the agent workspace is a symlink to '/' (realpath-after-canon)", async () => {
+        setupMocks();
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const linkToRoot = join(root, "ws-root-link");
+        await symlink("/", linkToRoot, "dir");
+        // Sanity: lexically the workspace is NOT "/", so the old guard would pass it.
+        expect(linkToRoot).not.toBe("/");
+
+        const exec = executeWithAgents(
+          { list: [{ id: "bot-A", workspace: linkToRoot }] },
+          "bot-A",
+        );
+
+        const result = await exec({ alias: "k", filePath: "key.env" });
+        expect(parseText(result).error).toMatch(/not configured/i);
+        // Plaintext never fetched / leaked on the fail-closed path.
+        expect(resolveSecret).not.toHaveBeenCalled();
+        expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+      });
+
+      // 🔴 BLOCKING (Jerry-Xin) — Windows drive root must fail closed too. The old
+      // `=== sep` compare never matched "C:\\" (resolvePath("C:\\") !== "/"), so a
+      // drive-root workspace would have degenerated into a root-wide jail. The
+      // path.parse(p).root === p check covers POSIX and Windows roots alike.
+      // Drive roots only exist on win32, so this assertion is platform-gated.
+      it("fails closed when the agent workspace is a Windows drive root", async () => {
+        if (process.platform !== "win32") return; // drive roots are win32-only
+        setupMocks();
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const exec = executeWithAgents(
+          { list: [{ id: "bot-A", workspace: "C:\\" }] },
+          "bot-A",
+        );
+
+        const result = await exec({ alias: "k", filePath: "key.env" });
+        expect(parseText(result).error).toMatch(/not configured/i);
+        expect(resolveSecret).not.toHaveBeenCalled();
+      });
+
+      // 必修2 — match key namespace. The workspace is indexed by OpenClaw AGENT
+      // id, not the channel/Octo account id. When the two differ (e.g. agent
+      // `main` ↔ octo account `default`), keying on the account id silently misses
+      // the per-agent workspace and falls back to defaults. Assert that passing a
+      // distinct agentId hits the per-agent workspace even though agentAccountId
+      // points at a different entry.
+      it("matches the per-agent workspace by agentId when account id ≠ agent id", async () => {
+        setupMocks(); // no secretsFileRoot → workspace default
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const exec = executeWithAgents(
+          {
+            defaults: { workspace: "/nope" },
+            // The agent we want is keyed by agent id "main"; the octo account id
+            // is the unrelated "default".
+            list: [{ id: "main", workspace: root }],
+          },
+          "default", // agentAccountId (octo account) — does NOT match list[].id
+          "main", // agentId (OpenClaw agent) — DOES match
+        );
+
+        const result = await exec({ alias: "k", filePath: "by-agent-id.env" });
+        const data = parseText(result);
+
+        expect(data.written).toBe(true);
+        expect(await readFile(join(root, "by-agent-id.env"), "utf8")).toBe(PLAINTEXT);
+        expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+      });
+
+      // 必修2 — agentId takes precedence over agentAccountId when both match
+      // different entries. The correct (per-agent-id) workspace must win.
+      it("prefers agentId over agentAccountId when both match different entries", async () => {
+        setupMocks();
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const wrongWorkspace = await mkdtemp(join(tmpdir(), "octo-ws-wrong-"));
+        try {
+          const exec = executeWithAgents(
+            {
+              list: [
+                { id: "main", workspace: root }, // matched by agentId
+                { id: "default", workspace: wrongWorkspace }, // matched by accountId
+              ],
+            },
+            "default", // agentAccountId
+            "main", // agentId — should win
+          );
+
+          const result = await exec({ alias: "k", filePath: "pref.env" });
+          expect(parseText(result).written).toBe(true);
+          // Written under the agentId-matched workspace…
+          expect(await readFile(join(root, "pref.env"), "utf8")).toBe(PLAINTEXT);
+          // …NOT under the accountId-matched one.
+          await expect(
+            readFile(join(wrongWorkspace, "pref.env"), "utf8"),
+          ).rejects.toThrow();
+        } finally {
+          await rm(wrongWorkspace, { recursive: true, force: true });
+        }
+      });
+
+      // 必修2 — agent id matching is namespace-normalized (lower/slug), matching
+      // the platform's normalizeAgentId. A config entry id with different casing
+      // must still match the runtime agent id.
+      it("matches the agent workspace case-insensitively (normalizeAgentId)", async () => {
+        setupMocks();
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const exec = executeWithAgents(
+          { list: [{ id: "Bot-A", workspace: root }] },
+          undefined,
+          "bot-a", // differs only in casing
+        );
+
+        const result = await exec({ alias: "k", filePath: "case.env" });
+        expect(parseText(result).written).toBe(true);
+        expect(await readFile(join(root, "case.env"), "utf8")).toBe(PLAINTEXT);
+      });
+
+      // 必修3 — `~` expansion. A workspace configured as "~/<subdir>" must expand
+      // to $HOME, matching the platform's canonical resolveAgentWorkspaceDir,
+      // rather than being treated as a literal "./~" segment.
+      it("expands a leading ~ in the workspace to the home directory", async () => {
+        setupMocks();
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        // Carve a real workspace under HOME so realpath canonicalization succeeds.
+        const home = homedir();
+        const wsName = `octo-tilde-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const wsAbs = join(home, wsName);
+        await mkdir(wsAbs, { recursive: true });
+        try {
+          const exec = executeWithAgents(
+            { list: [{ id: "bot-A", workspace: `~/${wsName}` }] },
+            "bot-A",
+          );
+
+          const result = await exec({ alias: "k", filePath: "tilde.env" });
+          expect(parseText(result).written).toBe(true);
+          expect(await readFile(join(wsAbs, "tilde.env"), "utf8")).toBe(PLAINTEXT);
+        } finally {
+          await rm(wsAbs, { recursive: true, force: true });
+        }
+      });
+
+      // 必修3 — $VAR / ${VAR} expansion. A workspace parameterized by an env var
+      // must expand before the path is used as the jail root.
+      it("expands $VAR / ${VAR} in the workspace path", async () => {
+        setupMocks();
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const prev = process.env.OCTO_TEST_WS;
+        process.env.OCTO_TEST_WS = root;
+        try {
+          const exec = executeWithAgents(
+            { list: [{ id: "bot-A", workspace: "${OCTO_TEST_WS}/sub" }] },
+            "bot-A",
+          );
+
+          const result = await exec({ alias: "k", filePath: "envvar.env" });
+          expect(parseText(result).written).toBe(true);
+          expect(await readFile(join(root, "sub", "envvar.env"), "utf8")).toBe(PLAINTEXT);
+        } finally {
+          if (prev === undefined) delete process.env.OCTO_TEST_WS;
+          else process.env.OCTO_TEST_WS = prev;
+        }
       });
     });
   });
