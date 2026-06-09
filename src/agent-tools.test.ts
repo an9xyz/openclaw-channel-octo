@@ -1706,5 +1706,166 @@ describe("createOctoManagementTools", () => {
       // overwrite mode → file ends up with the latest value.
       expect(await readFile(join(root, ".env"), "utf8")).toBe("rotated-value");
     });
+
+    // -----------------------------------------------------------------------
+    // Jail root DEFAULT = agent workspace (YUJ-3947)
+    //
+    // When no explicit secretsFileRoot is configured, the jail root falls back
+    // to the agent's workspace (cfg.agents.list[].workspace matched by
+    // agentAccountId, else cfg.agents.defaults.workspace). This removes the
+    // "operator must hand-configure secretsFileRoot" step from PR#92 WITHOUT
+    // weakening the security model: if no usable (non-root) workspace resolves,
+    // the write still FAILS CLOSED — there is NO process.cwd() fallback.
+    // -----------------------------------------------------------------------
+    describe("jail root default = agent workspace", () => {
+      // Build an execute() bound to a cfg with agents config + an agentAccountId,
+      // so the workspace-default resolution path is exercised. setupMocks (run in
+      // the parent beforeEach) controls the account-level secretsFileRoot.
+      const executeWithAgents = (
+        agents: unknown,
+        agentAccountId: string | undefined,
+      ) => {
+        const cfg = { ...mockCfg, agents } as any;
+        const tools = createOctoManagementTools({ cfg, agentAccountId });
+        expect(tools).toHaveLength(1);
+        return (args: Record<string, unknown>) =>
+          (tools[0].execute as any)("tc", { action: "write-secret", ...args });
+      };
+
+      it("jails to the matched agent's workspace when secretsFileRoot is unset", async () => {
+        setupMocks(); // no secretsFileRoot → falls back to workspace
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const exec = executeWithAgents(
+          { defaults: { workspace: "/nope" }, list: [{ id: "bot-A", workspace: root }] },
+          "bot-A",
+        );
+
+        const result = await exec({ alias: "k", filePath: "in-jail.env" });
+        const data = parseText(result);
+
+        expect(data.written).toBe(true);
+        expect(await readFile(join(root, "in-jail.env"), "utf8")).toBe(PLAINTEXT);
+        expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+      });
+
+      it("rejects an out-of-jail path under the agent-workspace default", async () => {
+        setupMocks();
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const exec = executeWithAgents(
+          { list: [{ id: "bot-A", workspace: root }] },
+          "bot-A",
+        );
+
+        const result = await exec({ alias: "k", filePath: "../escape.env" });
+        const data = parseText(result);
+
+        expect(data.error).toMatch(/outside the allowed|permitted root/i);
+        // Plaintext never fetched / leaked on a confinement reject.
+        expect(resolveSecret).not.toHaveBeenCalled();
+        expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+      });
+
+      it("falls back to defaults.workspace when the agent has no own workspace", async () => {
+        setupMocks();
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const exec = executeWithAgents(
+          { defaults: { workspace: root }, list: [{ id: "bot-A" }] },
+          "bot-A",
+        );
+
+        const result = await exec({ alias: "k", filePath: "via-defaults.env" });
+        const data = parseText(result);
+
+        expect(data.written).toBe(true);
+        expect(await readFile(join(root, "via-defaults.env"), "utf8")).toBe(PLAINTEXT);
+      });
+
+      it("falls back to defaults.workspace when no agent matches agentAccountId", async () => {
+        setupMocks();
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const exec = executeWithAgents(
+          { defaults: { workspace: root }, list: [{ id: "someone-else", workspace: "/x" }] },
+          "bot-A",
+        );
+
+        const result = await exec({ alias: "k", filePath: "no-match.env" });
+        expect(parseText(result).written).toBe(true);
+        expect(await readFile(join(root, "no-match.env"), "utf8")).toBe(PLAINTEXT);
+      });
+
+      it("explicit secretsFileRoot still wins over the agent-workspace default", async () => {
+        // Operator wants a NARROWER jail than the workspace: secretsFileRoot must
+        // take precedence. Point the workspace at a sibling temp dir and assert
+        // the file lands under secretsFileRoot (root), not the workspace.
+        const otherWorkspace = await mkdtemp(join(tmpdir(), "octo-ws-"));
+        try {
+          setupMocks({ secretsFileRoot: root });
+          vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+          const exec = executeWithAgents(
+            { list: [{ id: "bot-A", workspace: otherWorkspace }] },
+            "bot-A",
+          );
+
+          const result = await exec({ alias: "k", filePath: "explicit.env" });
+          expect(parseText(result).written).toBe(true);
+          // Written under the explicit root…
+          expect(await readFile(join(root, "explicit.env"), "utf8")).toBe(PLAINTEXT);
+          // …NOT under the workspace.
+          await expect(
+            readFile(join(otherWorkspace, "explicit.env"), "utf8"),
+          ).rejects.toThrow();
+        } finally {
+          await rm(otherWorkspace, { recursive: true, force: true });
+        }
+      });
+
+      it("fails closed when neither secretsFileRoot nor any workspace is set", async () => {
+        setupMocks(); // no secretsFileRoot
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const exec = executeWithAgents({ list: [{ id: "bot-A" }] }, "bot-A");
+
+        const result = await exec({ alias: "k", filePath: "key.env" });
+        const data = parseText(result);
+
+        expect(data.error).toMatch(/not configured/i);
+        expect(resolveSecret).not.toHaveBeenCalled();
+        expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+      });
+
+      it("fails closed when cfg has no agents block at all", async () => {
+        setupMocks();
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const exec = executeWithAgents(undefined, "bot-A");
+
+        const result = await exec({ alias: "k", filePath: "key.env" });
+        expect(parseText(result).error).toMatch(/not configured/i);
+        expect(resolveSecret).not.toHaveBeenCalled();
+      });
+
+      it("fails closed when defaults.workspace resolves to '/' (degenerate root)", async () => {
+        // A defaults.workspace mistakenly set to "/" must NOT become a root-wide
+        // secret jail — treat it as no usable default and fail closed.
+        setupMocks();
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const exec = executeWithAgents({ defaults: { workspace: "/" } }, "bot-A");
+
+        const result = await exec({ alias: "k", filePath: "key.env" });
+        expect(parseText(result).error).toMatch(/not configured/i);
+        expect(resolveSecret).not.toHaveBeenCalled();
+      });
+
+      it("fails closed when the agent workspace is an empty/whitespace string", async () => {
+        setupMocks();
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const exec = executeWithAgents(
+          { defaults: { workspace: "   " }, list: [{ id: "bot-A", workspace: "" }] },
+          "bot-A",
+        );
+
+        const result = await exec({ alias: "k", filePath: "key.env" });
+        expect(parseText(result).error).toMatch(/not configured/i);
+        expect(resolveSecret).not.toHaveBeenCalled();
+      });
+    });
   });
 });

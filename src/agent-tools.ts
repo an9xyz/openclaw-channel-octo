@@ -106,12 +106,14 @@ function isInsideRoot(root: string, candidate: string): boolean {
  * does NOT make the jail redundant — it is the only boundary between an injected
  * instruction and an arbitrary owner-writable file.
  *
- * 🔴 FAIL-CLOSED: the jail root comes ONLY from `secretsFileRoot` config. There
- * is deliberately NO fallback to `process.cwd()`: a CWD of `/` is exactly what
- * produced the historical self-lock and fail-open bugs, and silently writing
- * owner secrets under whatever directory the process happens to run in is itself
- * unsafe. If the operator has not configured a root, we refuse the write
- * outright rather than guess one.
+ * 🔴 FAIL-CLOSED: the jail root is resolved by the caller — an explicit
+ * `secretsFileRoot` if configured, otherwise the agent's workspace (see
+ * resolveAgentWorkspaceRoot). There is deliberately NO fallback to
+ * `process.cwd()`: a CWD of `/` is exactly what produced the historical
+ * self-lock and fail-open bugs, and silently writing owner secrets under
+ * whatever directory the process happens to run in is itself unsafe. If neither
+ * an explicit root nor a workspace resolves to a usable (non-root) directory,
+ * we refuse the write outright rather than guess one.
  *
  * When a root IS configured, we reject anything that escapes it — `..`
  * traversal, absolute paths pointing elsewhere, and symlink escapes (resolved,
@@ -213,6 +215,45 @@ async function confineSecretPath(
   }
 
   return { ok: true, abs: candidate, root };
+}
+
+/**
+ * Resolve the DEFAULT jail root for write-secret from the agent's workspace.
+ *
+ * This is the fallback used when no explicit per-account `secretsFileRoot` is
+ * configured (the explicit value is handled by the caller and ALWAYS wins over
+ * this default, so an operator can still lock writes to a narrower directory).
+ *
+ * Resolution order:
+ *   1. The `cfg.agents.list[]` entry whose `id === agentAccountId` → its
+ *      `workspace`.
+ *   2. `cfg.agents.defaults.workspace` (when the matched agent has no own
+ *      workspace, or no agent matched).
+ *
+ * 🔴 SECURITY: this NEVER falls back to `process.cwd()` — that fallback was the
+ * source of the historical `/`-degenerate self-lock + fail-open bugs. If no
+ * workspace is configured, OR the configured value is empty, OR it resolves to
+ * the filesystem root ("/"), we return `undefined` so the caller FAILS CLOSED
+ * (refuses the write) rather than jailing owner secrets to a root-wide or
+ * process-relative directory. A `defaults.workspace` mistakenly set to "/" must
+ * not silently become a root-wide secret jail.
+ */
+function resolveAgentWorkspaceRoot(
+  cfg: OpenClawConfig,
+  agentAccountId: string | undefined,
+): string | undefined {
+  const agents = cfg.agents;
+  if (!agents) return undefined;
+  const matched = agentAccountId
+    ? agents.list?.find((a) => a.id === agentAccountId)
+    : undefined;
+  const workspace = (matched?.workspace ?? agents.defaults?.workspace)?.trim();
+  if (!workspace) return undefined;
+  // 🔴 Degenerate-root guard: a workspace configured as "/" (or anything that
+  // resolves to the filesystem root) must NOT become a root-wide secret jail.
+  // Treat it as "no usable default" so the caller fails closed.
+  if (resolvePath(workspace) === sep) return undefined;
+  return workspace;
 }
 
 // ---------------------------------------------------------------------------
@@ -726,6 +767,16 @@ export function createOctoManagementTools(params: {
                 `Invalid mode "${rawMode}" for write-secret; use "overwrite" or "append"`,
               );
             }
+            // Jail root resolution (highest priority first):
+            //   1. explicit per-account/channel secretsFileRoot (operator can
+            //      lock writes to a narrower directory — this always wins).
+            //   2. DEFAULT: the agent's workspace (cfg.agents.list[].workspace
+            //      matched by agentAccountId, else cfg.agents.defaults.workspace).
+            // If neither yields a usable non-root directory, confineSecretPath
+            // fails closed — there is NO process.cwd() fallback.
+            const effectiveSecretsRoot =
+              account.config.secretsFileRoot?.trim() ||
+              resolveAgentWorkspaceRoot(cfg, agentAccountId);
             return await handleWriteSecret({
               apiUrl,
               botToken,
@@ -733,7 +784,7 @@ export function createOctoManagementTools(params: {
               filePath,
               template,
               mode: rawMode === "append" ? "append" : "overwrite",
-              secretsFileRoot: account.config.secretsFileRoot,
+              secretsFileRoot: effectiveSecretsRoot,
             });
           }
 
