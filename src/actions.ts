@@ -7,7 +7,7 @@
 
 import { ChannelType, MessageType, RICH_TEXT_BLOCK_IMAGE, RICH_TEXT_BLOCK_TEXT, RICH_TEXT_IMAGE_PLACEHOLDER } from "./types.js";
 import type { MentionEntity, LogSink, RichTextBlock } from "./types.js";
-import { stripChannelPrefix } from "./constants.js";
+import { stripAllChannelPrefixes } from "./constants.js";
 import {
   sendMessage,
   sendMediaMessage,
@@ -92,16 +92,40 @@ function stripGroupPrefix(raw: string): string {
 }
 
 /**
- * Normalise outbound target prefix. OpenClaw's delivery pipeline sometimes
- * emits `channel:<id>` as an alternative group-channel reference (parallel to
- * `group:<id>`). `parseTarget` now recognises `channel:` natively as well,
- * but keep this normaliser for the older outbound entry points that wrap
- * parseTarget with extra logic (mention-UID strip, thread merge) — having a
- * single documented place to look up prefix aliases is worth the small
- * redundancy.
+ * Canonicalise an outbound delivery target prefix.
+ *
+ * OpenClaw's delivery pipeline can emit several equivalent shapes for the same
+ * channel-group target (`group:<id>`, `channel:<id>`, `octo:<id>`), and the
+ * agent-tool / multi-bot routing layer occasionally produces stacked forms
+ * such as `"group:octo:grp1"` or `"channel:octo:grp1"`. Without canonical
+ * collapse, the downstream parseTarget would only strip one leading prefix and
+ * mis-parse the stacked inner segment as part of the group id (PR #103
+ * Jerry-Xin: `"group:octo:grp1"` → channelId `"octo:grp1"` → message routed to
+ * the wrong group). The recursive collapse below makes the guard at handleSend
+ * (which uses stripAllChannelPrefixes) and this delivery path agree on the
+ * canonical bare groupId.
+ *
+ * Rules:
+ *   - No leading channel-namespace prefix at all → pass through (bare IDs,
+ *     thread channel IDs like `grp1____x`, and other shapes parseTarget
+ *     handles natively).
+ *   - Stacked channel-namespace prefix wrapping a `user:` DM (e.g.
+ *     `"octo:user:uid123"`) → unwrap to clean `user:uid123` so the DM path
+ *     fires correctly.
+ *   - Any other leading channel-namespace prefix(es) → strip recursively and
+ *     re-prefix canonically as `group:` so parseTarget sees ONE known shape.
  */
 export function normalizeOutboundChannelPrefix(ctxTo: string): string {
-  return ctxTo.startsWith("channel:") ? "group:" + ctxTo.slice(8) : ctxTo;
+  const bare = stripAllChannelPrefixes(ctxTo);
+  // No channel-namespace prefix to strip — let parseTarget handle it natively
+  // (covers bare groupNo, `grp1____x` thread refs, `user:<uid>` DMs).
+  if (bare === ctxTo) return ctxTo;
+  // Stacked channel-namespace prefix wrapping a user: DM — return the clean
+  // user: form so parseTarget routes it as DM, not as a group with `user:` in
+  // the channelId.
+  if (bare.startsWith("user:")) return bare;
+  // Channel-group target — canonicalise to a single leading `group:`.
+  return "group:" + bare;
 }
 
 /**
@@ -159,9 +183,7 @@ export function resolveOutboundOctoTarget(
   // caller already encoded the thread via "____" in ctx.to, parsed.channelType
   // is already CommunityTopic and we pass through.
   if (threadId != null && parsed.channelType === ChannelType.Group) {
-    const shortId = stripChannelPrefix(String(threadId))
-      .replace(/^group:/, "")
-      .replace(/^channel:/, "");
+    const shortId = stripAllChannelPrefixes(String(threadId));
     if (!shortId) return parsed;
 
     // Defensive: if threadId already contains `____`, validate its parent
@@ -471,13 +493,13 @@ async function handleSend(params: {
     };
   }
 
-  // Canonicalize currentChannelId once. Strips all three known runtime
-  // prefixes ("octo:", "channel:", "group:") via a single regex so the
-  // normalization rule is in one place. Used by BOTH the effectiveThreadId
-  // guard (immediately below) and the issue #98 auto-reroute (after
-  // resolveOutboundOctoTarget).
+  // Canonicalize currentChannelId once via the shared helper so the same
+  // normalization rule is in one place (src/constants.ts) and shared with
+  // handleRead, channel.ts account correction, and the threadId path above.
+  // Used by BOTH the effectiveThreadId guard (immediately below) and the
+  // issue #98 auto-reroute (after resolveOutboundOctoTarget).
   const bareCurrentChannelId = currentChannelId
-    ? currentChannelId.replace(/^(octo:|channel:|group:)/, "")
+    ? stripAllChannelPrefixes(currentChannelId)
     : undefined;
 
   // effectiveThreadId guard: drop an explicit threadId when it points at a
@@ -489,9 +511,7 @@ async function handleSend(params: {
   let effectiveThreadId: typeof threadId = threadId;
   if (effectiveThreadId != null && bareCurrentChannelId) {
     const currentParent = extractParentGroupNo(bareCurrentChannelId);
-    const bareTarget = target
-      .replace(/^(octo:|channel:|group:)/, "")
-      .replace(/^([^@]+)@.*$/, "$1");
+    const bareTarget = stripAllChannelPrefixes(target).replace(/^([^@]+)@.*$/, "$1");
     const targetParent = extractParentGroupNo(bareTarget);
     if (targetParent !== currentParent) {
       effectiveThreadId = undefined;
@@ -768,8 +788,13 @@ async function handleRead(params: {
   const { channelId, channelType } = parseTarget(target, currentChannelId, getKnownGroupIds());
 
   // ====== Permission check ======
-  // Strip channel-namespace prefix from currentChannelId for comparison
-  const bareCurrentChannelId = currentChannelId ? stripChannelPrefix(currentChannelId) : currentChannelId;
+  // Strip channel-namespace prefix from currentChannelId for comparison.
+  // Uses the shared helper so all three runtime prefixes (octo:/channel:/group:)
+  // are handled — see src/constants.ts. Pre-fix this only stripped "octo:",
+  // so prefixed forms (channel:grp1____x, group:grp1____x) mis-compared
+  // against the prefix-stripped parsed channelId and treated legitimate
+  // same-channel reads as cross-channel queries. Fix tracked in #102.
+  const bareCurrentChannelId = currentChannelId ? stripAllChannelPrefixes(currentChannelId) : currentChannelId;
   // Infer the current channel type
   const knownGroups = getKnownGroupIds();
   const currentChannelType = bareCurrentChannelId?.includes("____")
