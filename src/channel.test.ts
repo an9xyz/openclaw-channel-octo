@@ -862,6 +862,29 @@ describe("agentPrompt.messageToolHints — @mention format hint", () => {
     const parsed = parseStructuredMentions(hints.join("\n"));
     expect(parsed.every((m) => m.uid !== "uid")).toBe(true);
   });
+
+  it("hints include name → id resolution guidance for the group-vs-thread ambiguity (issue #101)", async () => {
+    const { octoPlugin } = await import("./channel.js");
+    const hints: string[] = (octoPlugin as any).agentPrompt.messageToolHints({
+      cfg: {},
+      accountId: "default",
+    });
+    const joined = hints.join("\n");
+    // 群 vs 子区 terminology — agent needs both Chinese and English mappings
+    // because users mix both in real conversations.
+    expect(joined).toContain("群");
+    expect(joined).toContain("子区");
+    // Lookup-before-send chain (issue #101 direction 2): agent should resolve
+    // a name via channel-list and, when needed, list-threads — never send a
+    // bare human-readable name as the literal target.
+    expect(joined).toContain("channel-list");
+    expect(joined).toContain("list-threads");
+    // Disambiguation echo (issue #101 direction 3): when multiple candidates
+    // match, the agent must surface them and ask before sending.
+    expect(joined).toMatch(/ask.*BEFORE sending|never silently pick/i);
+    // The issue number is in the hint so future readers can trace the rationale.
+    expect(joined).toContain("#101");
+  });
 });
 
 // ─── P0-1: outbound member prefetch (cold start) ─────────────────────────────
