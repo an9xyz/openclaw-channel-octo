@@ -71,8 +71,8 @@ import {
   symlink,
   writeFile as fsWriteFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { tmpdir, homedir } from "node:os";
+import { join, relative } from "node:path";
 
 // Minimal config stub — mocked account functions don't inspect it
 const mockCfg = { channels: { octo: { botToken: "tok-secret" } } } as any;
@@ -1570,13 +1570,52 @@ describe("createOctoManagementTools", () => {
       expect(await readFile(join(root, "atroot.txt"), "utf8")).toBe(PLAINTEXT);
     });
 
-    it("defaults the jail root to process.cwd() when secretsFileRoot is unset", async () => {
-      // No secretsFileRoot configured → CWD is the root. A path that escapes
-      // CWD must still be rejected.
+    // 🔴 FAIL-CLOSED (P0): no secretsFileRoot configured → refuse every write.
+    // There is deliberately NO process.cwd() fallback (that fallback was the
+    // root cause of the `/`-degenerate self-lock + fail-open bugs).
+    it("fails closed when secretsFileRoot is unset — no resolve, no write", async () => {
       setupMocks(); // no secretsFileRoot
-      const result = await writeSecret({ alias: "k", filePath: "../../../../etc/passwd" });
-      expect(parseText(result).error).toMatch(/outside the allowed directory/i);
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+      const result = await writeSecret({ alias: "k", filePath: "key.txt" });
+      const data = parseText(result);
+      // Explicit, operator-actionable message about the missing config.
+      expect(data.error).toMatch(/not configured/i);
+      expect(data.error).toMatch(/secretsFileRoot/);
+      // Plaintext is never fetched and never leaks into the error.
       expect(resolveSecret).not.toHaveBeenCalled();
+      expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+    });
+
+    it("fails closed for ANY filePath when secretsFileRoot is unset (even a plain name)", async () => {
+      setupMocks(); // no secretsFileRoot
+      for (const filePath of [".env", "secrets/.env", "/etc/passwd", "../x"]) {
+        const result = await writeSecret({ alias: "k", filePath });
+        expect(parseText(result).error).toMatch(/not configured/i);
+      }
+      expect(resolveSecret).not.toHaveBeenCalled();
+    });
+
+    // 🔴 REGRESSION: the old `root + sep` containment self-locked when root="/"
+    // (`//` prefix matched nothing → reject everything) and a later patch made
+    // root="/" fail-open. The path.relative containment has neither pathology.
+    // The fail-closed default means a degenerate root="/" can never arise from
+    // an unset config, but an operator could still set it explicitly, so pin the
+    // behavior: a path inside "/" is contained, an absolute-elsewhere is not
+    // (here everything is under "/", so it is accepted — the point is the jail
+    // does NOT self-lock and does NOT crash).
+    it("does not self-lock when secretsFileRoot is explicitly '/'", async () => {
+      setupMocks({ secretsFileRoot: "/" });
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+      const target = join(root, "explicit-root-slash.txt");
+      // Use the real temp path (which is under "/") as the relative target so we
+      // do not actually write to a sensitive location.
+      const rel = relative("/", target);
+      const result = await writeSecret({ alias: "k", filePath: rel });
+      const data = parseText(result);
+      expect(data.written).toBe(true);
+      expect(await readFile(target, "utf8")).toBe(PLAINTEXT);
+      // jail-relative path never leaks the absolute root layout.
+      expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
     });
 
     it("not_found → guides the user to add the key, no plaintext, no write", async () => {
@@ -1607,6 +1646,19 @@ describe("createOctoManagementTools", () => {
       expect(data.ambiguous).toBe(true);
       expect(data.candidates).toHaveLength(2);
       expect(data.candidates[0].display_name).toBe("openai prod");
+      expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+      await expect(readFile(join(root, ".env"), "utf8")).rejects.toThrow();
+    });
+
+    it("rate_limited → back-off hint, no body in the error, no write", async () => {
+      vi.mocked(resolveSecret).mockResolvedValue({ status: "rate_limited" });
+
+      const result = await writeSecret({ alias: "openai key", filePath: ".env" });
+      const data = parseText(result);
+
+      expect(data.error).toMatch(/rate limited|busy/i);
+      expect(data.error).toContain("openai key");
+      // 🔴 The 429 path reads no body, so nothing server-controlled leaks here.
       expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
       await expect(readFile(join(root, ".env"), "utf8")).rejects.toThrow();
     });
@@ -1666,6 +1718,513 @@ describe("createOctoManagementTools", () => {
       expect(resolveSecret).toHaveBeenCalledTimes(2);
       // overwrite mode → file ends up with the latest value.
       expect(await readFile(join(root, ".env"), "utf8")).toBe("rotated-value");
+    });
+
+    // -----------------------------------------------------------------------
+    // Jail root DEFAULT = agent workspace (YUJ-3947)
+    //
+    // When no explicit secretsFileRoot is configured, the jail root falls back
+    // to the agent's workspace (cfg.agents.list[].workspace matched by
+    // agentAccountId, else cfg.agents.defaults.workspace). This removes the
+    // "operator must hand-configure secretsFileRoot" step from PR#92 WITHOUT
+    // weakening the security model: if no usable (non-root) workspace resolves,
+    // the write still FAILS CLOSED — there is NO process.cwd() fallback.
+    // -----------------------------------------------------------------------
+    describe("jail root default = agent workspace", () => {
+      // Build an execute() bound to a cfg with agents config + an agentAccountId,
+      // so the workspace-default resolution path is exercised. setupMocks (run in
+      // the parent beforeEach) controls the account-level secretsFileRoot.
+      const executeWithAgents = (
+        agents: unknown,
+        agentAccountId: string | undefined,
+        agentId?: string,
+      ) => {
+        const cfg = { ...mockCfg, agents } as any;
+        const tools = createOctoManagementTools({ cfg, agentAccountId, agentId });
+        expect(tools).toHaveLength(1);
+        return (args: Record<string, unknown>) =>
+          (tools[0].execute as any)("tc", { action: "write-secret", ...args });
+      };
+
+      it("jails to the matched agent's workspace when secretsFileRoot is unset", async () => {
+        setupMocks(); // no secretsFileRoot → falls back to workspace
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const exec = executeWithAgents(
+          { defaults: { workspace: "/nope" }, list: [{ id: "bot-A", workspace: root }] },
+          "bot-A",
+        );
+
+        const result = await exec({ alias: "k", filePath: "in-jail.env" });
+        const data = parseText(result);
+
+        expect(data.written).toBe(true);
+        expect(await readFile(join(root, "in-jail.env"), "utf8")).toBe(PLAINTEXT);
+        expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+      });
+
+      it("rejects an out-of-jail path under the agent-workspace default", async () => {
+        setupMocks();
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const exec = executeWithAgents(
+          { list: [{ id: "bot-A", workspace: root }] },
+          "bot-A",
+        );
+
+        const result = await exec({ alias: "k", filePath: "../escape.env" });
+        const data = parseText(result);
+
+        expect(data.error).toMatch(/outside the allowed|permitted root/i);
+        // Plaintext never fetched / leaked on a confinement reject.
+        expect(resolveSecret).not.toHaveBeenCalled();
+        expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+      });
+
+      it("falls back to defaults.workspace when the agent has no own workspace", async () => {
+        setupMocks();
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const exec = executeWithAgents(
+          { defaults: { workspace: root }, list: [{ id: "bot-A" }] },
+          "bot-A",
+        );
+
+        const result = await exec({ alias: "k", filePath: "via-defaults.env" });
+        const data = parseText(result);
+
+        expect(data.written).toBe(true);
+        expect(await readFile(join(root, "via-defaults.env"), "utf8")).toBe(PLAINTEXT);
+      });
+
+      // 🔴 P0 (Jerry-Xin + yujiawei) — NON-DEFAULT agent jail = per-agent
+      // SUBDIRECTORY of defaults.workspace, NEVER the bare shared parent. Here
+      // bot-A is not the default agent (someone-else is), so the platform's
+      // canonical resolveAgentWorkspaceDir derives <defaults.workspace>/<agentId>.
+      // The previous hand-rolled resolver wrongly jailed every non-default agent
+      // to the WHOLE defaults.workspace, letting one agent write into another's
+      // tree. Assert the secret lands under the per-agent subdir, not the parent.
+      it("jails a non-default agent to defaults.workspace/<agentId> (per-agent subdir)", async () => {
+        setupMocks();
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const exec = executeWithAgents(
+          { defaults: { workspace: root }, list: [{ id: "someone-else", workspace: "/x" }] },
+          undefined,
+          "bot-A", // non-default agent (default is someone-else)
+        );
+
+        const result = await exec({ alias: "k", filePath: "no-match.env" });
+        expect(parseText(result).written).toBe(true);
+        // Under the per-agent subdir…
+        expect(await readFile(join(root, "bot-a", "no-match.env"), "utf8")).toBe(PLAINTEXT);
+        // …NOT the bare shared parent.
+        await expect(
+          readFile(join(root, "no-match.env"), "utf8"),
+        ).rejects.toThrow();
+      });
+
+      // 🔴 P0 (Jerry-Xin + yujiawei) — a non-default agent must NOT be able to
+      // climb out of its per-agent subdir into a SIBLING agent's directory and
+      // write the owner's plaintext there. This is the concrete cross-agent
+      // secret-write escape the bare-defaults jail allowed: a `worker` writing
+      // `main/.env`. With the per-agent subdir jail, `../main/.env` resolves
+      // outside the jail and is refused before any plaintext is fetched.
+      it("rejects a non-default agent writing into a sibling agent's dir (worker→main/.env)", async () => {
+        setupMocks();
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        // Pre-create a sibling "main" dir so a successful escape would actually
+        // land a file there — making the assertion that nothing escaped real.
+        await mkdir(join(root, "main"), { recursive: true });
+        const exec = executeWithAgents(
+          {
+            defaults: { workspace: root },
+            list: [
+              { id: "main", default: true },
+              { id: "worker" },
+            ],
+          },
+          undefined,
+          "worker", // non-default agent → jailed to <root>/worker
+        );
+
+        const result = await exec({ alias: "k", filePath: "../main/.env" });
+        expect(parseText(result).error).toMatch(/outside the allowed|permitted root/i);
+        // Plaintext never fetched on a confinement reject; nothing written to main/.
+        expect(resolveSecret).not.toHaveBeenCalled();
+        await expect(readFile(join(root, "main", ".env"), "utf8")).rejects.toThrow();
+        expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+      });
+
+      it("explicit secretsFileRoot still wins over the agent-workspace default", async () => {
+        // Operator wants a NARROWER jail than the workspace: secretsFileRoot must
+        // take precedence. Point the workspace at a sibling temp dir and assert
+        // the file lands under secretsFileRoot (root), not the workspace.
+        const otherWorkspace = await mkdtemp(join(tmpdir(), "octo-ws-"));
+        try {
+          setupMocks({ secretsFileRoot: root });
+          vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+          const exec = executeWithAgents(
+            { list: [{ id: "bot-A", workspace: otherWorkspace }] },
+            "bot-A",
+          );
+
+          const result = await exec({ alias: "k", filePath: "explicit.env" });
+          expect(parseText(result).written).toBe(true);
+          // Written under the explicit root…
+          expect(await readFile(join(root, "explicit.env"), "utf8")).toBe(PLAINTEXT);
+          // …NOT under the workspace.
+          await expect(
+            readFile(join(otherWorkspace, "explicit.env"), "utf8"),
+          ).rejects.toThrow();
+        } finally {
+          await rm(otherWorkspace, { recursive: true, force: true });
+        }
+      });
+
+      it("fails closed when neither secretsFileRoot nor any workspace is set", async () => {
+        setupMocks(); // no secretsFileRoot
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const exec = executeWithAgents({ list: [{ id: "bot-A" }] }, "bot-A");
+
+        const result = await exec({ alias: "k", filePath: "key.env" });
+        const data = parseText(result);
+
+        expect(data.error).toMatch(/not configured/i);
+        expect(resolveSecret).not.toHaveBeenCalled();
+        expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+      });
+
+      it("fails closed when cfg has no agents block at all", async () => {
+        setupMocks();
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const exec = executeWithAgents(undefined, "bot-A");
+
+        const result = await exec({ alias: "k", filePath: "key.env" });
+        expect(parseText(result).error).toMatch(/not configured/i);
+        expect(resolveSecret).not.toHaveBeenCalled();
+      });
+
+      it("fails closed when defaults.workspace resolves to '/' (degenerate root)", async () => {
+        // A defaults.workspace mistakenly set to "/" must NOT become a root-wide
+        // secret jail — treat it as no usable default and fail closed.
+        setupMocks();
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const exec = executeWithAgents({ defaults: { workspace: "/" } }, "bot-A");
+
+        const result = await exec({ alias: "k", filePath: "key.env" });
+        expect(parseText(result).error).toMatch(/not configured/i);
+        expect(resolveSecret).not.toHaveBeenCalled();
+      });
+
+      it("fails closed when the agent workspace is an empty/whitespace string", async () => {
+        setupMocks();
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const exec = executeWithAgents(
+          { defaults: { workspace: "   " }, list: [{ id: "bot-A", workspace: "" }] },
+          "bot-A",
+        );
+
+        const result = await exec({ alias: "k", filePath: "key.env" });
+        expect(parseText(result).error).toMatch(/not configured/i);
+        expect(resolveSecret).not.toHaveBeenCalled();
+      });
+
+      // 🔴 BLOCKING REGRESSION (Jerry-Xin) — symlink-to-`/` fail-open.
+      // The old guard checked the LEXICAL form (`resolvePath(workspace) === sep`),
+      // so a workspace configured as a symlink whose REAL target is "/" slipped
+      // past it (the lexical path is the link, ≠ "/") and only degenerated into a
+      // root-wide jail later inside confineSecretPath's realpath(). The fix moves
+      // the degenerate-root check to AFTER realpath canonicalization, so a
+      // workspace that resolves to "/" now fails closed here.
+      it("fails closed when the agent workspace is a symlink to '/' (realpath-after-canon)", async () => {
+        setupMocks();
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const linkToRoot = join(root, "ws-root-link");
+        await symlink("/", linkToRoot, "dir");
+        // Sanity: lexically the workspace is NOT "/", so the old guard would pass it.
+        expect(linkToRoot).not.toBe("/");
+
+        const exec = executeWithAgents(
+          { list: [{ id: "bot-A", workspace: linkToRoot }] },
+          "bot-A",
+        );
+
+        const result = await exec({ alias: "k", filePath: "key.env" });
+        expect(parseText(result).error).toMatch(/not configured/i);
+        // Plaintext never fetched / leaked on the fail-closed path.
+        expect(resolveSecret).not.toHaveBeenCalled();
+        expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+      });
+
+      // 🔴 BLOCKING (Jerry-Xin) — Windows drive root must fail closed too. The old
+      // `=== sep` compare never matched "C:\\" (resolvePath("C:\\") !== "/"), so a
+      // drive-root workspace would have degenerated into a root-wide jail. The
+      // path.parse(p).root === p check covers POSIX and Windows roots alike.
+      // Drive roots only exist on win32, so this assertion is platform-gated.
+      it("fails closed when the agent workspace is a Windows drive root", async () => {
+        if (process.platform !== "win32") return; // drive roots are win32-only
+        setupMocks();
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const exec = executeWithAgents(
+          { list: [{ id: "bot-A", workspace: "C:\\" }] },
+          "bot-A",
+        );
+
+        const result = await exec({ alias: "k", filePath: "key.env" });
+        expect(parseText(result).error).toMatch(/not configured/i);
+        expect(resolveSecret).not.toHaveBeenCalled();
+      });
+
+      // 必修2 — match key namespace. The workspace is indexed by OpenClaw AGENT
+      // id, not the channel/Octo account id. When the two differ (e.g. agent
+      // `main` ↔ octo account `default`), keying on the account id silently misses
+      // the per-agent workspace and falls back to defaults. Assert that passing a
+      // distinct agentId hits the per-agent workspace even though agentAccountId
+      // points at a different entry.
+      it("matches the per-agent workspace by agentId when account id ≠ agent id", async () => {
+        setupMocks(); // no secretsFileRoot → workspace default
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const exec = executeWithAgents(
+          {
+            defaults: { workspace: "/nope" },
+            // The agent we want is keyed by agent id "main"; the octo account id
+            // is the unrelated "default".
+            list: [{ id: "main", workspace: root }],
+          },
+          "default", // agentAccountId (octo account) — does NOT match list[].id
+          "main", // agentId (OpenClaw agent) — DOES match
+        );
+
+        const result = await exec({ alias: "k", filePath: "by-agent-id.env" });
+        const data = parseText(result);
+
+        expect(data.written).toBe(true);
+        expect(await readFile(join(root, "by-agent-id.env"), "utf8")).toBe(PLAINTEXT);
+        expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+      });
+
+      // 必修2 — agentId takes precedence over agentAccountId when both match
+      // different entries. The correct (per-agent-id) workspace must win.
+      it("prefers agentId over agentAccountId when both match different entries", async () => {
+        setupMocks();
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const wrongWorkspace = await mkdtemp(join(tmpdir(), "octo-ws-wrong-"));
+        try {
+          const exec = executeWithAgents(
+            {
+              list: [
+                { id: "main", workspace: root }, // matched by agentId
+                { id: "default", workspace: wrongWorkspace }, // matched by accountId
+              ],
+            },
+            "default", // agentAccountId
+            "main", // agentId — should win
+          );
+
+          const result = await exec({ alias: "k", filePath: "pref.env" });
+          expect(parseText(result).written).toBe(true);
+          // Written under the agentId-matched workspace…
+          expect(await readFile(join(root, "pref.env"), "utf8")).toBe(PLAINTEXT);
+          // …NOT under the accountId-matched one.
+          await expect(
+            readFile(join(wrongWorkspace, "pref.env"), "utf8"),
+          ).rejects.toThrow();
+        } finally {
+          await rm(wrongWorkspace, { recursive: true, force: true });
+        }
+      });
+
+      // 必修2 — agent id matching is namespace-normalized (lower/slug), matching
+      // the platform's normalizeAgentId. A config entry id with different casing
+      // must still match the runtime agent id.
+      it("matches the agent workspace case-insensitively (normalizeAgentId)", async () => {
+        setupMocks();
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const exec = executeWithAgents(
+          { list: [{ id: "Bot-A", workspace: root }] },
+          undefined,
+          "bot-a", // differs only in casing
+        );
+
+        const result = await exec({ alias: "k", filePath: "case.env" });
+        expect(parseText(result).written).toBe(true);
+        expect(await readFile(join(root, "case.env"), "utf8")).toBe(PLAINTEXT);
+      });
+
+      // 必修3 — `~` expansion. A workspace configured as "~/<subdir>" must expand
+      // to $HOME, matching the platform's canonical resolveAgentWorkspaceDir,
+      // rather than being treated as a literal "./~" segment.
+      it("expands a leading ~ in the workspace to the home directory", async () => {
+        setupMocks();
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        // Carve a real workspace under HOME so realpath canonicalization succeeds.
+        const home = homedir();
+        const wsName = `octo-tilde-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const wsAbs = join(home, wsName);
+        await mkdir(wsAbs, { recursive: true });
+        try {
+          const exec = executeWithAgents(
+            { list: [{ id: "bot-A", workspace: `~/${wsName}` }] },
+            "bot-A",
+          );
+
+          const result = await exec({ alias: "k", filePath: "tilde.env" });
+          expect(parseText(result).written).toBe(true);
+          expect(await readFile(join(wsAbs, "tilde.env"), "utf8")).toBe(PLAINTEXT);
+        } finally {
+          await rm(wsAbs, { recursive: true, force: true });
+        }
+      });
+
+      // 必修3 — $VAR / ${VAR} expansion. A workspace parameterized by an env var
+      // must expand before the path is used as the jail root.
+      it("expands $VAR / ${VAR} in the workspace path", async () => {
+        setupMocks();
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const prev = process.env.OCTO_TEST_WS;
+        process.env.OCTO_TEST_WS = root;
+        try {
+          const exec = executeWithAgents(
+            { list: [{ id: "bot-A", workspace: "${OCTO_TEST_WS}/sub" }] },
+            "bot-A",
+          );
+
+          const result = await exec({ alias: "k", filePath: "envvar.env" });
+          expect(parseText(result).written).toBe(true);
+          expect(await readFile(join(root, "sub", "envvar.env"), "utf8")).toBe(PLAINTEXT);
+        } finally {
+          if (prev === undefined) delete process.env.OCTO_TEST_WS;
+          else process.env.OCTO_TEST_WS = prev;
+        }
+      });
+
+      // 🔴 必修2 / P1-A (lml2468) — symlink-ANCESTOR first-write must NOT be
+      // false-rejected. When the jail root sits under a symlinked ancestor AND
+      // the workspace dir does not exist yet (the common first-write case), the
+      // old code stored the root in its LEXICAL form but compared it post-mkdir
+      // against realpath(dir). The two diverged through the symlink and the write
+      // was wrongly refused as "escaped the allowed root after creation". The fix
+      // canonicalizes BOTH the resolved workspace (resolveAgentWorkspaceRoot) and
+      // the jail root (confineSecretPath) through their nearest existing ancestor,
+      // so every comparison is symlink-free.
+      //
+      // lml2468 asked for coverage of three real-world ancestor-symlink shapes,
+      // not just one. Each case builds a genuine symlinked-ancestor root whose
+      // workspace leaf does not exist yet, then asserts the FIRST write succeeds
+      // and the file materializes at the REAL (symlink-resolved) target.
+      const symlinkAncestorCases: {
+        label: string;
+        build: () => Promise<{ workspace: string; realTarget: string; cleanup: () => Promise<void> }>;
+      }[] = [
+        {
+          // macOS-style: an intermediate path component is a symlink to its real
+          // dir (e.g. /tmp → /private/tmp). Workspace = <link>/ws.
+          label: "intermediate symlink (macOS /tmp→/private/tmp shape)",
+          build: async () => {
+            const realDir = await mkdtemp(join(tmpdir(), "octo-real-tmp-"));
+            const linkDir = join(tmpdir(), `octo-link-tmp-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+            await symlink(realDir, linkDir, "dir");
+            return {
+              workspace: join(linkDir, "ws"),
+              realTarget: join(realDir, "ws"),
+              cleanup: async () => {
+                await rm(linkDir, { force: true });
+                await rm(realDir, { recursive: true, force: true });
+              },
+            };
+          },
+        },
+        {
+          // Symlinked HOME shape: the home-like ancestor itself is a symlink and
+          // the workspace is nested several levels below it.
+          label: "symlinked HOME ancestor",
+          build: async () => {
+            const realHome = await mkdtemp(join(tmpdir(), "octo-real-home-"));
+            await mkdir(join(realHome, "agents"), { recursive: true });
+            const linkHome = join(tmpdir(), `octo-link-home-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+            await symlink(realHome, linkHome, "dir");
+            return {
+              workspace: join(linkHome, "agents", "ws", "secrets"),
+              realTarget: join(realHome, "agents", "ws", "secrets"),
+              cleanup: async () => {
+                await rm(linkHome, { force: true });
+                await rm(realHome, { recursive: true, force: true });
+              },
+            };
+          },
+        },
+        {
+          // Container bind-mount shape: a chain of symlinks (link→link→realdir),
+          // as a bind-mounted path indirected through more than one link can
+          // present. Workspace = <top-link>/data/ws.
+          label: "bind-mount-style symlink chain",
+          build: async () => {
+            const realDir = await mkdtemp(join(tmpdir(), "octo-real-bm-"));
+            const midLink = join(tmpdir(), `octo-bm-mid-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+            await symlink(realDir, midLink, "dir");
+            const topLink = join(tmpdir(), `octo-bm-top-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+            await symlink(midLink, topLink, "dir");
+            return {
+              workspace: join(topLink, "data", "ws"),
+              realTarget: join(realDir, "data", "ws"),
+              cleanup: async () => {
+                await rm(topLink, { force: true });
+                await rm(midLink, { force: true });
+                await rm(realDir, { recursive: true, force: true });
+              },
+            };
+          },
+        },
+      ];
+
+      for (const tc of symlinkAncestorCases) {
+        it(`does not false-reject a first write through a ${tc.label}`, async () => {
+          setupMocks();
+          vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+          const { workspace, realTarget, cleanup } = await tc.build();
+          try {
+            const exec = executeWithAgents(
+              { list: [{ id: "bot-A", workspace }] },
+              "bot-A",
+            );
+
+            const result = await exec({ alias: "k", filePath: "first.env" });
+            expect(parseText(result).written).toBe(true);
+            // File lands at the REAL (symlink-resolved) target, first write.
+            expect(await readFile(join(realTarget, "first.env"), "utf8")).toBe(PLAINTEXT);
+            expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+          } finally {
+            await cleanup();
+          }
+        });
+      }
+
+      // 🔴 P1-B (Yu CR) — an UNDEFINED env var in the workspace path must FAIL
+      // CLOSED, not anchor the jail to process.cwd(). A literal, unexpanded
+      // `${UNDEF}` fed to path.resolve() silently roots the relative remainder at
+      // the current working directory, which would sail past both filesystem-root
+      // degeneracy guards and rebuild exactly the cwd-anchored jail this PR's
+      // fail-closed guarantee exists to prevent. Assert: refusal + no resolve()
+      // call + nothing written under cwd.
+      it("fails closed when the workspace references an UNDEFINED env var (no cwd anchor)", async () => {
+        setupMocks();
+        vi.mocked(resolveSecret).mockResolvedValue({ status: "resolved", value: PLAINTEXT });
+        const varName = `OCTO_UNSET_${Date.now()}`;
+        // Ensure the var is genuinely undefined.
+        delete process.env[varName];
+        const exec = executeWithAgents(
+          { list: [{ id: "bot-A", workspace: `\${${varName}}/octo-secrets` }] },
+          "bot-A",
+        );
+
+        const result = await exec({ alias: "k", filePath: "leak.env" });
+        expect(parseText(result).error).toMatch(/not configured/i);
+        // Never fetched the plaintext on the fail-closed path…
+        expect(resolveSecret).not.toHaveBeenCalled();
+        expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
+        // …and crucially nothing was written under the literal "${UNDEF}" dir
+        // that a cwd-anchored resolve would have created.
+        await expect(
+          readFile(join(process.cwd(), `\${${varName}}`, "octo-secrets", "leak.env"), "utf8"),
+        ).rejects.toThrow();
+      });
     });
   });
 });
