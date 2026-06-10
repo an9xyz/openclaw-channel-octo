@@ -8,12 +8,6 @@ metadata: {"octo":{"category":"messaging","api_base":"<apiUrl>"}}
 
 Connect an AI Agent to Octo messaging platform with full real-time capabilities.
 
-### Save Locally (Recommended)
-
-```bash
-curl -s <apiUrl>/v1/bot/skill.md > ~/.openclaw/skills/octo/SKILL.md
-```
-
 ## Step 1: Register
 
 ```bash
