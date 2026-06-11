@@ -2,11 +2,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ChannelType, MessageType } from "./types.js";
 import {
   handleInboundMessage,
+  resolveDispatchTimeoutMs,
   _setDispatchTimeoutForTests,
   _setDispatchApologyTimeoutForTests,
 } from "./inbound.js";
 import { setOctoRuntime } from "./runtime.js";
 import { _clearKnownBots } from "./bot-registry.js";
+import { resolveOctoAccount } from "./accounts.js";
 import type { ResolvedOctoAccount } from "./accounts.js";
 
 /**
@@ -193,14 +195,17 @@ function installHangingRuntime(): { dispatch: ReturnType<typeof vi.fn> } {
   return { dispatch };
 }
 
-function installImmediateRuntime(deliverArgs?: { text?: string; kind?: string }) {
+function installImmediateRuntime(
+  deliverArgs?: { text?: string; kind?: string },
+  opts?: { config?: Record<string, unknown> },
+) {
   const dispatch = vi.fn(async (args: any) => {
     if (deliverArgs) {
       await args.dispatcherOptions.deliver({ text: deliverArgs.text ?? "hi" }, { kind: deliverArgs.kind ?? "final" });
     }
   });
   setOctoRuntime({
-    config: { loadConfig: () => ({}) },
+    config: { loadConfig: () => opts?.config ?? {} },
     channel: {
       reply: {
         dispatchReplyWithBufferedBlockDispatcher: dispatch,
@@ -354,5 +359,91 @@ describe("dispatch timeout guard (issue #75)", () => {
     const finalFlush = sends.find((s) => s.content === "buffered-final");
     expect(finalFlush, "final flush sendMessage must reach fetch").toBeDefined();
     expect(finalFlush!.abortedBeforeResolve, "final flush must be aborted by its own AbortSignal.timeout").toBe(true);
+  });
+});
+
+describe("dispatch timeout derivation from config (issue #113)", () => {
+  // These tests exercise the real resolution chain, so clear the test
+  // override that the outer beforeEach installs.
+  beforeEach(() => {
+    _setDispatchTimeoutForTests(null);
+  });
+
+  it("derives from agents.defaults.timeoutSeconds + 60s buffer (1000s → 1060s)", () => {
+    const cfg = { agents: { defaults: { timeoutSeconds: 1000 } } } as any;
+    expect(resolveDispatchTimeoutMs(cfg, makeAccount())).toBe(1_060_000);
+  });
+
+  it("falls back to 600s agent timeout when cfg omits timeoutSeconds → 660s", () => {
+    expect(resolveDispatchTimeoutMs({} as any, makeAccount())).toBe(660_000);
+    expect(resolveDispatchTimeoutMs({ agents: {} } as any, makeAccount())).toBe(660_000);
+    expect(resolveDispatchTimeoutMs({ agents: { defaults: {} } } as any, makeAccount())).toBe(660_000);
+  });
+
+  it("explicit dispatchTimeoutMs config wins over the derived value", () => {
+    const account = makeAccount();
+    account.config.dispatchTimeoutMs = 1_234_000;
+    const cfg = { agents: { defaults: { timeoutSeconds: 1000 } } } as any;
+    expect(resolveDispatchTimeoutMs(cfg, account)).toBe(1_234_000);
+  });
+
+  it("invalid explicit values (0, negative, NaN, Infinity) fall through to derivation", () => {
+    for (const bad of [0, -5, NaN, Infinity]) {
+      const account = makeAccount();
+      (account.config as any).dispatchTimeoutMs = bad;
+      expect(resolveDispatchTimeoutMs({} as any, account), `bad value: ${bad}`).toBe(660_000);
+    }
+  });
+
+  it("invalid agents.defaults.timeoutSeconds falls back to the 600s default", () => {
+    for (const bad of [0, -1, NaN, "1000"]) {
+      const cfg = { agents: { defaults: { timeoutSeconds: bad } } } as any;
+      expect(resolveDispatchTimeoutMs(cfg, makeAccount()), `bad value: ${bad}`).toBe(660_000);
+    }
+  });
+
+  it("_setDispatchTimeoutForTests override beats both explicit config and derivation", () => {
+    _setDispatchTimeoutForTests(123);
+    const account = makeAccount();
+    account.config.dispatchTimeoutMs = 999_999;
+    const cfg = { agents: { defaults: { timeoutSeconds: 1000 } } } as any;
+    expect(resolveDispatchTimeoutMs(cfg, account)).toBe(123);
+  });
+
+  it("resolveOctoAccount plumbs dispatchTimeoutMs: account-level overrides channel-level", () => {
+    const cfg = {
+      channels: {
+        octo: {
+          botToken: "tok",
+          apiUrl: API,
+          dispatchTimeoutMs: 700_000,
+          accounts: {
+            a1: { botToken: "tok1", dispatchTimeoutMs: 900_000 },
+            a2: { botToken: "tok2" },
+          },
+        },
+      },
+    } as any;
+    expect(resolveOctoAccount({ cfg, accountId: "a1" }).config.dispatchTimeoutMs).toBe(900_000);
+    // a2 sets nothing → inherits the channel-level value
+    expect(resolveOctoAccount({ cfg, accountId: "a2" }).config.dispatchTimeoutMs).toBe(700_000);
+    // neither set → undefined (handleInboundMessage derives from agent timeout)
+    const bare = { channels: { octo: { botToken: "tok", apiUrl: API } } } as any;
+    expect(resolveOctoAccount({ cfg: bare, accountId: null }).config.dispatchTimeoutMs).toBeUndefined();
+  });
+
+  it("wiring: handleInboundMessage arms the dispatch timer with the derived value", async () => {
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout") as any;
+
+    installImmediateRuntime(
+      { text: "hi", kind: "final" },
+      { config: { agents: { defaults: { timeoutSeconds: 1000 } } } },
+    );
+    installFetchStub();
+
+    await runInbound({ log: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} } });
+
+    const armed = setTimeoutSpy.mock.calls.some((call: any[]) => call[1] === 1_060_000);
+    expect(armed, "dispatch timer must be armed with timeoutSeconds*1000 + 60s").toBe(true);
   });
 });
