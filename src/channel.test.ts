@@ -15,14 +15,13 @@ vi.mock("./api-fetch.js", async () => {
   return {
     sendMessage: vi.fn().mockResolvedValue(okResult),
     sendMediaMessage: vi.fn().mockResolvedValue(okResult),
-    getUploadCredentials: vi.fn().mockResolvedValue({
-      credentials: { TmpSecretId: "id", TmpSecretKey: "k", Token: "t" },
-      startTime: 0,
-      expiredTime: 0,
-      bucket: "b", region: "r", key: "k",
-      cdnBaseUrl: "https://cdn.example/",
+    getUploadPresign: vi.fn().mockResolvedValue({
+      uploadUrl: "https://minio.example/octo/chat/1/a/b.txt?sig=1",
+      downloadUrl: "https://cdn.example/file.txt",
+      contentType: "text/plain; charset=utf-8",
+      contentDisposition: 'inline; filename="file.txt"',
     }),
-    uploadFileToCOS: vi.fn().mockResolvedValue({ url: "https://cdn.example/file.txt" }),
+    uploadFileToPresignedUrl: vi.fn().mockResolvedValue({ url: "https://cdn.example/file.txt" }),
     inferContentType: (fn: string) =>
       fn.endsWith(".txt") ? "text/plain" : "application/octet-stream",
     ensureTextCharset: (ct: string) =>
@@ -536,8 +535,8 @@ describe("outbound.sendMedia — threadId wiring", () => {
   beforeEach(async () => {
     const apiFetch = await import("./api-fetch.js");
     (apiFetch.sendMediaMessage as any).mockClear();
-    (apiFetch.getUploadCredentials as any).mockClear();
-    (apiFetch.uploadFileToCOS as any).mockClear();
+    (apiFetch.getUploadPresign as any).mockClear();
+    (apiFetch.uploadFileToPresignedUrl as any).mockClear();
   });
 
   it("merges ctx.threadId into the group target as CommunityTopic (type=5)", async () => {
@@ -615,6 +614,93 @@ describe("outbound.sendMedia — threadId wiring", () => {
     // ctx.to wins; duplicate threadId must not re-concat or downgrade.
     expect(call.channelId).toBe("grp1____topicA");
     expect(call.channelType).toBe(5);
+  });
+});
+
+/**
+ * Streaming size cap for the outbound HTTP-URL branch (PR#66 R2 — lml2468 阻断点).
+ *
+ * channel.ts#downloadToTempFile is the only line of defense after dropping the
+ * HEAD-based pre-check. This test drives the cap through octoPlugin.outbound.sendMedia
+ * with an http(s):// mediaUrl so the private downloadToTempFile is exercised end-to-end:
+ *   - rejects with /exceeds max/
+ *   - presigned PUT is never called
+ *   - partial temp file under /tmp/octo-upload is unlinked on failure
+ */
+describe("outbound.sendMedia — HTTP streaming size cap (R2)", () => {
+  const cfg = {
+    channels: {
+      octo: {
+        apiUrl: "https://api.example",
+        accounts: {
+          default: { botToken: "bf_test", apiUrl: "https://api.example" },
+        },
+      },
+    },
+  };
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(async () => {
+    const apiFetch = await import("./api-fetch.js");
+    (apiFetch.getUploadPresign as any).mockClear();
+    (apiFetch.uploadFileToPresignedUrl as any).mockClear();
+    (apiFetch.sendMediaMessage as any).mockClear();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    // NB: do NOT call vi.restoreAllMocks() here — it would tear down the
+    // module-level vi.mock("./api-fetch.js") at the top of this file and
+    // break every later test in this suite.
+  });
+
+  async function listOctoUploadTemp(): Promise<string[]> {
+    const { readdir } = await import("node:fs/promises");
+    try { return await readdir("/tmp/octo-upload"); } catch { return []; }
+  }
+
+  it("rejects with 'exceeds max' on http(s) URL > 100MB; presign never called; temp cleaned", async () => {
+    const apiFetch = await import("./api-fetch.js");
+    const { octoPlugin } = await import("./channel.js");
+
+    const CHUNK = new Uint8Array(1024 * 1024); // 1MB
+    const TOTAL_CHUNKS = 110;                  // 110MB > 100MB cap
+    let sent = 0;
+    globalThis.fetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers({ "content-type": "application/octet-stream" }),
+      body: new ReadableStream({
+        pull(controller) {
+          if (sent >= TOTAL_CHUNKS) { controller.close(); return; }
+          controller.enqueue(CHUNK);
+          sent += 1;
+        },
+      }),
+    }) as any;
+
+    // Unique token in the URL filename so the cleanup assertion below
+    // targets only OUR test's residue and doesn't false-fail on parallel
+    // cleanup of stale temp files (`cleanupOldUploadTempFiles` removes
+    // >1h-old files opportunistically on every call).
+    const token = "r2-cap-channel-fixture";
+
+    await expect(octoPlugin.outbound!.sendMedia!({
+      cfg,
+      to: "group:grp1",
+      text: "",
+      mediaUrl: `https://example.com/${token}.bin`,
+      accountId: "default",
+    } as any)).rejects.toThrow(/exceeds max/);
+
+    // Cap fires before presigned API call → no upload attempted.
+    expect(apiFetch.getUploadPresign).not.toHaveBeenCalled();
+    expect(apiFetch.uploadFileToPresignedUrl).not.toHaveBeenCalled();
+    expect(apiFetch.sendMediaMessage).not.toHaveBeenCalled();
+
+    // Partial temp file (named `<uuid>-<token>.bin`) must be unlinked.
+    const after = await listOctoUploadTemp();
+    const survivors = after.filter(f => f.includes(token));
+    expect(survivors).toEqual([]);
   });
 });
 

@@ -549,9 +549,9 @@ describe("parseImageDimensionsFromFile", () => {
 });
 
 // ---------------------------------------------------------------------------
-// getUploadCredentials — validates response shape
+// getUploadPresign — validates response shape
 // ---------------------------------------------------------------------------
-describe("getUploadCredentials", () => {
+describe("getUploadPresign", () => {
   const originalFetch = global.fetch;
 
   beforeEach(() => {
@@ -562,35 +562,85 @@ describe("getUploadCredentials", () => {
     global.fetch = originalFetch;
   });
 
-  it("should return credentials on valid response", async () => {
-    const fakeCreds = {
-      bucket: "my-bucket",
-      region: "ap-guangzhou",
-      key: "uploads/test.png",
-      credentials: {
-        tmpSecretId: "id123",
-        tmpSecretKey: "key456",
-        sessionToken: "tok789",
-      },
-      startTime: 1000,
-      expiredTime: 2000,
-      cdnBaseUrl: "https://cdn.example.com",
+  it("should return presign on valid response", async () => {
+    const fakePresign = {
+      method: "PUT",
+      uploadUrl: "https://minio.example.com/octo/chat/1/a/b.png?X-Amz-Signature=abc",
+      downloadUrl: "https://minio.example.com/octo/chat/1/a/b.png",
+      contentType: "image/png",
+      contentDisposition: 'inline; filename="test.png"',
+      key: "chat/1/a/b.png",
     };
 
-    global.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: vi.fn().mockResolvedValue(fakeCreds),
+    let calledUrl = "";
+    global.fetch = vi.fn().mockImplementation(async (url: string) => {
+      calledUrl = url;
+      return { ok: true, json: vi.fn().mockResolvedValue(fakePresign) };
     }) as unknown as typeof fetch;
 
-    const { getUploadCredentials } = await import("./api-fetch.js");
-    const result = await getUploadCredentials({
+    const { getUploadPresign } = await import("./api-fetch.js");
+    const result = await getUploadPresign({
       apiUrl: "http://localhost:8090",
       botToken: "test-token",
       filename: "test.png",
+      fileSize: 1234,
+      contentType: "image/png",
     });
 
-    expect(result.bucket).toBe("my-bucket");
-    expect(result.credentials.tmpSecretId).toBe("id123");
+    expect(result.uploadUrl).toBe(fakePresign.uploadUrl);
+    expect(result.downloadUrl).toBe(fakePresign.downloadUrl);
+    expect(result.contentDisposition).toBe('inline; filename="test.png"');
+    // fileSize must be sent as a query param (server signs it into Content-Length).
+    expect(calledUrl).toContain("/v1/bot/upload/presigned");
+    expect(calledUrl).toContain("fileSize=1234");
+    expect(calledUrl).toContain("filename=test.png");
+    // contentType must be percent-encoded in the query string (image/png → image%2Fpng).
+    // Server doesn't currently consume this param, but the adapter sending it
+    // is part of the contract — pin it so a regression on the wire format
+    // (e.g. dropping the param or skipping URL encoding) is caught.
+    expect(calledUrl).toContain("contentType=image%2Fpng");
+  });
+
+  it("falls back to application/octet-stream when server response omits contentType", async () => {
+    // The server's botUploadPresigned handler always sets contentType, but a
+    // misbehaving / older / proxied server may strip it. The adapter must
+    // default to application/octet-stream so the downstream PUT can still
+    // replay a non-empty Content-Type header (SigV4 needs a value).
+    const fakePresign = {
+      method: "PUT",
+      uploadUrl: "https://minio.example.com/x.bin?X-Amz-Signature=abc",
+      downloadUrl: "https://minio.example.com/x.bin",
+      // no contentType
+    };
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue(fakePresign),
+    }) as unknown as typeof fetch;
+
+    const { getUploadPresign } = await import("./api-fetch.js");
+    const result = await getUploadPresign({
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      filename: "test.bin",
+      fileSize: 1024,
+    });
+    expect(result.contentType).toBe("application/octet-stream");
+  });
+
+  it("should throw on non-positive fileSize without calling the API", async () => {
+    const fetchMock = vi.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const { getUploadPresign } = await import("./api-fetch.js");
+    await expect(
+      getUploadPresign({
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        filename: "test.png",
+        fileSize: 0,
+      }),
+    ).rejects.toThrow("positive integer fileSize");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("should throw on non-ok response", async () => {
@@ -601,32 +651,33 @@ describe("getUploadCredentials", () => {
       statusText: "Forbidden",
     }) as unknown as typeof fetch;
 
-    const { getUploadCredentials } = await import("./api-fetch.js");
+    const { getUploadPresign } = await import("./api-fetch.js");
     await expect(
-      getUploadCredentials({
+      getUploadPresign({
         apiUrl: "http://localhost:8090",
         botToken: "test-token",
         filename: "test.png",
+        fileSize: 1024,
       }),
     ).rejects.toThrow("403");
   });
 
-  it("should throw on incomplete response (missing bucket)", async () => {
+  it("should throw on incomplete response (missing uploadUrl)", async () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,
       json: vi.fn().mockResolvedValue({
-        region: "ap-guangzhou",
-        key: "uploads/test.png",
-        credentials: { tmpSecretId: "id", tmpSecretKey: "key", sessionToken: "tok" },
+        downloadUrl: "https://minio.example.com/octo/x.png",
+        contentType: "image/png",
       }),
     }) as unknown as typeof fetch;
 
-    const { getUploadCredentials } = await import("./api-fetch.js");
+    const { getUploadPresign } = await import("./api-fetch.js");
     await expect(
-      getUploadCredentials({
+      getUploadPresign({
         apiUrl: "http://localhost:8090",
         botToken: "test-token",
         filename: "test.png",
+        fileSize: 1024,
       }),
     ).rejects.toThrow("incomplete");
   });
@@ -758,40 +809,79 @@ describe("ensureTextCharset", () => {
 });
 
 // ---------------------------------------------------------------------------
-// uploadFileToCOS — putParams includes ContentType
+// uploadFileToPresignedUrl — single PUT replays headers + returns downloadUrl
 // ---------------------------------------------------------------------------
-describe("uploadFileToCOS putParams ContentType", () => {
-  it("passes ContentType to cos.putObject", async () => {
-    let capturedParams: any = null;
+describe("uploadFileToPresignedUrl", () => {
+  const originalFetch = global.fetch;
 
-    vi.resetModules();
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
 
-    // Mock cos-nodejs-sdk-v5 before importing api-fetch
-    vi.doMock("cos-nodejs-sdk-v5", () => {
-      return {
-        default: class FakeCOS {
-          putObject(params: any, cb: any) {
-            capturedParams = params;
-            cb(null, { Location: "bucket.cos.region.myqcloud.com/key" });
-          }
-        },
-      };
-    });
+  it("PUTs to uploadUrl replaying contentType + contentDisposition + Content-Length, returns downloadUrl", async () => {
+    let captured: { url?: string; init?: any } = {};
+    global.fetch = vi.fn().mockImplementation(async (url: string, init: any) => {
+      captured = { url, init };
+      return { ok: true };
+    }) as unknown as typeof fetch;
 
-    const { uploadFileToCOS } = await import("./api-fetch.js");
-    await uploadFileToCOS({
-      credentials: { tmpSecretId: "id", tmpSecretKey: "key", sessionToken: "tok" },
-      startTime: 0,
-      expiredTime: 9999999999,
-      bucket: "test-bucket",
-      region: "ap-test",
-      key: "test/file.txt",
+    const { uploadFileToPresignedUrl } = await import("./api-fetch.js");
+    const result = await uploadFileToPresignedUrl({
+      uploadUrl: "https://minio.example.com/octo/chat/1/a/b.xlsx?X-Amz-Signature=abc",
+      downloadUrl: "https://minio.example.com/octo/chat/1/a/b.xlsx",
       fileBody: Buffer.from("hello"),
-      contentType: "text/plain; charset=utf-8",
+      fileSize: 5,
+      contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      contentDisposition: 'inline; filename="report.xlsx"',
     });
 
-    expect(capturedParams).not.toBeNull();
-    expect(capturedParams.ContentType).toBe("text/plain; charset=utf-8");
+    expect(captured.url).toBe("https://minio.example.com/octo/chat/1/a/b.xlsx?X-Amz-Signature=abc");
+    expect(captured.init.method).toBe("PUT");
+    expect(captured.init.headers["Content-Type"]).toBe(
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+    expect(captured.init.headers["Content-Length"]).toBe("5");
+    expect(captured.init.headers["Content-Disposition"]).toBe('inline; filename="report.xlsx"');
+    expect(result.url).toBe("https://minio.example.com/octo/chat/1/a/b.xlsx");
+  });
+
+  it("omits Content-Disposition header when the presign response had none", async () => {
+    let captured: any = {};
+    global.fetch = vi.fn().mockImplementation(async (_url: string, init: any) => {
+      captured = init;
+      return { ok: true };
+    }) as unknown as typeof fetch;
+
+    const { uploadFileToPresignedUrl } = await import("./api-fetch.js");
+    await uploadFileToPresignedUrl({
+      uploadUrl: "https://minio.example.com/octo/x.png?sig=1",
+      downloadUrl: "https://minio.example.com/octo/x.png",
+      fileBody: Buffer.from("img"),
+      fileSize: 3,
+      contentType: "image/png",
+    });
+
+    expect("Content-Disposition" in captured.headers).toBe(false);
+  });
+
+  it("throws on non-ok PUT response", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 403,
+      text: vi.fn().mockResolvedValue("SignatureDoesNotMatch"),
+      statusText: "Forbidden",
+    }) as unknown as typeof fetch;
+
+    const { uploadFileToPresignedUrl } = await import("./api-fetch.js");
+    await expect(
+      uploadFileToPresignedUrl({
+        uploadUrl: "https://minio.example.com/octo/x.png?sig=1",
+        downloadUrl: "https://minio.example.com/octo/x.png",
+        fileBody: Buffer.from("img"),
+        fileSize: 3,
+        contentType: "image/png",
+      }),
+    ).rejects.toThrow("403");
   });
 });
 

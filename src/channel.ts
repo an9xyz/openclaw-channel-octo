@@ -6,14 +6,15 @@ import type {
 import type { ChannelOutboundContext } from "openclaw/plugin-sdk/channel-contract";
 import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
 import { OctoConfigJsonSchema } from "./config-schema.js";
-import { CHANNEL_ID, stripAllChannelPrefixes } from "./constants.js";
+import { CHANNEL_ID, MAX_UPLOAD_SIZE, stripAllChannelPrefixes } from "./constants.js";
+import { streamToFileWithCap } from "./stream-helpers.js";
 import {
   listOctoAccountIds,
   resolveDefaultOctoAccountId,
   resolveOctoAccount,
   type ResolvedOctoAccount,
 } from "./accounts.js";
-import { registerBot, sendMessage, sendHeartbeat, sendMediaMessage, inferContentType, ensureTextCharset, fetchBotGroups, getGroupMd, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS } from "./api-fetch.js";
+import { registerBot, sendMessage, sendHeartbeat, sendMediaMessage, inferContentType, ensureTextCharset, fetchBotGroups, getGroupMd, parseImageDimensions, parseImageDimensionsFromFile, getUploadPresign, uploadFileToPresignedUrl } from "./api-fetch.js";
 import { PLUGIN_VERSION } from "./version.js";
 import { getOctoRuntime } from "./runtime.js";
 
@@ -44,13 +45,10 @@ import os from "node:os";
 import { mkdir, readFile, writeFile, unlink } from "node:fs/promises";
 import { createReadStream, createWriteStream, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { pipeline } from "node:stream/promises";
-import { Readable } from "node:stream";
 // HistoryEntry type - compatible with any version
 type HistoryEntry = { sender: string; body: string; timestamp: number };
 const DEFAULT_GROUP_HISTORY_LIMIT = 20;
 
-const MAX_UPLOAD_SIZE = 500 * 1024 * 1024; // 500 MB
 const UPLOAD_TEMP_DIR = path.join("/tmp", "octo-upload");
 
 /**
@@ -82,28 +80,21 @@ async function downloadToTempFile(url: string, filename: string, signal?: AbortS
   const safeName = sanitizeFilename(filename);
   const tempPath = path.join(UPLOAD_TEMP_DIR, `${randomUUID()}-${safeName}`);
 
-  // HEAD to check size first
-  const head = await fetch(url, { method: "HEAD", signal: signal ?? AbortSignal.timeout(30_000) });
-  const contentLength = Number(head.headers.get("content-length") || 0);
-  if (contentLength > MAX_UPLOAD_SIZE) {
-    throw new Error(`File too large (${contentLength} bytes, max ${MAX_UPLOAD_SIZE})`);
-  }
-
+  // Do NOT trust a HEAD Content-Length for the size check: a remote server may
+  // omit or lie about it, and the presigned PUT signs the exact byte count the
+  // caller derives from statSync() (SigV4 403 on any mismatch). Enforce the cap
+  // while streaming the body — see streamToFileWithCap for the read loop /
+  // backpressure / error / cancel logic.
   const resp = await fetch(url, { signal: signal ?? AbortSignal.timeout(300_000) });
   if (!resp.ok) throw new Error(`Failed to download media from ${url}: ${resp.status}`);
   const contentType = resp.headers.get("content-type") ?? undefined;
+  if (!resp.body) throw new Error(`No response body from ${url}`);
 
-  const body = resp.body;
-  if (!body) throw new Error(`No response body from ${url}`);
-  const nodeStream = Readable.fromWeb(body as any);
-  const ws = createWriteStream(tempPath);
-  try {
-    await pipeline(nodeStream, ws);
-  } catch (err) {
-    // Cleanup partial temp file on download failure
-    await unlink(tempPath).catch(() => {});
-    throw err;
-  }
+  await streamToFileWithCap({
+    body: resp.body as ReadableStream<Uint8Array>,
+    destPath: tempPath,
+    maxBytes: MAX_UPLOAD_SIZE,
+  });
   return { tempPath, contentType };
 }
 
@@ -908,7 +899,8 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
       }
 
       // 1. Resolve file — stream-based for HTTP/file paths, Buffer for data URIs
-      let fileBody: Buffer | NodeJS.ReadableStream;
+      let fileBuffer: Buffer | undefined;   // body for data: URIs (held in memory)
+      let bodyPath: string | undefined;     // body streamed from disk (file:// / temp)
       let fileSize: number;
       let contentType: string | undefined;
       let filename: string;
@@ -925,8 +917,20 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
           throw new Error("Invalid data URI format");
         }
         contentType = match[1] || "application/octet-stream";
-        const buf = Buffer.from(match[2], "base64");
-        fileBody = buf;
+        const b64 = match[2];
+        // Estimate decoded size from base64 length BEFORE allocating the
+        // Buffer, so an oversize `data:` URI is rejected without the 100MB+
+        // allocation it would otherwise force. The formula is exact for
+        // canonical base64 (whitespace stripped before measuring); padding
+        // bytes are subtracted because '=' chars don't decode to data.
+        const trimmedB64 = b64.replace(/\s/g, "");
+        const padding = trimmedB64.endsWith("==") ? 2 : trimmedB64.endsWith("=") ? 1 : 0;
+        const decodedSize = Math.floor(trimmedB64.length * 3 / 4) - padding;
+        if (decodedSize > MAX_UPLOAD_SIZE) {
+          throw new Error(`File too large (${decodedSize} bytes, max ${MAX_UPLOAD_SIZE})`);
+        }
+        const buf = Buffer.from(b64, "base64");
+        fileBuffer = buf;
         fileSize = buf.length;
         // Generate a reasonable filename from MIME type
         const extMap: Record<string, string> = {
@@ -948,7 +952,7 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
           throw new Error(`File too large (${st.size} bytes, max ${MAX_UPLOAD_SIZE})`);
         }
         localFilePath = filePath;
-        fileBody = createReadStream(filePath);
+        bodyPath = filePath;
         fileSize = st.size;
         filename = path.basename(filePath);
         contentType = inferContentType(filename);
@@ -967,7 +971,7 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
         contentType = dl.contentType;
         if (!contentType || contentType === "application/octet-stream") contentType = inferContentType(filename);
         const st = statSync(tempPath);
-        fileBody = createReadStream(tempPath);
+        bodyPath = tempPath;
         fileSize = st.size;
       }
 
@@ -975,24 +979,29 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
 
       let sendResult: SendMessageResult | undefined;
       try {
-        // 2. Upload to COS via STS credentials (stream mode)
-        const creds = await getUploadCredentials({
+        // 2. Upload via the server's backend-agnostic presigned PUT URL.
+        //    fileSize is the exact body byte count (statSync / buffer length);
+        //    it is signed into the SigV4 Content-Length (403 on mismatch).
+        const presign = await getUploadPresign({
           apiUrl: account.config.apiUrl,
           botToken: account.config.botToken,
           filename,
-        });
-        const { url: cdnUrl } = await uploadFileToCOS({
-          credentials: creds.credentials,
-          startTime: creds.startTime,
-          expiredTime: creds.expiredTime,
-          bucket: creds.bucket,
-          region: creds.region,
-          key: creds.key,
-          fileBody,
           fileSize,
           contentType: ensureTextCharset(contentType),
-          cdnBaseUrl: creds.cdnBaseUrl,
-          filename,
+        });
+        // Open the read stream lazily (after presign succeeds) so a presign
+        // failure never leaves a dangling open() against an unlinked temp file.
+        const fileBody: Buffer | NodeJS.ReadableStream =
+          fileBuffer ?? createReadStream(bodyPath!);
+        const { url: cdnUrl } = await uploadFileToPresignedUrl({
+          uploadUrl: presign.uploadUrl,
+          downloadUrl: presign.downloadUrl,
+          fileBody,
+          fileSize,
+          // Replay the server-signed contentType / contentDisposition verbatim
+          // (both folded into the SigV4 canonical headers, 403 otherwise).
+          contentType: presign.contentType,
+          contentDisposition: presign.contentDisposition,
         });
 
         // 3. Resolve target — merge framework-provided threadId into
