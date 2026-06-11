@@ -12,6 +12,7 @@ import {
   resolveFileContentWithRetry,
   downloadToTemp,
   uploadAndSendMedia,
+  uploadMedia,
   downloadMediaToLocal,
   buildMemberListPrefix,
   buildPersonaGroupSystemPrompt,
@@ -950,6 +951,89 @@ describe("uploadAndSendMedia timeout", () => {
     expect(calls.length).toBeGreaterThanOrEqual(1);
     expect(calls[0].method).toBeUndefined();
     expect(calls[0].signal).toBeDefined();
+  });
+});
+
+/**
+ * Streaming size cap (PR#66 R2 — lml2468 阻断点).
+ *
+ * After dropping the HEAD-based pre-check, the streaming cap inside
+ * uploadMedia is the only line of defense against oversize remote downloads.
+ * These tests pin that contract:
+ *   - rejects with /exceeds max/
+ *   - presigned PUT API is never called (no upload attempted past the cap)
+ *   - partial temp file under /tmp/octo-upload is unlinked on failure
+ */
+describe("uploadMedia — streaming size cap (R2)", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  async function listOctoUploadTemp(): Promise<string[]> {
+    const { readdir } = await import("node:fs/promises");
+    try { return await readdir("/tmp/octo-upload"); } catch { return []; }
+  }
+
+  it("rejects with 'exceeds max' when stream surpasses 100MB cap; no PUT made; temp file cleaned", async () => {
+    const calls: Array<{ url: string; method?: string }> = [];
+    // 1MB chunk, yielded enough times to cross 100MB — keeps memory low.
+    const CHUNK = new Uint8Array(1024 * 1024);
+    const TOTAL_CHUNKS = 110; // 110MB > 100MB cap
+
+    vi.stubGlobal("fetch", async (url: string, opts?: any) => {
+      calls.push({ url, method: opts?.method });
+      // No /v1/bot/upload/presigned call should happen — but if any does, fail it.
+      if (typeof url === "string" && url.includes("/v1/bot/")) {
+        throw new Error(
+          `presigned API was reached but cap should have short-circuited; url=${url}`,
+        );
+      }
+      // GET media download — yield chunks > cap
+      let sent = 0;
+      const body = new ReadableStream({
+        pull(controller) {
+          if (sent >= TOTAL_CHUNKS) {
+            controller.close();
+            return;
+          }
+          controller.enqueue(CHUNK);
+          sent += 1;
+        },
+      });
+      return {
+        ok: true,
+        headers: new Headers({ "content-type": "application/octet-stream" }),
+        body,
+      };
+    });
+
+    // Use a unique filename token so the cleanup assertion below targets only
+    // OUR test's residue and doesn't false-fail on parallel cleanup of stale
+    // temp files (cleanupOldUploadTempFiles deletes >1h-old files opportunistically).
+    const token = "r2-cap-uploadMedia-fixture";
+
+    await expect(uploadMedia({
+      mediaUrl: `https://example.com/${token}.bin`,
+      apiUrl: "https://api.example.com",
+      botToken: "bf_test",
+    })).rejects.toThrow(/exceeds max/);
+
+    // Only the GET should have been called; no presigned API call.
+    const presignedCalls = calls.filter(c =>
+      c.url.includes("/v1/bot/upload/presigned") || c.url.includes("/v1/bot/upload/credentials"),
+    );
+    expect(presignedCalls).toHaveLength(0);
+    const putCalls = calls.filter(c => c.method === "PUT");
+    expect(putCalls).toHaveLength(0);
+
+    // Partial temp file (named `<uuid>-<token>.bin`) must be unlinked on failure.
+    const after = await listOctoUploadTemp();
+    const survivors = after.filter(f => f.includes(token));
+    expect(survivors).toEqual([]);
   });
 });
 

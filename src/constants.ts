@@ -24,6 +24,22 @@ export const CHANNEL_ID = "octo";
 export const THREAD_ID_SEPARATOR = "____";
 
 /**
+ * Maximum payload size for outbound bot uploads, in bytes (100 MB).
+ *
+ * This is the local-side cap enforced by both the outbound action handler
+ * (channel.ts) and the inbound `uploadMedia` helper. It is intentionally aligned
+ * to the server's `file.MaxFileSize` (octo-server `modules/file/const.go:128`):
+ * `GET /v1/bot/upload/presigned` rejects any `fileSize > MaxFileSize` before
+ * signing the PUT URL, so a higher local cap would just produce a clear local
+ * error to a less clear remote 4xx.
+ *
+ * Centralized here so future bumps (when server `file.MaxFileSize` is raised)
+ * change one number, not three.
+ */
+export const MAX_UPLOAD_SIZE = 100 * 1024 * 1024;
+
+
+/**
  * Strip any of the known channel namespace prefixes (`octo:`, `channel:`,
  * `group:`) from a channelId / sessionKey / target string. Strips
  * **recursively** — stacked prefixes such as `"octo:group:grp1"` or

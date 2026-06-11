@@ -6,7 +6,7 @@ import type {
 import type { ChannelOutboundContext } from "openclaw/plugin-sdk/channel-contract";
 import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
 import { OctoConfigJsonSchema } from "./config-schema.js";
-import { CHANNEL_ID, stripAllChannelPrefixes } from "./constants.js";
+import { CHANNEL_ID, MAX_UPLOAD_SIZE, stripAllChannelPrefixes } from "./constants.js";
 import {
   listOctoAccountIds,
   resolveDefaultOctoAccountId,
@@ -48,7 +48,6 @@ import { randomUUID } from "node:crypto";
 type HistoryEntry = { sender: string; body: string; timestamp: number };
 const DEFAULT_GROUP_HISTORY_LIMIT = 20;
 
-const MAX_UPLOAD_SIZE = 100 * 1024 * 1024; // 100 MB — aligned to server file.MaxFileSize
 const UPLOAD_TEMP_DIR = path.join("/tmp", "octo-upload");
 
 /**
@@ -105,7 +104,10 @@ async function downloadToTempFile(url: string, filename: string, signal?: AbortS
       if (done) break;
       totalBytes += value.byteLength;
       if (totalBytes > MAX_UPLOAD_SIZE) {
-        reader.cancel();
+        // Fire-and-forget cancel; the surrounding catch handles cleanup.
+        // .catch swallows late rejections so they don't surface as
+        // unhandledRejection after we already threw below.
+        reader.cancel().catch(() => {});
         throw new Error(`File too large (exceeds max ${MAX_UPLOAD_SIZE} bytes)`);
       }
       if (!ws.write(value)) {
@@ -948,7 +950,19 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
           throw new Error("Invalid data URI format");
         }
         contentType = match[1] || "application/octet-stream";
-        const buf = Buffer.from(match[2], "base64");
+        const b64 = match[2];
+        // Estimate decoded size from base64 length BEFORE allocating the
+        // Buffer, so an oversize `data:` URI is rejected without the 100MB+
+        // allocation it would otherwise force. The formula is exact for
+        // canonical base64 (whitespace stripped before measuring); padding
+        // bytes are subtracted because '=' chars don't decode to data.
+        const trimmedB64 = b64.replace(/\s/g, "");
+        const padding = trimmedB64.endsWith("==") ? 2 : trimmedB64.endsWith("=") ? 1 : 0;
+        const decodedSize = Math.floor(trimmedB64.length * 3 / 4) - padding;
+        if (decodedSize > MAX_UPLOAD_SIZE) {
+          throw new Error(`File too large (${decodedSize} bytes, max ${MAX_UPLOAD_SIZE})`);
+        }
+        const buf = Buffer.from(b64, "base64");
         fileBuffer = buf;
         fileSize = buf.length;
         // Generate a reasonable filename from MIME type

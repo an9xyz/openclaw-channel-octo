@@ -86,8 +86,13 @@ vi.mock("./api-fetch.js", () => ({
   getGroupMembers: vi.fn(),
   parseImageDimensions: vi.fn(),
   parseImageDimensionsFromFile: vi.fn(),
-  getUploadCredentials: vi.fn(),
-  uploadFileToCOS: vi.fn(),
+  getUploadPresign: vi.fn().mockResolvedValue({
+    uploadUrl: "https://storage.example/upload?sig=1",
+    downloadUrl: "https://cdn.example/file.txt",
+    contentType: "application/octet-stream",
+    contentDisposition: 'inline; filename="file.txt"',
+  }),
+  uploadFileToPresignedUrl: vi.fn().mockResolvedValue({ url: "https://cdn.example/file.txt" }),
 }));
 
 describe("handleAction multi-bot isolation", () => {

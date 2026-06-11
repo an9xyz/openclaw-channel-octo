@@ -9,7 +9,7 @@ import type { BotMessage } from "./types.js";
 import { ChannelType, MessageType, RICH_TEXT_BLOCK_IMAGE, RICH_TEXT_BLOCK_TEXT, RICH_TEXT_IMAGE_PLACEHOLDER } from "./types.js";
 import type { RichTextBlock } from "./types.js";
 import { getOctoRuntime } from "./runtime.js";
-import { CHANNEL_ID } from "./constants.js";
+import { CHANNEL_ID, MAX_UPLOAD_SIZE } from "./constants.js";
 import {
   extractMentionMatches,
   extractMentionUids,
@@ -217,8 +217,6 @@ export async function uploadMedia(params: {
   const { mkdir: fsMkdir, unlink: fsUnlink } = await import("node:fs/promises");
   const { randomUUID } = await import("node:crypto");
 
-  // Align with the server presigned route cap (file.MaxFileSize = 100MB).
-  const MAX_UPLOAD = 100 * 1024 * 1024;
   const TEMP_DIR = pathJoin("/tmp", "octo-upload");
 
   let fileSize: number;
@@ -265,9 +263,12 @@ export async function uploadMedia(params: {
         const { done, value } = await reader.read();
         if (done) break;
         totalBytes += value.byteLength;
-        if (totalBytes > MAX_UPLOAD) {
-          reader.cancel();
-          throw new Error(`File too large (exceeds max ${MAX_UPLOAD} bytes)`);
+        if (totalBytes > MAX_UPLOAD_SIZE) {
+          // Fire-and-forget cancel; the surrounding catch handles cleanup.
+          // .catch swallows late rejections so they don't surface as
+          // unhandledRejection after we already threw below.
+          reader.cancel().catch(() => {});
+          throw new Error(`File too large (exceeds max ${MAX_UPLOAD_SIZE} bytes)`);
         }
         if (!ws.write(value)) {
           await Promise.race([
@@ -295,7 +296,7 @@ export async function uploadMedia(params: {
   } else {
     // Local file path — stream, don't buffer
     const st = fsStatSync(mediaUrl);
-    if (st.size > MAX_UPLOAD) throw new Error(`File too large (${st.size} bytes, max ${MAX_UPLOAD})`);
+    if (st.size > MAX_UPLOAD_SIZE) throw new Error(`File too large (${st.size} bytes, max ${MAX_UPLOAD_SIZE})`);
     bodyPath = mediaUrl;
     fileSize = st.size;
     filename = basename(mediaUrl);
