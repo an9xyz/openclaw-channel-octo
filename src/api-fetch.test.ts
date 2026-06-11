@@ -594,6 +594,37 @@ describe("getUploadPresign", () => {
     expect(calledUrl).toContain("/v1/bot/upload/presigned");
     expect(calledUrl).toContain("fileSize=1234");
     expect(calledUrl).toContain("filename=test.png");
+    // contentType must be percent-encoded in the query string (image/png → image%2Fpng).
+    // Server doesn't currently consume this param, but the adapter sending it
+    // is part of the contract — pin it so a regression on the wire format
+    // (e.g. dropping the param or skipping URL encoding) is caught.
+    expect(calledUrl).toContain("contentType=image%2Fpng");
+  });
+
+  it("falls back to application/octet-stream when server response omits contentType", async () => {
+    // The server's botUploadPresigned handler always sets contentType, but a
+    // misbehaving / older / proxied server may strip it. The adapter must
+    // default to application/octet-stream so the downstream PUT can still
+    // replay a non-empty Content-Type header (SigV4 needs a value).
+    const fakePresign = {
+      method: "PUT",
+      uploadUrl: "https://minio.example.com/x.bin?X-Amz-Signature=abc",
+      downloadUrl: "https://minio.example.com/x.bin",
+      // no contentType
+    };
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue(fakePresign),
+    }) as unknown as typeof fetch;
+
+    const { getUploadPresign } = await import("./api-fetch.js");
+    const result = await getUploadPresign({
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      filename: "test.bin",
+      fileSize: 1024,
+    });
+    expect(result.contentType).toBe("application/octet-stream");
   });
 
   it("should throw on non-positive fileSize without calling the API", async () => {

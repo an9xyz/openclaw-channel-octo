@@ -1035,6 +1035,47 @@ describe("uploadMedia — streaming size cap (R2)", () => {
     const survivors = after.filter(f => f.includes(token));
     expect(survivors).toEqual([]);
   });
+
+  it("does NOT reject at exactly 100MB (cap is exclusive `> max`, not `>= max`)", async () => {
+    // Boundary case: yield exactly MAX_UPLOAD_SIZE bytes total. The cap
+    // check is `totalBytes > maxBytes` (strict), so streaming ends without
+    // throwing the cap error. Flow then proceeds into getUploadPresign,
+    // where our mock fetches a sentinel error — the test asserts that
+    // sentinel surfaced (proving the cap did NOT short-circuit) instead of
+    // /exceeds max/.
+    const CHUNK = new Uint8Array(1024 * 1024); // 1MB
+    const TOTAL_CHUNKS = 100;                  // exactly 100MB = MAX_UPLOAD_SIZE
+    const PRESIGN_SENTINEL = "PRESIGN_REACHED_PAST_BOUNDARY";
+
+    vi.stubGlobal("fetch", async (url: string, opts?: any) => {
+      // Anything that looks like the bot upload API → throw a sentinel so we
+      // can assert "presign was reached" without setting up a full happy-path
+      // PUT mock. If the cap had wrongly tripped at exactly 100MB, this branch
+      // would never be hit and the test would fail with /exceeds max/.
+      if (typeof url === "string" && url.includes("/v1/bot/")) {
+        throw new Error(PRESIGN_SENTINEL);
+      }
+      let sent = 0;
+      const body = new ReadableStream({
+        pull(controller) {
+          if (sent >= TOTAL_CHUNKS) { controller.close(); return; }
+          controller.enqueue(CHUNK);
+          sent += 1;
+        },
+      });
+      return {
+        ok: true,
+        headers: new Headers({ "content-type": "application/octet-stream" }),
+        body,
+      };
+    });
+
+    await expect(uploadMedia({
+      mediaUrl: "https://example.com/exact-cap-boundary.bin",
+      apiUrl: "https://api.example.com",
+      botToken: "bf_test",
+    })).rejects.toThrow(PRESIGN_SENTINEL);
+  });
 });
 
 /**

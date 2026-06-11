@@ -7,6 +7,7 @@ import type { ChannelOutboundContext } from "openclaw/plugin-sdk/channel-contrac
 import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
 import { OctoConfigJsonSchema } from "./config-schema.js";
 import { CHANNEL_ID, MAX_UPLOAD_SIZE, stripAllChannelPrefixes } from "./constants.js";
+import { streamToFileWithCap } from "./stream-helpers.js";
 import {
   listOctoAccountIds,
   resolveDefaultOctoAccountId,
@@ -82,59 +83,18 @@ async function downloadToTempFile(url: string, filename: string, signal?: AbortS
   // Do NOT trust a HEAD Content-Length for the size check: a remote server may
   // omit or lie about it, and the presigned PUT signs the exact byte count the
   // caller derives from statSync() (SigV4 403 on any mismatch). Enforce the cap
-  // while streaming the body instead.
+  // while streaming the body — see streamToFileWithCap for the read loop /
+  // backpressure / error / cancel logic.
   const resp = await fetch(url, { signal: signal ?? AbortSignal.timeout(300_000) });
   if (!resp.ok) throw new Error(`Failed to download media from ${url}: ${resp.status}`);
   const contentType = resp.headers.get("content-type") ?? undefined;
-
   if (!resp.body) throw new Error(`No response body from ${url}`);
-  const ws = createWriteStream(tempPath);
-  let totalBytes = 0;
-  // Attach the error handler before the first write so a mid-stream write
-  // error (disk full, etc.) is captured promptly instead of crashing as an
-  // unhandled stream 'error' event.
-  const streamError = new Promise<never>((_, reject) => {
-    ws.on("error", reject);
+
+  await streamToFileWithCap({
+    body: resp.body as ReadableStream<Uint8Array>,
+    destPath: tempPath,
+    maxBytes: MAX_UPLOAD_SIZE,
   });
-  streamError.catch(() => {});
-  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
-  try {
-    reader = (resp.body as any).getReader() as ReadableStreamDefaultReader<Uint8Array>;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      totalBytes += value.byteLength;
-      if (totalBytes > MAX_UPLOAD_SIZE) {
-        // Fire-and-forget cancel; the surrounding catch handles cleanup.
-        // .catch swallows late rejections so they don't surface as
-        // unhandledRejection after we already threw below.
-        reader.cancel().catch(() => {});
-        throw new Error(`File too large (exceeds max ${MAX_UPLOAD_SIZE} bytes)`);
-      }
-      if (!ws.write(value)) {
-        await Promise.race([
-          new Promise<void>(r => ws.once("drain", r)),
-          streamError,
-        ]);
-      }
-    }
-    ws.end();
-    await Promise.race([
-      new Promise<void>(resolve => ws.on("finish", resolve)),
-      streamError,
-    ]);
-  } catch (err) {
-    // Release the upstream fetch response stream on any failure path —
-    // disk-full / EIO / drain race / timeout / cap exceeded all flow here.
-    // Without this, ws.write throwing leaves the body reader unconsumed
-    // and undici only releases the socket on GC, leaking a network
-    // connection per failed download.
-    reader?.cancel().catch(() => {});
-    ws.destroy();
-    // Cleanup partial temp file on download failure
-    await unlink(tempPath).catch(() => {});
-    throw err;
-  }
   return { tempPath, contentType };
 }
 
