@@ -97,8 +97,9 @@ async function downloadToTempFile(url: string, filename: string, signal?: AbortS
     ws.on("error", reject);
   });
   streamError.catch(() => {});
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
-    const reader = (resp.body as any).getReader() as ReadableStreamDefaultReader<Uint8Array>;
+    reader = (resp.body as any).getReader() as ReadableStreamDefaultReader<Uint8Array>;
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -123,6 +124,12 @@ async function downloadToTempFile(url: string, filename: string, signal?: AbortS
       streamError,
     ]);
   } catch (err) {
+    // Release the upstream fetch response stream on any failure path —
+    // disk-full / EIO / drain race / timeout / cap exceeded all flow here.
+    // Without this, ws.write throwing leaves the body reader unconsumed
+    // and undici only releases the socket on GC, leaking a network
+    // connection per failed download.
+    reader?.cancel().catch(() => {});
     ws.destroy();
     // Cleanup partial temp file on download failure
     await unlink(tempPath).catch(() => {});
