@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.16](https://github.com/Mininglamp-OSS/openclaw-channel-octo/compare/v1.0.15...v1.0.16) (2026-06-13)
+
+### Fixed
+- **长任务（>5min）必被 dispatch 超时强制中断**（#113, PR #114）：dispatch 超时硬编码 300s 且无配置入口，即便 OpenClaw 侧把 `agents.defaults.timeoutSeconds` 调到 1000s，octo 仍在 5 分钟砍掉派发，用户收到「处理超时」而 agent 其实还在正常跑。
+  - 修复：超时改为每条入站动态解析 `resolveDispatchTimeoutMs` —— 显式 `dispatchTimeoutMs`（channel / account 级，account 覆盖 channel）优先，否则派生为 `(agents.defaults.timeoutSeconds ?? 600) × 1000 + 60s`
+  - 60s buffer 保证看门狗**永远晚于** agent-run 超时触发：core 先优雅终止 run，这个守卫只兜真正卡死的基础设施，不再误杀健康长任务
+  - 单一事实来源：调 `timeoutSeconds` 一个旋钮，看门狗自动跟随；默认从 300s 提到 660s
+- **dispatch 静默卡死永久堵塞 per-group 队列**（Refs #75, PR #83）：上游 `dispatchReplyWithBufferedBlockDispatcher` 偶发挂起（不 resolve / 不 reject / 不 onError），叠加 per-group 串行队列，导致该群后续消息全部静默丢弃，需重启 gateway 恢复。
+  - 修复：给派发加超时看门狗，把「静默永久卡死」转成「单条消息超时 + warn 日志 + 道歉 + 队列推进」；道歉与 final-flush 发送各自 `AbortSignal.timeout` 兜底，避免 Octo API 同时生病时二次卡死
+- **工具警告覆盖真回复、真答案丢失**（#117, PR #115）：同一回合 core 同时产出正经 final 回复和工具报错警告（都 `kind=final`）时，单槽 deliver buffer 被较短的警告覆盖，用户只看到「⚠️ … failed」，多段真答案丢失。
+  - 修复：照搬 Discord 的「警告延迟」模式 —— 工具警告 final 先压在 `pendingToolWarningFinal`，正经回复立即发；仅在「确实没发过正经回复」时才补发警告；`onError` 后不补发。跨 SDK 特性探测，老 SDK 退化为立即发、绝不丢真答案
+- **自建 MinIO / S3 部署下 bot 文件上传 100% 失败**（#65, PR #66）：上传写死了腾讯 COS 专用的 `GET /v1/bot/upload/credentials`（`cos-nodejs-sdk-v5` 无 endpoint 选项、默认指向 `*.myqcloud.com`），无 COS 配置的自建 Docker + MinIO 部署该接口 500，图片 / 文件 / 视频上传全挂。
+  - 修复：改走服务端早已提供、后端无关的 `GET /v1/bot/upload/presigned`（签名 PUT，MinIO / COS / S3 / OSS 通吃，与 web / iOS / Android 同路径）。**仅改 adapter，服务端不变**
+- **write-secret 安全收口**（consolidates #92/#95/#96, PR #97）：fail-closed jail（无 `process.cwd()` 回退，未配 root 直接拒写，根除 `root="/"` 自锁与 fail-open）；默认 jail = agent workspace（带 realpath 退化根防护 + agent-id 命名空间匹配，常见场景零配置）；resolve 契约对齐 octo-server #301。
+- **主动发送时 outbound @mention 失败**（#85, PR #86）：cron / 新建 thread / agent 主动发起的消息，@mention 渲染成裸 `@<uid>:<name>` 或永不匹配的 `@<bot_username>`；同样内容走 inbound 回复却正常。
+  - 根因：成员 Map 只在 inbound 路径填充，outbound 跑在空 / 过期 Map 上；且成员列表与 mention 格式提示也只在 inbound 注入，主动回合拿不到
+  - 修复：主动 outbound 路径补齐成员预取 + mention 格式引导
+- **thread 内发送泄漏到父群**（#98, PR #100）：bot 在子 thread session 里，LLM 传 `group:<gid>` 目标（多数是「发到群里」在 thread 语境下的理解）时，被路由到**父群**，泄露给全体父群成员、thread 参与者却看不到。
+  - 修复：加确定性运行时护栏，thread session 内把裸 parent-group 目标自动重路由回当前 thread（呼应 #86 的 prompt + 兜底双保险模式，不再只靠概率性的 prompt 引导）
+- CI：check-sprint 触发类型补 `ready_for_review`（#49）
+
+### Added
+- **write-secret agent action**（PR #71）：`octo_management` 工具新增 `write-secret`，让 assistant 通过**别名**（显示名 / secret id）把用户外部托管的密钥（如 OpenAI key）写入本地文件，原始明文全程不经过模型与聊天记录。use-time 解析（每次调用现取），返回 `resolved` / `not_found` / `ambiguous`
+- **`scope:"parent"` 逃生口 + 发送回执字段**（#98, PR #110）：在 #100 自动重路由基础上，允许 agent 显式指定发到父群、主动 opt-out 重路由（仅认字面量 `"parent"`）；并补充目标回执 / 可观测字段
+- **按名字解析目标**（#105, PR #109）：`octo_management` 新增 `resolve` action，把「转发给『XXX』」这种命名目标解析成具体 group / thread 候选，不再让 agent 手搓 `group:` 地址靠猜。依赖 octo-server #337（`GET /v1/bot/resolve/targets`），未部署时返回干净的「resolve unavailable」
+
+### Internal
+- **统一 channel-prefix 归一化**（#102, PR #103）：`src/actions.ts` 此前对「剥 channel 命名空间前缀」有三套不同实现，`handleRead` 只剥 `octo:`，导致带 `group:` / `channel:` 前缀的 `currentChannelId` 与 `parseTarget` 剥净后的 channelId 比较时 `isSameChannel` 误判为跨 channel。收敛为单一 helper，统一剥同一组前缀。
+- **文档：incoming webhook bot 端点**（PR #112）：在 `octo-bot-api` skill 文档化 octo-server #340 的 7 个 webhook 管理端点 + 免登录推送 URL，让 agent 可自助为群配置 CI / 监控 / GitHub / 企业微信的免登录推送通道并管理其生命周期（docs-only，无插件代码改动）
+- force patch release for v1.0.16（#107）
+
 ## [1.0.15](https://github.com/Mininglamp-OSS/openclaw-channel-octo/compare/v1.0.14...v1.0.15) (2026-06-08)
 
 ### Fixed
