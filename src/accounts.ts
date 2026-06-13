@@ -20,6 +20,7 @@ export type ResolvedOctoAccount = {
     historyPromptTemplate?: string;  // Template for group history context injection
     onBehalfOf?: string;  // Persona clone: grantor uid
     secretsFileRoot?: string;  // Jail root for write-secret file writes
+    dispatchTimeoutMs?: number;  // Explicit dispatch-timeout override; unset = derive from agents.defaults.timeoutSeconds (issue #113)
   };
 };
 
@@ -102,6 +103,7 @@ export function resolveOctoAccount(params: {
       historyPromptTemplate: accountConfig.historyPromptTemplate ?? channel.historyPromptTemplate,
       onBehalfOf: accountConfig.onBehalfOf ?? channel.onBehalfOf,
       secretsFileRoot: accountConfig.secretsFileRoot ?? channel.secretsFileRoot,
+      dispatchTimeoutMs: accountConfig.dispatchTimeoutMs ?? channel.dispatchTimeoutMs,
     },
   };
 }

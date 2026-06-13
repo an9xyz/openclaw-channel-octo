@@ -15,6 +15,7 @@ export interface OctoAccountConfig {
   historyPromptTemplate?: string;  // Template for group history context injection
   onBehalfOf?: string;  // Persona clone: grantor uid — bot acts on behalf of this human
   secretsFileRoot?: string;  // Jail root for write-secret: secret files may only be written under this path. When unset, defaults to the agent's workspace (agents.list[].workspace matched to the agent, else agents.defaults.workspace); if neither resolves, write-secret fails closed (no process.cwd() fallback).
+  dispatchTimeoutMs?: number;  // Explicit per-inbound dispatch timeout override (ms). Unset = derived from agents.defaults.timeoutSeconds + 60s buffer (issue #113).
 }
 
 export interface OctoConfig {
@@ -32,6 +33,7 @@ export interface OctoConfig {
   historyPromptTemplate?: string;  // Template for group history context injection
   onBehalfOf?: string;  // Persona clone: grantor uid — bot acts on behalf of this human
   secretsFileRoot?: string;  // Jail root for write-secret (see OctoAccountConfig)
+  dispatchTimeoutMs?: number;  // Explicit per-inbound dispatch timeout override (ms); see OctoAccountConfig
   accounts?: Record<string, OctoAccountConfig | undefined>;
 }
 
@@ -44,6 +46,15 @@ export const DEFAULT_HISTORY_PROMPT_TEMPLATE =
 // (manifest-schema-sync.test.ts asserts this).
 export const SECRETS_FILE_ROOT_DESCRIPTION =
   "Jail root for write-secret: secret files may only be written under this path. When unset, defaults to the agent's workspace (agents.list[].workspace matched to the agent, else agents.defaults.workspace). If neither resolves to a usable directory, write-secret is unavailable (fail-closed); there is no process working-directory fallback.";
+
+// Shared description for dispatchTimeoutMs, kept identical to the wording in
+// openclaw.plugin.json (manifest-schema-sync.test.ts asserts key-level sync).
+// Semantics (issue #113): this timeout is the per-group-queue infrastructure
+// backstop from issue #75, NOT an agent-run timeout. When unset it is DERIVED
+// as (agents.defaults.timeoutSeconds ?? 600) * 1000 + 60000, so it always
+// fires strictly after OpenClaw core's own agent-run timeout.
+export const DISPATCH_TIMEOUT_MS_DESCRIPTION =
+  "Per-inbound dispatch timeout in milliseconds (infrastructure backstop that releases the per-group queue when an upstream dispatch hangs). When unset, derived from agents.defaults.timeoutSeconds (default 600) as timeoutSeconds*1000 + 60000, so it always fires after the agent-run timeout. Set explicitly only when you need to decouple it from the agent timeout.";
 
 // JSON Schema for OpenClaw plugin config validation
 export const OctoConfigJsonSchema = {
@@ -64,6 +75,7 @@ export const OctoConfigJsonSchema = {
       historyPromptTemplate: { type: "string" },
       onBehalfOf: { type: "string" },
       secretsFileRoot: { type: "string", description: SECRETS_FILE_ROOT_DESCRIPTION },
+      dispatchTimeoutMs: { type: "number", minimum: 1000, description: DISPATCH_TIMEOUT_MS_DESCRIPTION },
       accounts: {
         type: "object",
         additionalProperties: {
@@ -83,6 +95,7 @@ export const OctoConfigJsonSchema = {
             historyPromptTemplate: { type: "string" },
             onBehalfOf: { type: "string" },
             secretsFileRoot: { type: "string", description: SECRETS_FILE_ROOT_DESCRIPTION },
+            dispatchTimeoutMs: { type: "number", minimum: 1000, description: DISPATCH_TIMEOUT_MS_DESCRIPTION },
           },
         },
       },

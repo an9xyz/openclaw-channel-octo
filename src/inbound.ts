@@ -32,7 +32,8 @@ import { mkdir, unlink, readdir, stat } from "node:fs/promises";
 import { join, basename } from "node:path";
 import { randomUUID } from "node:crypto";
 
-// Per-inbound dispatch timeout (issue #75). The upstream OpenClaw runtime call
+// Per-inbound dispatch timeout (issue #75; config derivation: issue #113).
+// The upstream OpenClaw runtime call
 // `core.channel.reply.dispatchReplyWithBufferedBlockDispatcher` is observed to
 // occasionally hang indefinitely (no resolve, no reject, no onError) — likely
 // in agent/runtime layers, not in this plugin. Combined with the per-group
@@ -41,11 +42,21 @@ import { randomUUID } from "node:crypto";
 // restarts. This wrapper turns "silent permanent block" into "single-message
 // timeout with a warn log + user-facing apology + queue advances".
 //
-// 5 minutes is intentionally generous — longer than any normal LLM round-trip,
-// short enough that a stuck group recovers within one user attention span.
+// This timeout is a pure infrastructure backstop — it must NOT double as an
+// agent-run timeout (OpenClaw core already bounds agent runs via
+// `agents.defaults.timeoutSeconds`). Issue #113: the old hardcoded 5-minute
+// value killed healthy long-running dispatches whenever operators raised
+// `timeoutSeconds` above 300s. The effective value is therefore resolved
+// per-inbound by `resolveDispatchTimeoutMs` (see below): an explicit
+// `dispatchTimeoutMs` channel/account config wins, otherwise the value is
+// DERIVED as `agents.defaults.timeoutSeconds (default 600) * 1000 + 60s`.
+// The 60s buffer guarantees by construction that this guard fires strictly
+// AFTER the agent-run timeout — core terminates the run gracefully first,
+// and the dispatch guard only catches genuinely hung infrastructure.
 // Tests override via `_setDispatchTimeoutForTests` to keep the suite fast.
-const DISPATCH_TIMEOUT_DEFAULT_MS = 5 * 60 * 1000;
-let DISPATCH_TIMEOUT_MS = DISPATCH_TIMEOUT_DEFAULT_MS;
+const DISPATCH_TIMEOUT_BUFFER_MS = 60_000;
+const DEFAULT_AGENT_TIMEOUT_SECONDS = 600;
+let dispatchTimeoutTestOverrideMs: number | null = null;
 // How long we wait for the user-facing "处理超时" apology to post, AND for the
 // happy-path buffered-text final flush, before giving up. The whole point of
 // issue #75 is that an Octo API call can hang; these recovery/flush calls hit
@@ -57,7 +68,38 @@ const DISPATCH_TIMEOUT_APOLOGY_DEFAULT_MS = 10_000;
 let DISPATCH_TIMEOUT_APOLOGY_MS = DISPATCH_TIMEOUT_APOLOGY_DEFAULT_MS;
 
 export function _setDispatchTimeoutForTests(ms: number | null): void {
-  DISPATCH_TIMEOUT_MS = ms === null ? DISPATCH_TIMEOUT_DEFAULT_MS : ms;
+  dispatchTimeoutTestOverrideMs = ms;
+}
+
+/**
+ * Resolve the effective per-inbound dispatch timeout (issue #113).
+ *
+ * Precedence:
+ *   1. `_setDispatchTimeoutForTests` override (tests only).
+ *   2. Explicit `dispatchTimeoutMs` from channel/account config
+ *      (`channels.octo.dispatchTimeoutMs`, overridable per account) —
+ *      ignored unless a finite positive number.
+ *   3. Derived from the agent-run timeout: `(agents.defaults.timeoutSeconds
+ *      ?? 600) * 1000 + 60_000`. Single source of truth — raising
+ *      `timeoutSeconds` automatically moves this guard with it, and the 60s
+ *      buffer keeps it strictly behind the agent timeout so a healthy run is
+ *      never killed by its own infrastructure backstop.
+ */
+export function resolveDispatchTimeoutMs(
+  cfg: OpenClawConfig,
+  account: ResolvedOctoAccount,
+): number {
+  if (dispatchTimeoutTestOverrideMs !== null) return dispatchTimeoutTestOverrideMs;
+  const explicit = account.config.dispatchTimeoutMs;
+  if (typeof explicit === "number" && Number.isFinite(explicit) && explicit > 0) {
+    return explicit;
+  }
+  const configured = cfg.agents?.defaults?.timeoutSeconds;
+  const agentTimeoutSeconds =
+    typeof configured === "number" && Number.isFinite(configured) && configured > 0
+      ? configured
+      : DEFAULT_AGENT_TIMEOUT_SECONDS;
+  return agentTimeoutSeconds * 1000 + DISPATCH_TIMEOUT_BUFFER_MS;
 }
 
 export function _setDispatchApologyTimeoutForTests(ms: number | null): void {
@@ -2487,8 +2529,8 @@ export async function handleInboundMessage(params: {
 
   let replySucceeded = false;
 
-  // Timeout guard: see DISPATCH_TIMEOUT_MS at top of file. Without this, an
-  // upstream dispatch hang would leave the per-group queue's Promise chain
+  // Timeout guard: see resolveDispatchTimeoutMs at top of file. Without this,
+  // an upstream dispatch hang would leave the per-group queue's Promise chain
   // unresolved forever — see issue #75.
   //
   // Scope note: we intentionally do NOT try to cancel an already-in-flight
@@ -2503,13 +2545,14 @@ export async function handleInboundMessage(params: {
   // is OUR timeout" by reference equality, never by string comparison —
   // protects against a same-text upstream error being misclassified.
   let dispatchTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const dispatchTimeoutMs = resolveDispatchTimeoutMs(config, account);
   const timeoutError = new Error(
-    `octo: dispatch timed out after ${DISPATCH_TIMEOUT_MS}ms`,
+    `octo: dispatch timed out after ${dispatchTimeoutMs}ms`,
   );
   const dispatchTimeoutPromise = new Promise<never>((_, reject) => {
     dispatchTimeoutHandle = setTimeout(() => {
       reject(timeoutError);
-    }, DISPATCH_TIMEOUT_MS);
+    }, dispatchTimeoutMs);
   });
 
   try {
@@ -2589,7 +2632,7 @@ export async function handleInboundMessage(params: {
               // Same bounded signal as the timeout-path apology: if upstream
               // signals an error AND the Octo API is also sick, this recovery
               // sendMessage would otherwise hold the per-group queue until
-              // the outer dispatch timeout kicks in (5min). PR #83 review.
+              // the outer dispatch timeout kicks in. PR #83 review.
               signal: AbortSignal.timeout(DISPATCH_TIMEOUT_APOLOGY_MS),
             });
           } catch (sendErr) {
@@ -2601,7 +2644,7 @@ export async function handleInboundMessage(params: {
       dispatchTimeoutPromise,
     ]);
   } catch (err) {
-    // Timeout: dispatch never returned within DISPATCH_TIMEOUT_MS. Tell the
+    // Timeout: dispatch never returned within dispatchTimeoutMs. Tell the
     // user, suppress any stale buffered text (so the finally-flush branch
     // does not double-send), then rethrow so the per-group queue's outer
     // .catch() (channel.ts#enqueueInbound) can advance to the next message
@@ -2613,7 +2656,7 @@ export async function handleInboundMessage(params: {
     if (err === timeoutError) {
       clearInterval(typingInterval);
       log?.warn?.(
-        `octo: dispatch hung past ${DISPATCH_TIMEOUT_MS}ms, aborting to unblock per-group queue (session=${route?.sessionKey ?? "?"})`,
+        `octo: dispatch hung past ${dispatchTimeoutMs}ms, aborting to unblock per-group queue (session=${route?.sessionKey ?? "?"})`,
       );
       deliverBuffer.lastText = null;
       deliverBuffer.textSent = true;

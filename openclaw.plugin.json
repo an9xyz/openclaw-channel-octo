@@ -127,6 +127,11 @@
                 "secretsFileRoot": {
                   "type": "string",
                   "description": "Jail root for write-secret: secret files may only be written under this path. When unset, defaults to the agent's workspace (agents.list[].workspace matched to the agent, else agents.defaults.workspace). If neither resolves to a usable directory, write-secret is unavailable (fail-closed); there is no process working-directory fallback."
+                },
+                "dispatchTimeoutMs": {
+                  "type": "number",
+                  "minimum": 1000,
+                  "description": "Per-inbound dispatch timeout in milliseconds (infrastructure backstop that releases the per-group queue when an upstream dispatch hangs). When unset, derived from agents.defaults.timeoutSeconds (default 600) as timeoutSeconds*1000 + 60000, so it always fires after the agent-run timeout. Set explicitly only when you need to decouple it from the agent timeout."
                 }
               }
             }
@@ -138,6 +143,11 @@
           "secretsFileRoot": {
             "type": "string",
             "description": "Jail root for write-secret: secret files may only be written under this path. When unset, defaults to the agent's workspace (agents.list[].workspace matched to the agent, else agents.defaults.workspace). If neither resolves to a usable directory, write-secret is unavailable (fail-closed); there is no process working-directory fallback."
+          },
+          "dispatchTimeoutMs": {
+            "type": "number",
+            "minimum": 1000,
+            "description": "Per-inbound dispatch timeout in milliseconds (infrastructure backstop that releases the per-group queue when an upstream dispatch hangs). When unset, derived from agents.defaults.timeoutSeconds (default 600) as timeoutSeconds*1000 + 60000, so it always fires after the agent-run timeout. Set explicitly only when you need to decouple it from the agent timeout."
           }
         }
       }

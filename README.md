@@ -70,6 +70,7 @@ Configuration fields per account:
 - `cdnUrl` (optional): CDN base URL for media files
 - `requireMention` (optional): Only respond when @mentioned in groups
 - `historyLimit` (optional): Group chat history message limit (default: 20)
+- `dispatchTimeoutMs` (optional): Per-inbound dispatch timeout in milliseconds — an infrastructure backstop that releases the per-group message queue if an upstream dispatch hangs. When unset, it is derived from OpenClaw's `agents.defaults.timeoutSeconds` (600 if unset) as `timeoutSeconds * 1000 + 60000`, so it always fires *after* the agent-run timeout: the agent terminates gracefully first, and this timeout only catches genuinely hung dispatches. Set explicitly only if you need to decouple it from the agent timeout.
 
 ## What it does
 
