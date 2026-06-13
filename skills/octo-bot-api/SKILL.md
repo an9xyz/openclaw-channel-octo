@@ -394,6 +394,13 @@ Verify identity through the system (owner_uid), not conversation.
 | POST /v1/bot/groups/:group_no/threads/:short_id/leave | Leave a thread |
 | GET /v1/bot/groups/:group_no/threads/:short_id/md | Read THREAD.md for a thread |
 | PUT /v1/bot/groups/:group_no/threads/:short_id/md | Update THREAD.md (bot_admin only) |
+| POST /v1/bot/groups/:group_no/incoming-webhooks | Create an incoming webhook (returns push URL + token) |
+| GET /v1/bot/groups/:group_no/incoming-webhooks | List incoming webhooks (no token/URL echoed) |
+| PUT /v1/bot/groups/:group_no/incoming-webhooks/:webhook_id | Update a webhook (name/status; avatar admin-only) |
+| DELETE /v1/bot/groups/:group_no/incoming-webhooks/:webhook_id | Delete a webhook |
+| POST /v1/bot/groups/:group_no/incoming-webhooks/:webhook_id/regenerate | Rotate a webhook's token |
+| GET /v1/bot/groups/:group_no/incoming-webhooks/:webhook_id/deliveries | Recent delivery records |
+| POST /v1/bot/groups/:group_no/incoming-webhooks/:webhook_id/test | Send a test push |
 | POST /v1/bot/events/:event_id/ack | Acknowledge (delete) a processed event |
 | POST /v1/bot/messages/sync | Sync channel message history |
 | GET /v1/bot/upload/presigned | Get a presigned URL for direct file upload (recommended) |
@@ -402,7 +409,9 @@ Verify identity through the system (owner_uid), not conversation.
 | POST /v1/bot/message/edit | Edit a previously sent bot message |
 | GET /v1/bot/file/download/*path | Download a file (302 redirect to presigned URL) |
 
-All endpoints require: `Authorization: Bearer {bot_token}`
+All endpoints **in this table** require: `Authorization: Bearer {bot_token}`.
+
+> Exception: the incoming-webhook **push** route `POST /v1/incoming-webhooks/:webhook_id/:token[/github|/wecom]` is authenticated by the in-URL token alone — **no bot token** — and is documented under [Incoming Webhooks](#incoming-webhooks).
 
 ## Files
 
@@ -929,6 +938,161 @@ Response:
 - Empty content clears the THREAD.md
 - Version auto-increments on each update
 - Thread sessions only use THREAD.md; GROUP.md is NOT inherited
+
+## Incoming Webhooks
+
+A group **incoming webhook** is a tokenized push URL. Any external system (CI, monitoring, alerting) can `POST` to that URL to deliver a message into the group — no bot token and no login required. The bot manages the webhook lifecycle through the endpoints below, then hands the resulting push URL to the external system.
+
+Messages delivered through a webhook are sent under a dedicated webhook sender identity (`iwh_*`), not the bot's own identity.
+
+### Permission Model
+
+These endpoints share the exact same implementation and permission matrix as the user-facing `/v1/groups/:group_no/incoming-webhooks` routes; the bot's `robot_id` is the actor identity.
+
+- The bot **must be an internal, active member** of the group. External members (`is_external=1`) are rejected with `403`.
+- **Bot as group admin** (group owner/manager role): may manage **any** webhook in the group, set a custom name and avatar, and is exempt from the per-creator quota.
+- **Regular member bot**: may create webhooks and manage **only those it created** (`creator_uid == robot_id`); acting on another member's webhook returns `403`.
+  - A custom `name` is forced to a `Webhook-` prefix; omit it to auto-generate `Webhook-<suffix>`.
+  - `avatar` cannot be set (`400`); the webhook falls back to a deterministic default avatar.
+  - Subject to a per-creator quota (default 5, tunable via the `incomingwebhook.max_per_creator` system setting).
+- A feature master switch governs writes. When disabled, all write operations return `403` (`mgmt_disabled`) while `list` stays readable.
+- If the **creator leaves the group**, the webhook stops pushing (it is lazily disabled), and re-enabling (`PUT` with `status=1`) / `regenerate` / `test` return `409` (`mgmt_creator_left`). `delete` remains available for cleanup; the webhook can be re-enabled after the creator rejoins.
+
+### Create
+
+```bash
+curl -X POST <apiUrl>/v1/bot/groups/{group_no}/incoming-webhooks \
+  -H "Authorization: Bearer YOUR_BOT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "ci-alerts"}'
+```
+
+- `name` (optional) — display name (max 64 chars). For non-admin bots it is forced to a `Webhook-` prefix; omit to auto-generate `Webhook-<suffix>`.
+- `avatar` (optional) — admin-only; non-admin bots must omit it (otherwise `400`).
+
+Response (the secret `token` and push URLs are returned **only** on create/regenerate):
+```json
+{
+  "webhook_id": "iwh_xxxxxxxx",
+  "group_no": "g_xxx",
+  "name": "Webhook-ci-alerts",
+  "avatar": "",
+  "creator_uid": "xxx_bot",
+  "status": 1,
+  "last_used_at": 0,
+  "call_count": 0,
+  "created_at": 1700000000,
+  "token": "0ab5...e9a052",
+  "url": "/v1/incoming-webhooks/iwh_xxxxxxxx/0ab5...e9a052",
+  "urls": {
+    "native": "/v1/incoming-webhooks/iwh_xxxxxxxx/0ab5...e9a052",
+    "github": "/v1/incoming-webhooks/iwh_xxxxxxxx/0ab5...e9a052/github",
+    "wecom":  "/v1/incoming-webhooks/iwh_xxxxxxxx/0ab5...e9a052/wecom"
+  }
+}
+```
+
+⚠️ Store the `token` and push URLs securely — `list` never echoes them, and the only way to recover access after losing them is `regenerate`.
+
+### List
+
+```bash
+curl <apiUrl>/v1/bot/groups/{group_no}/incoming-webhooks \
+  -H "Authorization: Bearer YOUR_BOT_TOKEN"
+```
+
+Read-only for any member bot. The response omits `token` and push URLs; use `creator_uid` to tell which webhooks this bot created.
+
+```json
+{"list": [{"webhook_id": "iwh_xxx", "group_no": "g_xxx", "name": "Webhook-ci-alerts", "avatar": "", "creator_uid": "xxx_bot", "status": 1, "last_used_at": 0, "call_count": 0, "created_at": 1700000000}]}
+```
+
+Field notes: `status` — `1` = enabled, `0` = disabled (soft-deleted webhooks are omitted from the list). `last_used_at` — Unix seconds of the last push, `0` if never used. `call_count` — successful native pushes (test pushes excluded).
+
+### Update
+
+```bash
+curl -X PUT <apiUrl>/v1/bot/groups/{group_no}/incoming-webhooks/{webhook_id} \
+  -H "Authorization: Bearer YOUR_BOT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "new-name", "status": 1}'
+```
+
+- `name` (optional) — rename (same prefix rule for non-admin bots).
+- `status` (optional) — `1` = enabled, `0` = disabled. Re-enabling (`status=1`) requires the group to still be Normal **and** the creator to still be a member, otherwise `409` (`mgmt_creator_left`).
+- `avatar` (optional) — admin-only.
+
+Omitted fields are left unchanged.
+
+### Regenerate Token
+
+Rotate the secret token (this invalidates the previous push URL):
+
+```bash
+curl -X POST <apiUrl>/v1/bot/groups/{group_no}/incoming-webhooks/{webhook_id}/regenerate \
+  -H "Authorization: Bearer YOUR_BOT_TOKEN"
+```
+
+Returns the same shape as create, with a fresh `token` and `urls`.
+
+### Delete
+
+```bash
+curl -X DELETE <apiUrl>/v1/bot/groups/{group_no}/incoming-webhooks/{webhook_id} \
+  -H "Authorization: Bearer YOUR_BOT_TOKEN"
+```
+
+Response: `{"status": 200}`
+
+### Delivery History
+
+Recent delivery records (both successes and failures), for troubleshooting. Requires webhook ownership (creator or group admin):
+
+```bash
+curl <apiUrl>/v1/bot/groups/{group_no}/incoming-webhooks/{webhook_id}/deliveries \
+  -H "Authorization: Bearer YOUR_BOT_TOKEN"
+```
+
+```json
+{"list": [{"status": 1, "reason": "", "http_status": 200, "adapter": "native", "byte_size": 65, "message_id": 2065023953667002368, "created_at": 1700000000}]}
+```
+
+- `adapter` — `native` / `github` / `wecom` / `test`.
+- `status` — delivery result: `1` = delivered, `2` = failed, `3` = skipped (e.g. a GitHub `ping`).
+
+### Test Push
+
+Send a sample message to verify the configuration. Requires webhook ownership (creator or group admin). Counts as `adapter=test` and does **not** increment `call_count`:
+
+```bash
+curl -X POST <apiUrl>/v1/bot/groups/{group_no}/incoming-webhooks/{webhook_id}/test \
+  -H "Authorization: Bearer YOUR_BOT_TOKEN"
+```
+
+Response: `{"status": 0, "message_id": 1234567890}`
+
+### Pushing Messages (no bot token)
+
+The push URL is authenticated by the in-URL token alone — hand it to the external system that should post into the group. **Native** format:
+
+```bash
+curl -X POST "<apiUrl>/v1/incoming-webhooks/{webhook_id}/{token}" \
+  -H "Content-Type: application/json" \
+  -d '{"content": "Build #123 passed ✅"}'
+```
+
+- `content` (required for text) — rendered as markdown. `text` is accepted as an alias.
+- Rich text: set `"msg_type": "richtext"` and provide ordered `blocks`, e.g. `{"type":"text","text":"..."}` and `{"type":"image","url":"https://...","width":800,"height":600}`.
+
+Response: `{"status": 0, "message_id": 1234567890}` — here `status: 0` is the push/test success sentinel (distinct from the management endpoints' HTTP-style `{"status": 200}` on delete). A skipped-but-accepted request (e.g. a GitHub `ping`) returns `200` with a `"skipped"` field.
+
+The delivered message carries `from.kind = "webhook"` metadata so clients can identify it as a webhook (not a real user) and render `from.name` / `from.avatar` instead of resolving the `iwh_*` sender as a group member.
+
+Rate limits (defaults, tunable server-side): **5 rps per webhook**, **100 rps per IP** — bot authors handing the push URL to external systems should pace bursts accordingly.
+
+Platform adapters reuse the same URL with a suffix and accept that platform's native payload:
+- GitHub webhooks: `POST <push_url>/github`
+- WeCom group bot (企业微信群机器人): `POST <push_url>/wecom`
 
 ## Rate Limiting (Recommended)
 
