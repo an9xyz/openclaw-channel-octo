@@ -15,6 +15,7 @@ import {
   type ResolvedOctoAccount,
 } from "./accounts.js";
 import { registerBot, sendMessage, sendHeartbeat, sendMediaMessage, inferContentType, ensureTextCharset, fetchBotGroups, getGroupMd, parseImageDimensions, parseImageDimensionsFromFile, getUploadPresign, uploadFileToPresignedUrl } from "./api-fetch.js";
+import type { GroupMember } from "./api-fetch.js";
 import { PLUGIN_VERSION } from "./version.js";
 import { getOctoRuntime } from "./runtime.js";
 
@@ -298,6 +299,25 @@ function getOrCreateMemberRobotMap(accountId: string): Map<string, boolean> {
   return m;
 }
 
+// Current-group member roster: parent groupNo -> this group's GroupMember[].
+// Per-account (keyed by accountId), per-group inside. UNLIKE the flat
+// uidToNameMap (which accumulates names across every group for mention/sender
+// resolution and must NOT be cleared), this holds ONLY the current group's
+// roster so the [Group Members] / member-count prompt context reflects one
+// group, not the cross-group union (#125). Populated by refreshGroupMemberCache
+// on each inbound message; negative-cached (entry deleted) on fetch failure so
+// a stale roster is never re-injected.
+const _currentGroupMembersMaps = new Map<string, Map<string, GroupMember[]>>();
+function getOrCreateCurrentGroupMembersMap(accountId: string): Map<string, GroupMember[]> {
+  const id = normalizeAccountId(accountId);
+  let m = _currentGroupMembersMaps.get(id);
+  if (!m) {
+    m = new Map<string, GroupMember[]>();
+    _currentGroupMembersMaps.set(id, m);
+  }
+  return m;
+}
+
 
 // --- Group → Account mapping: tracks which accounts are active in each group ---
 // Used by handleAction to resolve the correct account when framework passes wrong accountId
@@ -357,6 +377,16 @@ function cleanupStaleCaches(): void {
         // Note: uidToNameMap is a flat uid→name map (not keyed by groupId),
         // so we don't delete from it here — names remain valid across groups.
         _groupCacheTimestamps.get(accountId)?.delete(groupId);
+        // Delete by the SAME key cleanup uses for _groupCacheTimestamps (raw
+        // channel_id from touchCache) so the roster is reclaimed on exactly the
+        // same cleanup pass as its freshness timestamp. (Steady-state they are
+        // not strictly 1:1 — refreshGroupMemberCache's failure branch keeps a
+        // backoff timestamp while deleting the roster — but the read path
+        // tolerates a missing roster via `?? []`, so co-deletion at cleanup is
+        // what matters here.) Deleting by parent groupNo instead would drop the
+        // roster while a sibling thread keeps the timestamp fresh, leaving the
+        // next message to early-return with no roster.
+        _currentGroupMembersMaps.get(accountId)?.delete(groupId);
         activityMap.delete(groupId);
       }
     }
@@ -1299,6 +1329,10 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
       // 4e. Robot flags map — server-authoritative sender classification for the 免@ gate
       const memberRobotMap = getOrCreateMemberRobotMap(account.accountId);
 
+      // 4f. Current-group roster — current group's members only (per-group),
+      // for the [Group Members] / member-count prompt context (#125)
+      const currentGroupMembersMap = getOrCreateCurrentGroupMembersMap(account.accountId);
+
       // 5. Token refresh state — time-based cooldown to prevent refresh storms
       let lastTokenRefreshAt = 0;
       const TOKEN_REFRESH_COOLDOWN_MS = 60_000; // 60 seconds
@@ -1378,6 +1412,7 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
                 uidToNameMap,
                 groupCacheTimestamps,
                 memberRobotMap,
+                currentGroupMembersMap,
                 groupMdCache,
                 log,
                 statusSink,
