@@ -30,6 +30,7 @@ import {
 } from "./inbound.js";
 import { extractMentionUids, parseStructuredMentions } from "./mention-utils.js";
 import { isForkCommandHistoryMessage } from "./commands/fork-history-filter.js";
+import type { GroupMember } from "./api-fetch.js";
 import { normalizeMediaAttachments } from "openclaw/plugin-sdk/media-runtime";
 import { existsSync, unlinkSync, readFileSync } from "node:fs";
 
@@ -1531,18 +1532,23 @@ describe("Bot @ 检测（entities 支持）", () => {
 });
 
 describe("buildMemberListPrefix", () => {
-  it("should return empty string for empty map", () => {
-    const map = new Map<string, string>();
-    expect(buildMemberListPrefix(map)).toBe("");
+  // buildMemberListPrefix takes the CURRENT group's roster (per-group, clean),
+  // not the per-account accumulated uid→name map (#125: the accumulated map is
+  // the union across every group the bot has seen, which inflated the count and
+  // leaked other groups' members into the prompt).
+  const gm = (uid: string, name: string): GroupMember => ({ uid, name });
+
+  it("should return empty string for empty roster", () => {
+    expect(buildMemberListPrefix([])).toBe("");
   });
 
   it("should inject full member list when ≤ 10 members", () => {
-    const map = new Map<string, string>([
-      ["uid_alice", "Alice"],
-      ["uid_bob", "Bob"],
-      ["uid_chen", "陈皮皮"],
-    ]);
-    const result = buildMemberListPrefix(map);
+    const members = [
+      gm("uid_alice", "Alice"),
+      gm("uid_bob", "Bob"),
+      gm("uid_chen", "陈皮皮"),
+    ];
+    const result = buildMemberListPrefix(members);
     expect(result).toContain("[Group Members]");
     expect(result).toContain("Alice (uid_alice)");
     expect(result).toContain("Bob (uid_bob)");
@@ -1554,22 +1560,18 @@ describe("buildMemberListPrefix", () => {
   });
 
   it("should inject full member list when exactly 10 members", () => {
-    const map = new Map<string, string>();
-    for (let i = 1; i <= 10; i++) {
-      map.set(`uid_${i}`, `User${i}`);
-    }
-    const result = buildMemberListPrefix(map);
+    const members: GroupMember[] = [];
+    for (let i = 1; i <= 10; i++) members.push(gm(`uid_${i}`, `User${i}`));
+    const result = buildMemberListPrefix(members);
     expect(result).toContain("[Group Members]");
     expect(result).toContain("User1 (uid_1)");
     expect(result).toContain("User10 (uid_10)");
   });
 
   it("should inject hint message when > 10 members", () => {
-    const map = new Map<string, string>();
-    for (let i = 1; i <= 11; i++) {
-      map.set(`uid_${i}`, `User${i}`);
-    }
-    const result = buildMemberListPrefix(map);
+    const members: GroupMember[] = [];
+    for (let i = 1; i <= 11; i++) members.push(gm(`uid_${i}`, `User${i}`));
+    const result = buildMemberListPrefix(members);
     expect(result).toContain("[Group Info]");
     expect(result).toContain("11 members");
     expect(result).toContain("group management tool");
@@ -1578,19 +1580,35 @@ describe("buildMemberListPrefix", () => {
   });
 
   it("should inject hint message for large groups", () => {
-    const map = new Map<string, string>();
-    for (let i = 1; i <= 50; i++) {
-      map.set(`uid_${i}`, `User${i}`);
-    }
-    const result = buildMemberListPrefix(map);
+    const members: GroupMember[] = [];
+    for (let i = 1; i <= 50; i++) members.push(gm(`uid_${i}`, `User${i}`));
+    const result = buildMemberListPrefix(members);
     expect(result).toContain("[Group Info]");
     expect(result).toContain("50 members");
   });
 
+  it("reports the roster length as the count, not a cross-group union (#125)", () => {
+    // Group B has 4 real members. Even though the bot has seen other groups,
+    // the prefix must report exactly this roster — no inflation, no leakage.
+    const groupB = [
+      gm("uid_dave", "Dave"),
+      gm("uid_erin", "Erin"),
+      gm("uid_frank", "Frank"),
+      gm("uid_grace", "Grace"),
+    ];
+    const result = buildMemberListPrefix(groupB);
+    expect(result).toContain("[Group Members]");
+    expect(result).toContain("Dave (uid_dave)");
+    expect(result).toContain("Grace (uid_grace)");
+    // A member from another group must not appear.
+    expect(result).not.toContain("costest");
+    expect(result).not.toContain("uid_costest");
+  });
+
   it(">10 branch names the real group-members action + a real-form hex anchor", () => {
-    const map = new Map<string, string>();
-    for (let i = 1; i <= 13; i++) map.set(`uid_${i}`, `User${i}`);
-    const result = buildMemberListPrefix(map);
+    const members: GroupMember[] = [];
+    for (let i = 1; i <= 13; i++) members.push(gm(`uid_${i}`, `User${i}`));
+    const result = buildMemberListPrefix(members);
     // points at the real octo_management action, not a vague "tool"
     expect(result).toContain("group-members");
     // real-form hex example anchor (32-hex), never the literal word "uid"
@@ -1598,9 +1616,9 @@ describe("buildMemberListPrefix", () => {
   });
 
   it(">10 branch carries the convert promise, single-colon, brackets and anti-patterns", () => {
-    const map = new Map<string, string>();
-    for (let i = 1; i <= 13; i++) map.set(`uid_${i}`, `User${i}`);
-    const result = buildMemberListPrefix(map);
+    const members: GroupMember[] = [];
+    for (let i = 1; i <= 13; i++) members.push(gm(`uid_${i}`, `User${i}`));
+    const result = buildMemberListPrefix(members);
     expect(result).toContain("I will convert");
     expect(result).toContain("ONE colon");
     expect(result).toContain("REQUIRED");
@@ -1611,9 +1629,9 @@ describe("buildMemberListPrefix", () => {
   });
 
   it("regression guard (test #13): >10 text parses to exactly ONE legal structured mention", () => {
-    const map = new Map<string, string>();
-    for (let i = 1; i <= 13; i++) map.set(`uid_${i}`, `User${i}`);
-    const result = buildMemberListPrefix(map);
+    const members: GroupMember[] = [];
+    for (let i = 1; i <= 13; i++) members.push(gm(`uid_${i}`, `User${i}`));
+    const result = buildMemberListPrefix(members);
     const parsed = parseStructuredMentions(result);
     expect(parsed.every((mtn) => mtn.uid !== "uid")).toBe(true);
     expect(parsed).toHaveLength(1);
@@ -1621,9 +1639,9 @@ describe("buildMemberListPrefix", () => {
   });
 
   it("≤10 and >10 branches share the MENTION_FORMAT_HINT core (no drift)", () => {
-    const small = new Map<string, string>([["uid_a", "Alice"], ["uid_b", "Bob"]]);
-    const large = new Map<string, string>();
-    for (let i = 1; i <= 13; i++) large.set(`uid_${i}`, `User${i}`);
+    const small = [gm("uid_a", "Alice"), gm("uid_b", "Bob")];
+    const large: GroupMember[] = [];
+    for (let i = 1; i <= 13; i++) large.push(gm(`uid_${i}`, `User${i}`));
     const core = "@[<uid>:<displayName>]";
     expect(buildMemberListPrefix(small)).toContain(core);
     expect(buildMemberListPrefix(large)).toContain(core);

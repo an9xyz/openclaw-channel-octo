@@ -1048,3 +1048,45 @@ describe("outbound.sendText — P0-1 member prefetch", () => {
     expect(call.mentionEntities).toBeUndefined();
   });
 });
+
+describe("octoSetupAdapter.validateInput token prefix", () => {
+  let validate: (input: any) => string | undefined;
+  beforeEach(async () => {
+    const { octoPlugin } = await import("./channel.js");
+    validate = (input: any) =>
+      (octoPlugin.setup as any).validateInput({ accountId: "test", input });
+  });
+
+  it("accepts a bf_ User Bot token", () => {
+    expect(validate({ botToken: "bf_dummy_user_bot_token" })).toBeUndefined();
+  });
+
+  it("accepts an app_ App Bot token", () => {
+    // App Bot tokens (Admin 后台「应用 Bot」) are DM-only on the server side,
+    // but the CLI must let them bind — the capability boundary is the server's
+    // call, not the adapter's.
+    expect(validate({ botToken: "app_EXAMPLE_dummy_app_bot_token" })).toBeUndefined();
+  });
+
+  it("accepts app_ token via the `token` alias field", () => {
+    expect(validate({ token: "app_EXAMPLE_dummy_app_bot_token" })).toBeUndefined();
+  });
+
+  it("rejects an unknown prefix", () => {
+    expect(validate({ botToken: "uk_dummy_unknown_prefix" })).toBeTruthy();
+  });
+
+  it("rejects a too-short token even with a valid prefix", () => {
+    expect(validate({ botToken: "app_short" })).toBeTruthy();
+    expect(validate({ botToken: "bf_short" })).toBeTruthy();
+  });
+
+  it("rejects an empty / non-string token", () => {
+    expect(validate({ botToken: "" })).toBeTruthy();
+    expect(validate({ botToken: 123 })).toBeTruthy();
+  });
+
+  it("skips validation when no token field is present", () => {
+    expect(validate({ baseUrl: "https://im.example.com/api" })).toBeUndefined();
+  });
+});

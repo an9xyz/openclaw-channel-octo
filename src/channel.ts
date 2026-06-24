@@ -15,6 +15,7 @@ import {
   type ResolvedOctoAccount,
 } from "./accounts.js";
 import { registerBot, sendMessage, sendHeartbeat, sendMediaMessage, inferContentType, ensureTextCharset, fetchBotGroups, getGroupMd, parseImageDimensions, parseImageDimensionsFromFile, getUploadPresign, uploadFileToPresignedUrl } from "./api-fetch.js";
+import type { GroupMember } from "./api-fetch.js";
 import { PLUGIN_VERSION } from "./version.js";
 import { getOctoRuntime } from "./runtime.js";
 import { forkScopeStartupWarning } from "./commands/fork.js";
@@ -299,6 +300,25 @@ function getOrCreateMemberRobotMap(accountId: string): Map<string, boolean> {
   return m;
 }
 
+// Current-group member roster: parent groupNo -> this group's GroupMember[].
+// Per-account (keyed by accountId), per-group inside. UNLIKE the flat
+// uidToNameMap (which accumulates names across every group for mention/sender
+// resolution and must NOT be cleared), this holds ONLY the current group's
+// roster so the [Group Members] / member-count prompt context reflects one
+// group, not the cross-group union (#125). Populated by refreshGroupMemberCache
+// on each inbound message; negative-cached (entry deleted) on fetch failure so
+// a stale roster is never re-injected.
+const _currentGroupMembersMaps = new Map<string, Map<string, GroupMember[]>>();
+function getOrCreateCurrentGroupMembersMap(accountId: string): Map<string, GroupMember[]> {
+  const id = normalizeAccountId(accountId);
+  let m = _currentGroupMembersMaps.get(id);
+  if (!m) {
+    m = new Map<string, GroupMember[]>();
+    _currentGroupMembersMaps.set(id, m);
+  }
+  return m;
+}
+
 
 // --- Group → Account mapping: tracks which accounts are active in each group ---
 // Used by handleAction to resolve the correct account when framework passes wrong accountId
@@ -358,6 +378,16 @@ function cleanupStaleCaches(): void {
         // Note: uidToNameMap is a flat uid→name map (not keyed by groupId),
         // so we don't delete from it here — names remain valid across groups.
         _groupCacheTimestamps.get(accountId)?.delete(groupId);
+        // Delete by the SAME key cleanup uses for _groupCacheTimestamps (raw
+        // channel_id from touchCache) so the roster is reclaimed on exactly the
+        // same cleanup pass as its freshness timestamp. (Steady-state they are
+        // not strictly 1:1 — refreshGroupMemberCache's failure branch keeps a
+        // backoff timestamp while deleting the roster — but the read path
+        // tolerates a missing roster via `?? []`, so co-deletion at cleanup is
+        // what matters here.) Deleting by parent groupNo instead would drop the
+        // roster while a sibling thread keeps the timestamp fresh, leaving the
+        // next message to early-return with no roster.
+        _currentGroupMembersMaps.get(accountId)?.delete(groupId);
         activityMap.delete(groupId);
       }
     }
@@ -448,6 +478,26 @@ const meta = {
 
 const ACCOUNT_ID_RE = /^[A-Za-z0-9_]+$/;
 
+// Two token prefixes bind through this channel:
+//   bf_*  — User Bot (BotFather /newbot): full group + thread + OBO access.
+//   app_* — App Bot (Admin 后台「应用 Bot」): DM-only, server-enforced.
+// The CLI's job is to let either bind; the capability boundary is enforced
+// server-side (octo-server bot_api rejects App Bot group/thread/OBO calls),
+// so we must not reject app_ here just because it can't do everything bf_ can.
+const BOT_TOKEN_PREFIXES = ["bf_", "app_"] as const;
+const BOT_TOKEN_ERROR =
+  "Bot token must start with 'bf_' (BotFather /newbot) or 'app_' (Admin App Bot) and be longer than 13 chars.";
+
+function isValidBotToken(v: unknown): v is string {
+  return (
+    typeof v === "string" &&
+    !!v.trim() &&
+    BOT_TOKEN_PREFIXES.some((p) => v.startsWith(p)) &&
+    v.length > 13
+  );
+}
+
+
 function setOctoAccountConfig(
   cfg: OpenClawConfig,
   accountId: string,
@@ -492,7 +542,7 @@ const octoSetupWizard = {
       return account.configured;
     },
     resolveStatusLines: async ({ cfg, accountId, configured }: { cfg: OpenClawConfig; accountId?: string; configured: boolean }) => {
-      if (!configured) return ["Octo: needs bot token (bf_*)"];
+      if (!configured) return ["Octo: needs bot token (bf_* or app_*)"];
       const account = resolveOctoAccount({ cfg, accountId: accountId ?? DEFAULT_ACCOUNT_ID });
       return [`Octo: configured (api: ${account.config.apiUrl})`];
     },
@@ -516,15 +566,13 @@ const octoSetupWizard = {
     const existing = resolveOctoAccount({ cfg, accountId });
 
     const botToken = await prompter.text({
-      message: "Bot token (bf_*)",
-      placeholder: "bf_...",
+      message: "Bot token (bf_* or app_*)",
+      placeholder: "bf_... or app_...",
       initialValue: existing.config.botToken ?? "",
       sensitive: true,
       validate: (v: string) => {
         if (!v || !v.trim()) return "Bot token is required.";
-        if (!v.startsWith("bf_") || v.length <= 13) {
-          return "Bot token must start with 'bf_'. Create one via /newbot in Octo BotFather.";
-        }
+        if (!isValidBotToken(v)) return BOT_TOKEN_ERROR;
         return undefined;
       },
     });
@@ -553,8 +601,8 @@ const octoSetupAdapter = {
     }
     const botToken = input.botToken ?? input.token;
     if (botToken !== undefined) {
-      if (typeof botToken !== "string" || !botToken.trim() || !botToken.startsWith("bf_") || botToken.length <= 13) {
-        return "Bot token must start with 'bf_' and be longer than 13 chars.";
+      if (!isValidBotToken(botToken)) {
+        return BOT_TOKEN_ERROR;
       }
     }
     const apiUrl = input.baseUrl ?? input.url ?? input.httpUrl;
@@ -573,7 +621,7 @@ const octoSetupAdapter = {
     // to DEFAULT_API_URL = "http://localhost:8090/api"), so the trailing ??
     // never fires in practice but is kept as a belt-and-suspenders default.
     const apiUrl = (input.baseUrl ?? input.url ?? input.httpUrl ?? existing.config.apiUrl).trim();
-    if (!botToken) throw new Error("Bot token is required. Pass --bot-token bf_xxx or --token bf_xxx.");
+    if (!botToken) throw new Error("Bot token is required. Pass --bot-token bf_xxx (or app_xxx) — also accepted via --token.");
     return setOctoAccountConfig(cfg, accountId, botToken, apiUrl);
   },
 };
@@ -1312,6 +1360,10 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
       // 4e. Robot flags map — server-authoritative sender classification for the 免@ gate
       const memberRobotMap = getOrCreateMemberRobotMap(account.accountId);
 
+      // 4f. Current-group roster — current group's members only (per-group),
+      // for the [Group Members] / member-count prompt context (#125)
+      const currentGroupMembersMap = getOrCreateCurrentGroupMembersMap(account.accountId);
+
       // 5. Token refresh state — time-based cooldown to prevent refresh storms
       let lastTokenRefreshAt = 0;
       const TOKEN_REFRESH_COOLDOWN_MS = 60_000; // 60 seconds
@@ -1391,6 +1443,7 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
                 uidToNameMap,
                 groupCacheTimestamps,
                 memberRobotMap,
+                currentGroupMembersMap,
                 groupMdCache,
                 log,
                 statusSink,
