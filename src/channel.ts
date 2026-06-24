@@ -5,8 +5,8 @@ import type {
 } from "openclaw/plugin-sdk";
 import type { ChannelOutboundContext } from "openclaw/plugin-sdk/channel-contract";
 import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
-import { OctoConfigJsonSchema } from "./config-schema.js";
-import { CHANNEL_ID, MAX_UPLOAD_SIZE, stripAllChannelPrefixes } from "./constants.js";
+import { OctoConfigJsonSchema, type OctoConfig } from "./config-schema.js";
+import { CHANNEL_ID, MAX_UPLOAD_SIZE, stripAllChannelPrefixes, getChannelConfig } from "./constants.js";
 import { streamToFileWithCap } from "./stream-helpers.js";
 import {
   listOctoAccountIds,
@@ -17,6 +17,7 @@ import {
 import { registerBot, sendMessage, sendHeartbeat, sendMediaMessage, inferContentType, ensureTextCharset, fetchBotGroups, getGroupMd, parseImageDimensions, parseImageDimensionsFromFile, getUploadPresign, uploadFileToPresignedUrl } from "./api-fetch.js";
 import { PLUGIN_VERSION } from "./version.js";
 import { getOctoRuntime } from "./runtime.js";
+import { forkScopeStartupWarning } from "./commands/fork.js";
 
 /** Get OpenClaw host version from PluginRuntime.version (provided by SDK). */
 function getAgentVersion(): string {
@@ -1105,6 +1106,18 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
             `octo: detected ${mixedCount} mixed-case Octo accountId(s); internal storage normalized (see openclaw-channel-octo#33)`,
           );
         }
+      } catch { /* config snapshot inaccessible — non-fatal */ }
+
+      // F3 (PR #131 review, Octo-Q): `commands.fork.scope` accepts four values in
+      // the schema, but v1's fork hook only honors the default "owner-mentioned"
+      // (wiring inbound to a configured value is a v1.1 TODO). Warn once per
+      // account at startup if an operator set a non-default value, so it is not
+      // silently ignored. Same one-shot granularity as the mixed-case audit above.
+      try {
+        const warning = forkScopeStartupWarning(
+          getChannelConfig<OctoConfig>(ctx.cfg).commands?.fork?.scope,
+        );
+        if (warning) log?.warn?.(warning);
       } catch { /* config snapshot inaccessible — non-fatal */ }
 
       log?.info?.(`[${account.accountId}] registering Octo bot...`);

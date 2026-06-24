@@ -35,6 +35,7 @@ const base = {
   parentChannelType: ChannelType.Group,
   parentSessionKey: "octo:acct1:group123",
   accountId: "acct1",
+  account: { config: {} } as never,
   apiUrl: "https://api.test",
   botToken: "bf_tok",
   requesterUid: "user_hash",

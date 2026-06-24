@@ -2209,6 +2209,7 @@ export async function handleInboundMessage(params: {
       parentChannelType: message.channel_type ?? ChannelType.Group,
       parentSessionKey: route.sessionKey,
       accountId: account.accountId,
+      account,
       apiUrl: account.config.apiUrl ?? "",
       botToken: account.config.botToken ?? "",
       requesterUid: message.from_uid,

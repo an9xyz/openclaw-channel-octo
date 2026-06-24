@@ -24,7 +24,9 @@ import type { ChannelLogSink } from "openclaw/plugin-sdk/channel-contract";
 import type { ReplyPayload, ReplyDispatchKind } from "openclaw/plugin-sdk/reply-runtime";
 
 import { sendMessage } from "../api-fetch.js";
+import type { ResolvedOctoAccount } from "../accounts.js";
 import { CHANNEL_ID } from "../constants.js";
+import { resolveDispatchTimeoutMs } from "../inbound.js";
 import { convertStructuredMentions, parseStructuredMentions } from "../mention-utils.js";
 import { getOctoRuntime } from "../runtime.js";
 import { ChannelType, type MentionEntity } from "../types.js";
@@ -70,12 +72,13 @@ export async function dispatchForkSeedReply(params: {
   seedCtx: ForkSeedContext;
   childChannelId: string;
   accountId: string;
+  account: ResolvedOctoAccount;
   apiUrl: string;
   botToken: string;
   config: OpenClawConfig;
   log?: ChannelLogSink;
 }): Promise<void> {
-  const { seedCtx, childChannelId, accountId, apiUrl, botToken, config, log } = params;
+  const { seedCtx, childChannelId, accountId, account, apiUrl, botToken, config, log } = params;
   const core = getOctoRuntime();
 
   const childRoute = core.channel.routing.resolveAgentRoute({
@@ -94,17 +97,23 @@ export async function dispatchForkSeedReply(params: {
     AccountId: childRoute.accountId ?? accountId,
   };
 
-  // Fork-trigger guard (S-1): get-reply only forks the parent transcript when
-  // ParentSessionKey !== SessionKey. If they coincide, the auto-fork silently
-  // does NOT trigger and the child starts without parent context. With octo's
-  // default per-thread routing the child channelId yields a distinct sessionKey,
-  // so this is only reachable on a user-defined group-merged route. Warn (do not
-  // block) so the signal is on record before dispatch; the runtime still decides.
+  // Fork-isolation guard (PR #131 review — upgraded from warn-only to
+  // fail-closed). get-reply only forks the parent transcript when
+  // ParentSessionKey !== SessionKey. If they coincide, the seed would run ON the
+  // parent session and pollute it — the exact outcome /fork promises to avoid.
+  // So we refuse to dispatch instead of warn-and-continue. Only reachable on a
+  // user-defined group-merged route (octo's default per-thread routing gives the
+  // child channelId a distinct sessionKey). The child thread already exists, so
+  // spawnChildBoundSession turns this throw into seedFailed → the user is told to
+  // resend in the now-live child thread.
   if (ctx.SessionKey === ctx.ParentSessionKey) {
     log?.warn?.(
-      `octo: [fork-seed] SessionKey === ParentSessionKey (${ctx.SessionKey}) for child ${childChannelId} — ` +
-        "runtime auto-fork will NOT trigger; child likely shares the parent session " +
-        "(only reachable on a user-defined group-merged route)",
+      `octo: [fork-seed] isolation guard: SessionKey === ParentSessionKey (${ctx.SessionKey}) ` +
+        `for child ${childChannelId} — refusing to dispatch (would pollute the parent session); ` +
+        "only reachable on a user-defined group-merged route",
+    );
+    throw new Error(
+      `fork isolation guard: child SessionKey collides with ParentSessionKey (${ctx.SessionKey})`,
     );
   }
 
@@ -122,35 +131,73 @@ export async function dispatchForkSeedReply(params: {
     });
   };
 
+  // Timeout guard (PR #131 Critical, issue #75). dispatchReplyWithBufferedBlock-
+  // Dispatcher is observed to occasionally hang forever (no resolve/reject/
+  // onError). This seed is awaited synchronously inside the parent group's
+  // enqueueInbound serial queue, so a bare await would lock that queue until the
+  // gateway restarts. Race against the same per-inbound timeout as the normal
+  // path (inbound.ts:2636) and rethrow on timeout so spawnChildBoundSession
+  // surfaces seedFailed and the parent queue can advance.
+  const dispatchTimeoutMs = resolveDispatchTimeoutMs(config, account);
+  let dispatchTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const timeoutError = new Error(`octo: [fork-seed] dispatch timed out after ${dispatchTimeoutMs}ms`);
+  const dispatchTimeoutPromise = new Promise<never>((_, reject) => {
+    dispatchTimeoutHandle = setTimeout(() => reject(timeoutError), dispatchTimeoutMs);
+  });
+
   const buffer = { lastText: null as string | null };
   let delivered = false;
   try {
-    await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
-      ctx: ctxPayload,
-      cfg: config,
-      replyOptions: {},
-      dispatcherOptions: {
-        deliver: async (payload: ReplyPayload, info: { kind: ReplyDispatchKind }) => {
-          if (payload.isReasoning) return;
-          const content = payload.text?.trim() ?? "";
-          if (!content) return;
-          if (info.kind === "final" || info.kind === "tool") {
-            await sendSeedText(content);
-            delivered = true;
-            buffer.lastText = null;
-          } else {
-            // block / other: buffer, flush once after the dispatcher settles
-            buffer.lastText = content;
-          }
+    await Promise.race([
+      core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
+        ctx: ctxPayload,
+        cfg: config,
+        replyOptions: {},
+        dispatcherOptions: {
+          deliver: async (payload: ReplyPayload, info: { kind: ReplyDispatchKind }) => {
+            if (payload.isReasoning) return;
+            const content = payload.text?.trim() ?? "";
+            if (!content) return;
+            if (info.kind === "final" || info.kind === "tool") {
+              await sendSeedText(content);
+              delivered = true;
+              buffer.lastText = null;
+            } else {
+              // block / other: buffer, flush once after the dispatcher settles
+              buffer.lastText = content;
+            }
+          },
+          onError: async (err: unknown, info: { kind: string }) => {
+            log?.error?.(`octo: [fork-seed] ${info.kind} reply failed: ${String(err)}`);
+          },
         },
-        onError: async (err: unknown, info: { kind: string }) => {
-          log?.error?.(`octo: [fork-seed] ${info.kind} reply failed: ${String(err)}`);
-        },
-      },
-    } as Parameters<typeof core.channel.reply.dispatchReplyWithBufferedBlockDispatcher>[0]);
+      } as Parameters<typeof core.channel.reply.dispatchReplyWithBufferedBlockDispatcher>[0]),
+      dispatchTimeoutPromise,
+    ]);
+  } catch (err) {
+    if (err === timeoutError) {
+      log?.warn?.(
+        `octo: [fork-seed] dispatch hung past ${dispatchTimeoutMs}ms, aborting to unblock the ` +
+          `parent group queue (child=${childChannelId})`,
+      );
+      // Suppress stale buffered text so the finally-flush does not send a partial
+      // seed reply after we have already given up (mirrors inbound.ts:2797).
+      buffer.lastText = null;
+    }
+    throw err; // → spawnChildBoundSession catch → seedFailed: true
   } finally {
+    if (dispatchTimeoutHandle) clearTimeout(dispatchTimeoutHandle);
+    // P2-5: isolate the flush. If the dispatcher already threw, a flush failure
+    // must NOT replace the original error (it carries the root-cause signal).
+    // Log and swallow the flush error; never let it shadow the dispatch error.
     if (buffer.lastText && !delivered) {
-      await sendSeedText(buffer.lastText);
+      try {
+        await sendSeedText(buffer.lastText);
+      } catch (flushErr) {
+        log?.error?.(
+          `octo: [fork-seed] finally flush failed: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+        );
+      }
     }
   }
 }
@@ -181,6 +228,7 @@ export async function handleForkCommandIfMatched(params: {
   parentChannelType: ChannelType;
   parentSessionKey: string;
   accountId: string;
+  account: ResolvedOctoAccount;
   apiUrl: string;
   botToken: string;
   requesterUid: string;
@@ -263,6 +311,7 @@ export async function handleForkCommandIfMatched(params: {
         seedCtx,
         childChannelId: seedCtx.GroupSubject,
         accountId: params.accountId,
+        account: params.account,
         apiUrl: params.apiUrl,
         botToken: params.botToken,
         config: params.config,

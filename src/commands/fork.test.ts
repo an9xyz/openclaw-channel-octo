@@ -4,6 +4,7 @@ import {
   deriveThreadName,
   isInsideThread,
   resolveForkScope,
+  forkScopeStartupWarning,
   executeFork,
   type ForkOrchestrator,
 } from "./fork.js";
@@ -341,5 +342,27 @@ describe("executeFork", () => {
       "[fork] sendParentReceipt failed",
       expect.objectContaining({ error: "send timeout" }),
     );
+  });
+});
+
+describe("forkScopeStartupWarning (F3)", () => {
+  it("undefined scope → null (nothing configured)", () => {
+    expect(forkScopeStartupWarning(undefined)).toBeNull();
+  });
+
+  it("default owner-mentioned → null (no warning needed)", () => {
+    expect(forkScopeStartupWarning("owner-mentioned")).toBeNull();
+  });
+
+  it("non-default scope → warning mentioning the value + the default", () => {
+    const msg = forkScopeStartupWarning("any");
+    expect(msg).toContain('commands.fork.scope="any"');
+    expect(msg).toContain("not yet wired");
+    expect(msg).toContain("owner-mentioned");
+  });
+
+  it("each non-default scope warns", () => {
+    expect(forkScopeStartupWarning("any-mentioned")).not.toBeNull();
+    expect(forkScopeStartupWarning("owner-only")).not.toBeNull();
   });
 });
