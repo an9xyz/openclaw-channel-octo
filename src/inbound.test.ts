@@ -29,6 +29,7 @@ import {
   type ResolveFileResult,
 } from "./inbound.js";
 import { extractMentionUids, parseStructuredMentions } from "./mention-utils.js";
+import { isForkCommandHistoryMessage } from "./commands/fork-history-filter.js";
 import { normalizeMediaAttachments } from "openclaw/plugin-sdk/media-runtime";
 import { existsSync, unlinkSync, readFileSync } from "node:fs";
 
@@ -3606,5 +3607,51 @@ describe("recordSessionAccount normalizes both key AND value", () => {
     expect(sessionAccountMap.size).toBe(2);
     expect(sessionAccountMap.get("mixed_bot:sess1")).toBe("mixed_bot");
     expect(sessionAccountMap.get("mixed_bot:sess2")).toBe("mixed_bot");
+  });
+});
+
+describe("/fork command history leak filter (regression)", () => {
+  const botUid = "bot_uid_123";
+
+  // Simulate the filteredApiMsgs filter pipeline from handleInboundMessage:
+  // the existing (drop-bot/empty) filter plus the new fork-command filter.
+  const filterApiMsgs = (apiMessages: any[]) =>
+    apiMessages
+      .filter((m: any) => m.from_uid !== botUid && (m.content || m.type !== 1))
+      .filter((m: any) => !isForkCommandHistoryMessage(
+        m.content ?? "",
+        extractMentionUids(m.payload?.mention).includes(botUid),
+      ));
+
+  const mentionBot = (): MentionPayload => ({
+    entities: [{ uid: botUid, offset: 0, length: 4 }],
+  });
+
+  it("drops a prior @bot /fork command from backfilled history", () => {
+    const apiMessages = [
+      { from_uid: "u1", content: "@Max 帮我看下这个", type: 1 },
+      { from_uid: "u1", content: "@Max /fork 今天天气如何", type: 1, payload: { mention: mentionBot() } },
+      { from_uid: "u1", content: "好的谢谢", type: 1 },
+    ];
+    const bodies = filterApiMsgs(apiMessages).map((m) => m.content);
+    expect(bodies).toEqual(["@Max 帮我看下这个", "好的谢谢"]);
+  });
+
+  it("drops a bare @bot /fork (empty prompt) from history", () => {
+    const apiMessages = [
+      { from_uid: "u1", content: "@Max /fork", type: 1, payload: { mention: mentionBot() } },
+      { from_uid: "u1", content: "正常消息", type: 1 },
+    ];
+    const bodies = filterApiMsgs(apiMessages).map((m) => m.content);
+    expect(bodies).toEqual(["正常消息"]);
+  });
+
+  it("keeps ordinary messages and non-command text mentioning /fork mid-sentence", () => {
+    const apiMessages = [
+      { from_uid: "u1", content: "@Max 我想用 /fork 功能", type: 1, payload: { mention: mentionBot() } },
+      { from_uid: "u1", content: "/forked repo 怎么同步", type: 1 },
+    ];
+    const bodies = filterApiMsgs(apiMessages).map((m) => m.content);
+    expect(bodies).toEqual(["@Max 我想用 /fork 功能", "/forked repo 怎么同步"]);
   });
 });

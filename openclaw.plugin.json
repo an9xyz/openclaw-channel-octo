@@ -148,6 +148,22 @@
             "type": "number",
             "minimum": 1000,
             "description": "Per-inbound dispatch timeout in milliseconds (infrastructure backstop that releases the per-group queue when an upstream dispatch hangs). When unset, derived from agents.defaults.timeoutSeconds (default 600) as timeoutSeconds*1000 + 60000, so it always fires after the agent-run timeout. Set explicitly only when you need to decouple it from the agent timeout."
+          },
+          "commands": {
+            "type": "object",
+            "properties": {
+              "fork": {
+                "type": "object",
+                "properties": {
+                  "scope": {
+                    "type": "string",
+                    "enum": ["owner-mentioned", "any-mentioned", "owner-only", "any"],
+                    "default": "owner-mentioned",
+                    "description": "Authorization scope for the /fork command. v1 honors only the default (owner-mentioned); wiring inbound to read a configured value is a v1.1 TODO. The enum accepts all four values so a future config does not fail validation today."
+                  }
+                }
+              }
+            }
           }
         }
       }

@@ -1,5 +1,20 @@
 // Plain config types — no external dependencies
 
+/**
+ * Authorization scope for the `/fork` command (spec §5.4). v1 reads only the
+ * default (`owner-mentioned`); wiring inbound to honor a configured value is a
+ * v1.1 TODO. The schema accepts all four so a future config that sets it does
+ * not fail validation today.
+ */
+export type ForkCommandScope = "owner-mentioned" | "any-mentioned" | "owner-only" | "any";
+
+/** Per-command configuration (top-level only; not per-account in v1). */
+export interface OctoCommandsConfig {
+  fork?: {
+    scope?: ForkCommandScope;
+  };
+}
+
 export interface OctoAccountConfig {
   name?: string;
   enabled?: boolean;
@@ -34,6 +49,7 @@ export interface OctoConfig {
   onBehalfOf?: string;  // Persona clone: grantor uid — bot acts on behalf of this human
   secretsFileRoot?: string;  // Jail root for write-secret (see OctoAccountConfig)
   dispatchTimeoutMs?: number;  // Explicit per-inbound dispatch timeout override (ms); see OctoAccountConfig
+  commands?: OctoCommandsConfig;  // Per-command config (e.g. commands.fork.scope); v1 reads defaults only
   accounts?: Record<string, OctoAccountConfig | undefined>;
 }
 
@@ -56,6 +72,29 @@ export const SECRETS_FILE_ROOT_DESCRIPTION =
 export const DISPATCH_TIMEOUT_MS_DESCRIPTION =
   "Per-inbound dispatch timeout in milliseconds (infrastructure backstop that releases the per-group queue when an upstream dispatch hangs). When unset, derived from agents.defaults.timeoutSeconds (default 600) as timeoutSeconds*1000 + 60000, so it always fires after the agent-run timeout. Set explicitly only when you need to decouple it from the agent timeout.";
 
+// Shared description for commands.fork.scope, kept identical to the wording in
+// openclaw.plugin.json (manifest-schema-sync.test.ts asserts key-level sync).
+export const FORK_SCOPE_DESCRIPTION =
+  "Authorization scope for the /fork command. v1 honors only the default (owner-mentioned); wiring inbound to read a configured value is a v1.1 TODO. The enum accepts all four values so a future config does not fail validation today.";
+
+// Reusable JSON Schema fragment for the `commands` block (top-level only in v1).
+const COMMANDS_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    fork: {
+      type: "object" as const,
+      properties: {
+        scope: {
+          type: "string" as const,
+          enum: ["owner-mentioned", "any-mentioned", "owner-only", "any"],
+          default: "owner-mentioned",
+          description: FORK_SCOPE_DESCRIPTION,
+        },
+      },
+    },
+  },
+};
+
 // JSON Schema for OpenClaw plugin config validation
 export const OctoConfigJsonSchema = {
   schema: {
@@ -76,6 +115,7 @@ export const OctoConfigJsonSchema = {
       onBehalfOf: { type: "string" },
       secretsFileRoot: { type: "string", description: SECRETS_FILE_ROOT_DESCRIPTION },
       dispatchTimeoutMs: { type: "number", minimum: 1000, description: DISPATCH_TIMEOUT_MS_DESCRIPTION },
+      commands: COMMANDS_SCHEMA,
       accounts: {
         type: "object",
         additionalProperties: {

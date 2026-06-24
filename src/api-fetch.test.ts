@@ -2084,3 +2084,54 @@ describe("resolveTargetsByName", () => {
     expect(result.truncated).toBe(true);
   });
 });
+
+describe("httpStatusFromApiFetchError", () => {
+  it("extracts the 3-digit status from a `failed (NNN)` message", async () => {
+    const { httpStatusFromApiFetchError } = await import("./api-fetch.js");
+    expect(httpStatusFromApiFetchError(new Error("getThreadMd failed (404): not found"))).toBe(404);
+    expect(httpStatusFromApiFetchError(new Error("updateThreadMd failed (403): denied"))).toBe(403);
+  });
+
+  it("returns undefined when there is no embedded status (e.g. network timeout)", async () => {
+    const { httpStatusFromApiFetchError } = await import("./api-fetch.js");
+    expect(httpStatusFromApiFetchError(new Error("network timeout"))).toBeUndefined();
+  });
+
+  it("returns undefined for a non-Error throw", async () => {
+    const { httpStatusFromApiFetchError } = await import("./api-fetch.js");
+    expect(httpStatusFromApiFetchError("just a string")).toBeUndefined();
+  });
+
+  it("matches the messages thrown by the api-fetch helpers (format SSOT)", async () => {
+    const { httpStatusFromApiFetchError, API_FETCH_STATUS_RE } = await import("./api-fetch.js");
+    // Mirrors the real throw format in getThreadMd/getGroupMd/updateThreadMd.
+    expect(API_FETCH_STATUS_RE.test("getGroupMd failed (500): boom")).toBe(true);
+    expect(httpStatusFromApiFetchError(new Error("getGroupMd failed (500): boom"))).toBe(500);
+  });
+
+  it("parses the status from a REAL getThreadMd throw (end-to-end format guard, S1)", async () => {
+    // Unlike the hand-written cases above, this drives the actual getThreadMd
+    // throw path so the test breaks if api-fetch.ts:657's throw format ever
+    // drifts away from `failed (NNN)` and the SSOT regex silently stops matching.
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 404,
+      statusText: "Not Found",
+      text: async () => "thread md not found",
+    }) as unknown as typeof fetch;
+    try {
+      const { getThreadMd, httpStatusFromApiFetchError } = await import("./api-fetch.js");
+      let caught: unknown;
+      try {
+        await getThreadMd({ apiUrl: "http://octo.test", botToken: "bf_tok", groupNo: "G1", shortId: "P1" });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(Error);
+      expect(httpStatusFromApiFetchError(caught)).toBe(404);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+});

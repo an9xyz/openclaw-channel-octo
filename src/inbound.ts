@@ -43,6 +43,8 @@ import {
 } from "./mention-utils.js";
 import type { MentionPayload, MentionEntity, SendMessageResult } from "./types.js";
 import { registerGroupAccount, ensureGroupMd, handleGroupMdEvent, broadcastGroupMdUpdate, extractParentGroupNo, extractThreadShortId, ensureThreadMd, handleThreadMdEvent } from "./group-md.js";
+import { handleForkCommandIfMatched } from "./commands/fork-inbound.js";
+import { isForkCommandHistoryMessage } from "./commands/fork-history-filter.js";
 import { isOwner } from "./owner-registry.js";
 import { isKnownBot } from "./bot-registry.js";
 import { getPersonaPromptForSession } from "./persona-prompt.js";
@@ -1860,6 +1862,13 @@ export async function handleInboundMessage(params: {
     log?.debug?.(`octo: [RECV] mention payload: isMentioned=${isMentioned}, originalCount=${originalMentionUids.length}`);
 
     if (!isMentioned) {
+      // /fork commands require an explicit @bot, so they normally never reach
+      // this non-mention cache path. Defensive: a `/fork ...` typed without
+      // @mention is control-flow noise, not conversation — never cache it as
+      // history, or it would leak into a later historyPrefix.
+      if (isForkCommandHistoryMessage(rawBody, isExplicitBotMention)) {
+        return;
+      }
       // Record as pending history context (manual — avoids SDK format incompatibility)
       if (!groupHistories.has(sessionId)) {
         groupHistories.set(sessionId, []);
@@ -1934,6 +1943,12 @@ export async function handleInboundMessage(params: {
 
         const filteredApiMsgs = apiMessages
           .filter((m: any) => m.from_uid !== botUid && (m.content || m.type !== 1))
+          // /fork commands are control-flow, already handled by the fork hook
+          // below; never inject them into the bot's historyPrefix ctx.
+          .filter((m: any) => !isForkCommandHistoryMessage(
+            m.content ?? "",
+            extractMentionUids(m.payload?.mention).includes(botUid),
+          ))
           .sort((a: any, b: any) => (a.message_seq ?? 0) - (b.message_seq ?? 0))
           .slice(-historyLimit);
         entries = filteredApiMsgs.map((m: any) => {
@@ -2178,6 +2193,32 @@ export async function handleInboundMessage(params: {
 
   const commandBody = resolveCommandBody(rawBody, isGroup, isExplicitBotMention);
   const commandAuthorized = resolveCommandAuthorized(isGroup, isOwner(account.accountId, message.from_uid), isExplicitBotMention);
+
+  // `/fork` command split (spec §3). Runs BEFORE OBO detection /
+  // finalizeInboundContext / recordInboundSession / the dispatch main path: a
+  // handled fork creates its child thread + seeds it, sends the parent receipt,
+  // and early-returns — so it never writes the parent session nor reaches the
+  // LLM on this (parent) conversation. Non-fork messages return false here and
+  // fall through unchanged (a cheap regex, no behavior change for the hot path).
+  if (
+    await handleForkCommandIfMatched({
+      commandBody,
+      commandAuthorized,
+      isGroup,
+      parentChannelId: message.channel_id ?? sessionId,
+      parentChannelType: message.channel_type ?? ChannelType.Group,
+      parentSessionKey: route.sessionKey,
+      accountId: account.accountId,
+      apiUrl: account.config.apiUrl ?? "",
+      botToken: account.config.botToken ?? "",
+      requesterUid: message.from_uid,
+      requesterName: senderName ?? message.from_uid,
+      config,
+      log,
+    })
+  ) {
+    return;
+  }
 
   // OBO v2 detection + relevance filter (R10): Must run BEFORE
   // finalizeInboundContext / recordInboundSession so that irrelevant
