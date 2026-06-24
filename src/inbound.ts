@@ -1944,9 +1944,13 @@ export async function handleInboundMessage(params: {
         const filteredApiMsgs = apiMessages
           .filter((m: any) => m.from_uid !== botUid && (m.content || m.type !== 1))
           // /fork commands are control-flow, already handled by the fork hook
-          // below; never inject them into the bot's historyPrefix ctx.
+          // below; never inject them into the bot's historyPrefix ctx. Coerce
+          // content with String(): getChannelMessages types it as string, but
+          // RichText (type 14) and similar payloads can carry a non-string
+          // m.content, and a bare .replace() on those throws and crashes the
+          // whole backfill (P2, yujiawei).
           .filter((m: any) => !isForkCommandHistoryMessage(
-            m.content ?? "",
+            String(m.content ?? ""),
             extractMentionUids(m.payload?.mention).includes(botUid),
           ))
           .sort((a: any, b: any) => (a.message_seq ?? 0) - (b.message_seq ?? 0))
@@ -2218,6 +2222,12 @@ export async function handleInboundMessage(params: {
       log,
     })
   ) {
+    // The fork hook handled this message and early-returns BEFORE the normal
+    // dispatch path's pendingInboundContext.delete (below) and before the
+    // before_prompt_build hook's get/delete (index.ts) — neither runs for a
+    // fork. Drop the entry set above (pendingInboundContext.set) so a fork does
+    // not leak a Map entry / inject a stale historyPrefix later (P1, yujiawei).
+    pendingInboundContext.delete(route.sessionKey);
     return;
   }
 

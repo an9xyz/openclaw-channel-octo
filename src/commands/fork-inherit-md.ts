@@ -17,7 +17,7 @@
 // caller can `void`-fire it safely.
 
 import { getGroupMd, getThreadMd, updateThreadMd, httpStatusFromApiFetchError } from "../api-fetch.js";
-import { extractParentGroupNo, extractThreadShortId } from "../group-md.js";
+import { extractParentGroupNo, extractThreadShortId, broadcastThreadMdUpdate } from "../group-md.js";
 import type { ForkLogger } from "./fork.js";
 
 /** Server-side THREAD.md cap (octo-server GetGroupMdMaxSize), in bytes. */
@@ -48,12 +48,13 @@ export type InheritMdStatus =
 export async function inheritParentMdToChildThread(params: {
   apiUrl: string;
   botToken: string;
+  accountId: string;
   parentChannelId: string;
   childGroupNo: string;
   childShortId: string;
   log?: ForkLogger;
 }): Promise<InheritMdStatus> {
-  const { apiUrl, botToken, parentChannelId, childGroupNo, childShortId, log } = params;
+  const { apiUrl, botToken, accountId, parentChannelId, childGroupNo, childShortId, log } = params;
   const parentGroupNo = extractParentGroupNo(parentChannelId);
   const parentShortId = extractThreadShortId(parentChannelId);
 
@@ -96,7 +97,21 @@ export async function inheritParentMdToChildThread(params: {
 
   // 4) Write the child thread's THREAD.md.
   try {
-    await updateThreadMd({ apiUrl, botToken, groupNo: childGroupNo, shortId: childShortId, content });
+    const { version } = await updateThreadMd({ apiUrl, botToken, groupNo: childGroupNo, shortId: childShortId, content });
+    // Mirror the write into the local disk cache (P2, Jerry-Xin). updateThreadMd
+    // only writes the octo server, but before_prompt_build's getGroupMdForPrompt
+    // reads the local cache — without this, the inherited md would be invisible
+    // to the child's first dispatch. The server write is the SSOT, so a local
+    // cache failure must NOT downgrade the "ok" status (server already has it).
+    try {
+      broadcastThreadMdUpdate({ accountId, groupNo: childGroupNo, shortId: childShortId, content, version });
+    } catch (cacheErr) {
+      log?.("warn", "[fork] inherit md: server write ok but local cache update failed", {
+        childGroupNo,
+        childShortId,
+        error: String(cacheErr),
+      });
+    }
     log?.("info", "[fork] inherit md: copied parent md to child thread.md", {
       childGroupNo,
       childShortId,

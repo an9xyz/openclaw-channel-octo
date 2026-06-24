@@ -33,6 +33,14 @@ import { ChannelType, type MentionEntity } from "../types.js";
 import { executeFork, parseForkCommand, type ForkLogger, type ForkOrchestrator } from "./fork.js";
 import { buildForkOrchestrator, type ForkRuntimeDeps, type ForkSeedContext } from "./fork-runtime.js";
 
+/**
+ * Bounded timeout for the parent-group receipt send (P2, yujiawei). The dispatch
+ * timeout only guards the seed dispatch; without this, a hung Octo API on the
+ * receipt POST would still strand the parent enqueueInbound serial queue. Mirrors
+ * the `AbortSignal.timeout(DISPATCH_TIMEOUT_APOLOGY_MS)` pattern in inbound.ts.
+ */
+const RECEIPT_SEND_TIMEOUT_MS = 30_000;
+
 /** Adapt the channel log sink to the {@link ForkLogger} signature. */
 function toForkLogger(log?: ChannelLogSink): ForkLogger {
   return (level, message, meta) => {
@@ -147,6 +155,12 @@ export async function dispatchForkSeedReply(params: {
 
   const buffer = { lastText: null as string | null };
   let delivered = false;
+  // P1 (Jerry-Xin): the SDK dispatcher routes deliver()/onError failures WITHOUT
+  // rejecting the outer promise, so a failed user-facing send would otherwise
+  // look like fork success and the user gets "已开 fork 子区" while the first
+  // reply never landed. Track delivery failure and convert it to a thrown error
+  // after settle → spawnChildBoundSession seedFailed → ok_seed_failed.
+  let deliverFailed = false;
   try {
     await Promise.race([
       core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
@@ -159,9 +173,15 @@ export async function dispatchForkSeedReply(params: {
             const content = payload.text?.trim() ?? "";
             if (!content) return;
             if (info.kind === "final" || info.kind === "tool") {
-              await sendSeedText(content);
-              delivered = true;
-              buffer.lastText = null;
+              try {
+                await sendSeedText(content);
+                delivered = true;
+                buffer.lastText = null;
+              } catch (sendErr) {
+                // User-facing answer failed to send → the seed did not land.
+                log?.error?.(`octo: [fork-seed] ${info.kind} send failed: ${String(sendErr)}`);
+                deliverFailed = true;
+              }
             } else {
               // block / other: buffer, flush once after the dispatcher settles
               buffer.lastText = content;
@@ -169,6 +189,10 @@ export async function dispatchForkSeedReply(params: {
           },
           onError: async (err: unknown, info: { kind: string }) => {
             log?.error?.(`octo: [fork-seed] ${info.kind} reply failed: ${String(err)}`);
+            // A final/tool error means the user-facing reply did not land.
+            if (info.kind === "final" || info.kind === "tool") {
+              deliverFailed = true;
+            }
           },
         },
       } as Parameters<typeof core.channel.reply.dispatchReplyWithBufferedBlockDispatcher>[0]),
@@ -199,6 +223,13 @@ export async function dispatchForkSeedReply(params: {
         );
       }
     }
+  }
+
+  // Settled without throwing, but a final/tool delivery may have failed silently
+  // (the SDK does not reject the outer promise for deliver/onError failures).
+  // Surface it so spawnChildBoundSession reports seedFailed → ok_seed_failed (P1).
+  if (deliverFailed) {
+    throw new Error("octo: [fork-seed] delivery failed: user-facing reply did not send");
   }
 }
 
@@ -296,6 +327,10 @@ export async function handleForkCommandIfMatched(params: {
         channelId: params.parentChannelId,
         channelType: params.parentChannelType,
         content: text,
+        // Bound the receipt POST so a hung Octo API cannot strand the parent
+        // enqueueInbound queue (P2). safeSendReceipt swallows the resulting
+        // timeout error, so the fork's main effect (thread + seed) still stands.
+        signal: AbortSignal.timeout(RECEIPT_SEND_TIMEOUT_MS),
       });
     },
     dispatchSeed: async (seedCtx) => {

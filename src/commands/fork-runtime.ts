@@ -207,6 +207,7 @@ export function buildForkOrchestrator(deps: ForkRuntimeDeps): ForkOrchestrator {
       void inheritFn({
         apiUrl: deps.apiUrl,
         botToken: deps.botToken,
+        accountId: deps.accountId,
         parentChannelId,
         childGroupNo: groupNo,
         childShortId: thread.short_id,

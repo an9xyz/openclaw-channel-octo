@@ -11,14 +11,23 @@ vi.mock("../api-fetch.js", async (importActual) => ({
   updateThreadMd: vi.fn(),
 }));
 
+// Mock only the disk-cache broadcast; keep the real path-parsing helpers
+// (extractParentGroupNo / extractThreadShortId) that inherit-md also uses.
+vi.mock("../group-md.js", async (importActual) => ({
+  ...(await importActual<typeof import("../group-md.js")>()),
+  broadcastThreadMdUpdate: vi.fn(),
+}));
+import * as groupMd from "../group-md.js";
+
 const getGroupMd = vi.mocked(api.getGroupMd);
 const getThreadMd = vi.mocked(api.getThreadMd);
 const updateThreadMd = vi.mocked(api.updateThreadMd);
+const broadcastThreadMdUpdate = vi.mocked(groupMd.broadcastThreadMdUpdate);
 
 const mdResp = (content: string) => ({ content, version: 1, updated_at: null, updated_by: "tester" });
 const httpErr = (who: string, status: number) => new Error(`${who} failed (${status}): nope`);
 
-const base = { apiUrl: "http://octo.test", botToken: "bf_token" };
+const base = { apiUrl: "http://octo.test", botToken: "bf_token", accountId: "acct1" };
 // Parent is a plain group.
 const groupParent = { ...base, parentChannelId: "G1", childGroupNo: "G1", childShortId: "C1" };
 // Parent is itself a thread (G1____P1).
@@ -124,5 +133,36 @@ describe("inheritParentMdToChildThread", () => {
     const status = await inheritParentMdToChildThread(groupParent);
     expect(status).toBe("fetch_failed");
     expect(updateThreadMd).not.toHaveBeenCalled();
+  });
+
+  it("13. ok write → mirrors content into local disk cache via broadcastThreadMdUpdate (P2)", async () => {
+    getGroupMd.mockResolvedValue(mdResp("group rules"));
+    updateThreadMd.mockResolvedValue({ version: 7 });
+    const status = await inheritParentMdToChildThread(groupParent);
+    expect(status).toBe("ok");
+    expect(broadcastThreadMdUpdate).toHaveBeenCalledWith({
+      accountId: "acct1",
+      groupNo: "G1",
+      shortId: "C1",
+      content: "group rules",
+      version: 7,
+    });
+  });
+
+  it("14. server write ok but local cache broadcast throws → still ok (server is SSOT)", async () => {
+    getGroupMd.mockResolvedValue(mdResp("group rules"));
+    updateThreadMd.mockResolvedValue({ version: 1 });
+    broadcastThreadMdUpdate.mockImplementationOnce(() => {
+      throw new Error("disk full");
+    });
+    const status = await inheritParentMdToChildThread(groupParent);
+    expect(status).toBe("ok");
+  });
+
+  it("15. skipped/failed paths do NOT touch the local cache", async () => {
+    getGroupMd.mockResolvedValue(mdResp("")); // empty → skipped_empty, no write
+    const status = await inheritParentMdToChildThread(groupParent);
+    expect(status).toBe("skipped_empty");
+    expect(broadcastThreadMdUpdate).not.toHaveBeenCalled();
   });
 });

@@ -282,4 +282,30 @@ describe("dispatchForkSeedReply", () => {
     ).rejects.toThrow("dispatch boom"); // original error wins, NOT "flush boom"
     expect(error.mock.calls.some((c) => String(c[0]).includes("finally flush failed"))).toBe(true);
   });
+
+  it("DELIVERY FAILURE (P1): a final send error → throws (→ seedFailed → ok_seed_failed)", async () => {
+    // deliver() for a final block tries to send; the send throws. The SDK does
+    // not reject the outer promise for this, so without tracking it the fork
+    // would falsely report success. We track it and throw after settle.
+    driveDeliver([{ kind: "final", text: "the answer" }]);
+    mockSendMessage.mockImplementationOnce(async () => {
+      throw new Error("octo 500");
+    });
+    await expect(run()).rejects.toThrow(/delivery failed/i);
+  });
+
+  it("DELIVERY FAILURE (P1): onError(final) → throws even though the dispatcher resolved", async () => {
+    mockDispatch.mockImplementation(async (o: any) => {
+      // dispatcher resolves normally; the failure surfaces only via onError.
+      await o.dispatcherOptions.onError(new Error("upstream boom"), { kind: "final" });
+    });
+    await expect(run()).rejects.toThrow(/delivery failed/i);
+  });
+
+  it("onError(block) does NOT fail the seed (only final/tool are user-facing)", async () => {
+    mockDispatch.mockImplementation(async (o: any) => {
+      await o.dispatcherOptions.onError(new Error("block hiccup"), { kind: "block" });
+    });
+    await expect(run()).resolves.toBeUndefined();
+  });
 });
