@@ -359,39 +359,88 @@ const CACHE_MAX_AGE_MS = 4 * 60 * 60 * 1000;
 const CACHE_CLEANUP_INTERVAL_MS = 30 * 60 * 1000;
 const _cacheActivity = new Map<string, Map<string, number>>();
 
-function touchCache(accountId: string, groupId: string): void {
+export function touchCache(accountId: string, groupId: string): void {
   const id = normalizeAccountId(accountId);
   let m = _cacheActivity.get(id);
   if (!m) { m = new Map(); _cacheActivity.set(id, m); }
   m.set(groupId, Date.now());
 }
 
-function cleanupStaleCaches(): void {
+export function cleanupStaleCaches(): void {
   const cutoff = Date.now() - CACHE_MAX_AGE_MS;
   for (const [accountId, activityMap] of _cacheActivity) {
+    // Separate stale raw keys from active ones. Active raw keys' parent
+    // groupNos must NOT be evicted from parent-keyed maps — a sibling thread
+    // may still be using the shared per-group cache. (#128)
+    const staleRawKeys: string[] = [];
+    const activeParentGroupNos = new Set<string>();
+
     for (const [groupId, lastAccess] of activityMap) {
       if (lastAccess < cutoff) {
-        _historyMaps.get(accountId)?.delete(groupId);
-        _lastBotReplySeq.get(accountId)?.delete(groupId);
-        _memberMaps.get(accountId)?.delete(groupId);
-        // Note: uidToNameMap is a flat uid→name map (not keyed by groupId),
-        // so we don't delete from it here — names remain valid across groups.
-        _groupCacheTimestamps.get(accountId)?.delete(groupId);
-        // Delete by the SAME key cleanup uses for _groupCacheTimestamps (raw
-        // channel_id from touchCache) so the roster is reclaimed on exactly the
-        // same cleanup pass as its freshness timestamp. (Steady-state they are
-        // not strictly 1:1 — refreshGroupMemberCache's failure branch keeps a
-        // backoff timestamp while deleting the roster — but the read path
-        // tolerates a missing roster via `?? []`, so co-deletion at cleanup is
-        // what matters here.) Deleting by parent groupNo instead would drop the
-        // roster while a sibling thread keeps the timestamp fresh, leaving the
-        // next message to early-return with no roster.
-        _currentGroupMembersMaps.get(accountId)?.delete(groupId);
-        activityMap.delete(groupId);
+        staleRawKeys.push(groupId);
+      } else {
+        activeParentGroupNos.add(extractParentGroupNo(groupId));
       }
+    }
+
+    // Delete raw-keyed caches by raw key (same dimension as touchCache).
+    for (const groupId of staleRawKeys) {
+      _historyMaps.get(accountId)?.delete(groupId);
+      _lastBotReplySeq.get(accountId)?.delete(groupId);
+      _memberMaps.get(accountId)?.delete(groupId);
+    }
+
+    // Delete parent-keyed caches by parent groupNo, but only when no sibling
+    // thread under the same parent is still active. refreshGroupMemberCache
+    // writes these maps under extractParentGroupNo(channel_id), so cleanup
+    // must use the same key to actually reclaim the entries. (#128)
+    const evictedParents = new Set<string>();
+    for (const groupId of staleRawKeys) {
+      const parentGroupNo = extractParentGroupNo(groupId);
+      if (!activeParentGroupNos.has(parentGroupNo) && !evictedParents.has(parentGroupNo)) {
+        _groupCacheTimestamps.get(accountId)?.delete(parentGroupNo);
+        _currentGroupMembersMaps.get(accountId)?.delete(parentGroupNo);
+        evictedParents.add(parentGroupNo);
+      }
+    }
+
+    for (const groupId of staleRawKeys) {
+      activityMap.delete(groupId);
     }
     if (activityMap.size === 0) _cacheActivity.delete(accountId);
   }
+}
+
+// --- Test helpers (exported for unit tests) ---
+
+/** @internal — test-only: access _cacheActivity for assertions */
+export function _testGetCacheActivity(): Map<string, Map<string, number>> {
+  return _cacheActivity;
+}
+
+/** @internal — test-only: access _groupCacheTimestamps for assertions */
+export function _testGetGroupCacheTimestamps(): Map<string, Map<string, number>> {
+  return _groupCacheTimestamps;
+}
+
+/** @internal — test-only: access _currentGroupMembersMaps for assertions */
+export function _testGetCurrentGroupMembersMaps(): Map<string, Map<string, any[]>> {
+  return _currentGroupMembersMaps;
+}
+
+/** @internal — test-only: access _memberMaps for assertions */
+export function _testGetMemberMaps(): Map<string, Map<string, string>> {
+  return _memberMaps;
+}
+
+/** @internal — test-only: reset all cache state */
+export function _testResetCaches(): void {
+  _cacheActivity.clear();
+  _groupCacheTimestamps.clear();
+  _currentGroupMembersMaps.clear();
+  _memberMaps.clear();
+  _historyMaps.clear();
+  _lastBotReplySeq.clear();
 }
 
 // Known bot robot_ids across all accounts — for bot-to-bot loop prevention.
