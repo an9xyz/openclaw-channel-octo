@@ -4,22 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [1.0.19](https://github.com/Mininglamp-OSS/openclaw-channel-octo/compare/v1.0.18...v1.0.19) (2026-06-29)
 
-
 ### Added
-
-* **fork:** /fork command — create child thread with parent context ([#131](https://github.com/Mininglamp-OSS/openclaw-channel-octo/issues/131)) ([bf90e2e](https://github.com/Mininglamp-OSS/openclaw-channel-octo/commit/bf90e2e25e3ed0737687f8c4fbd377c77ec94f4b))
-* **prompt:** explain octo_management unavailability under restrictive tools profiles ([#137](https://github.com/Mininglamp-OSS/openclaw-channel-octo/issues/137)) ([#142](https://github.com/Mininglamp-OSS/openclaw-channel-octo/issues/142)) ([48ff969](https://github.com/Mininglamp-OSS/openclaw-channel-octo/commit/48ff9697fa353f4e5f041d08faeccf97ca29c877))
-
+- **`/fork`：从当前对话拉出带父上下文的子区**（#131）：群里发 `/fork` 可基于当前会话创建一个 Octo 子区（community topic），并把父对话的相关上下文 seed 进新子线程，让分支讨论延续上文而不污染主线。涵盖历史过滤、父 MD 继承、子线程 seed 派发等完整链路；`commands.fork.scope` 提供触发范围配置（v1 hook 实际只认默认的 owner-mentioned，其余值给启动告警）。
+- **受限 tools.profile 下 `octo_management` 不可用时，bot 正确归因而非瞎建议**（#137, PR #142）：OpenClaw 的受限工具档（`minimal` / `coding` / `messaging`，且**新装默认就是 `coding`**）会在模型看到工具前过滤掉插件工具，导致 `octo_management`——它承载**全部** Octo 管理能力（建群、子区、GROUP.md/THREAD.md、成员管理、voice context、write-secret）——在 agent 工具列表里整个消失。此前 bot 会把「工具不见了」错误归因为「Octo 不支持这些功能」，转而建议改用企业微信 / 飞书，或对 write-secret 建议用户直接粘贴明文密钥，与该功能的安全初衷相悖。
+  - 修复：通过 `before_prompt_build` 注入一段诊断 system 提示，让 bot 明白这是**工具档限制**而非功能缺失，并引导用户用 `tools.alsoAllow: ["octo_management"]`（全局或 per-agent）放行、或切到 `full` 档，明确**不要**建议替代平台或粘贴明文。改不改配置由用户决定。
+  - 落点选择：用 `before_prompt_build` / `prependSystemContext` 而非 channel `messageToolHints`——后者被 system-prompt builder 的「message 工具是否可用」门槛包着，而受限工具档恰好也会移除 message 工具，导致挂在 messageToolHints 上的提示在我们要覆盖的场景里永不出现。
+  - 仅在 octo 会话注入（gate 在 `messageProvider`，因为该 hook 是全局的）；文案条件式，`full` 档工具可用时无副作用。`octo_management` 仍保持为插件工具——这正是 write-secret 明文不进模型上下文的保证，与本次诊断提示正交。
 
 ### Fixed
+- **thread 群的成员缓存永不回收、内存泄漏**（#128, PR #135）：`cleanupStaleCaches` 用 raw `channel_id`（线程频道为 `parent____short`）去删按 parent groupNo 存储的两类缓存（`_groupCacheTimestamps` / `_currentGroupMembersMaps`），key 维度不匹配，thread 群的这两类缓存永远删不掉，随时间累积泄漏。
+  - 修复：改为两遍扫描——第一遍清理 raw-key 缓存及其活跃记录，第二遍遍历 parent-keyed 缓存自身，仅当该 parent 下**没有活跃的兄弟线程**时才删除。能回收旧逻辑已积压的「孤儿」parent 条目（raw 活跃记录已被清、但 parent 缓存残留的情况）。
+- **主动发送不带目标时服务端返回不透明 500**（#138, PR #141）：agent 主动（非回复）发送但**未指定目标 channel** 时，`parseTarget` 解析出空 channelId 并被透传给服务端，`POST /v1/bot/sendMessage` 报 500。除空串外，`group:` / `user:` 等仅前缀、`group:@uid` 仅含 mention 等「解析后实体为空」的目标同样会触发。回复路径自带会话上下文，不受影响。
+  - 修复：客户端 fail-fast，四道防线——出向解析主防线（`parseTarget` 之后、threadId 合并之前判空，避免 `group:` 拼上 threadId 合成出非空的伪线程 channel 而绕过）、message 工具 `handleSend` 入口返回结构化错误、三个 HTTP 发送函数入口兜底、`sendMedia` 在任何下载/上传之前提前校验（避免无效目标白白上传）。空请求不再发出，从根上消除该 500。服务端对任意客户端缺 target 返回干净 400 属 octo-server 范畴，本次修复后本插件请求已不会走到那条路径。
 
-* cleanupStaleCaches misses parent-keyed cache entries for thread channels ([#128](https://github.com/Mininglamp-OSS/openclaw-channel-octo/issues/128)) ([#135](https://github.com/Mininglamp-OSS/openclaw-channel-octo/issues/135)) ([55b1a6a](https://github.com/Mininglamp-OSS/openclaw-channel-octo/commit/55b1a6a83030145762c795a1d41f7a4a22b050ca))
-* **outbound:** reject empty target before send instead of posting empty channel_id ([#138](https://github.com/Mininglamp-OSS/openclaw-channel-octo/issues/138)) ([#141](https://github.com/Mininglamp-OSS/openclaw-channel-octo/issues/141)) ([bbf4620](https://github.com/Mininglamp-OSS/openclaw-channel-octo/commit/bbf46206920a908bc8208c4244970abdab8eb20b))
-
-
-### Internal
-
-* release as 1.0.19 ([7b4ada9](https://github.com/Mininglamp-OSS/openclaw-channel-octo/commit/7b4ada9e86bb10c307b144333eea497134ea7d57))
 
 ## [1.0.18](https://github.com/Mininglamp-OSS/openclaw-channel-octo/compare/v1.0.17...v1.0.18) (2026-06-27)
 
