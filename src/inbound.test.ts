@@ -957,7 +957,7 @@ describe("uploadAndSendMedia timeout", () => {
 });
 
 /**
- * Streaming size cap (PR#66 R2 — lml2468 阻断点).
+ * Streaming size cap.
  *
  * After dropping the HEAD-based pre-check, the streaming cap inside
  * uploadMedia is the only line of defense against oversize remote downloads.
@@ -966,7 +966,7 @@ describe("uploadAndSendMedia timeout", () => {
  *   - presigned PUT API is never called (no upload attempted past the cap)
  *   - partial temp file under /tmp/octo-upload is unlinked on failure
  */
-describe("uploadMedia — streaming size cap (R2)", () => {
+describe("uploadMedia — streaming size cap", () => {
   const originalFetch = globalThis.fetch;
 
   afterEach(() => {
@@ -1303,7 +1303,7 @@ describe("resolveInboundMediaList (Fixes #58)", () => {
  * returns undefined so the whole message falls back to the MediaUrls (remote
  * http) branch. This deliberately avoids sparse MediaPaths: Core's sandbox media
  * staging treats MediaPaths as a plain string[] (resolveRawPaths → raw.trim())
- * and would crash on an undefined slot (Jerry-Xin round-3 P1). The return type
+ * and would crash on an undefined slot. The return type
  * is string[] — no non-string element ever reaches MediaPaths.
  */
 describe("resolveInboundMediaPaths (#59 — all-or-nothing, never sparse)", () => {
@@ -1387,7 +1387,7 @@ describe("isRemoteMediaUrl", () => {
 });
 
 /**
- * Integration-style test (#59 round-3 P1): assert the inbound media payload built
+ * Integration-style test: assert the inbound media payload built
  * by inbound.ts (MediaPaths / MediaUrls / MediaTypes) flows correctly through
  * Core's REAL normalizeMediaAttachments (= normalizeAttachments). This guards the
  * all-or-nothing contract directly against Core: all-local goes through the fs
@@ -1434,7 +1434,7 @@ describe("inbound media payload × Core normalizeMediaAttachments (#59 all-or-no
       { localPath: undefined, remoteUrl: "https://cdn.example.com/b.png" },
     ];
     const payload = buildPayload(items);
-    // Mixed-fail: NO MediaPaths (never sparse) — the round-3 P1 guarantee.
+    // Mixed-fail: NO MediaPaths (never sparse) — the array-shape guarantee.
     expect(payload.MediaPaths).toBeUndefined();
     expect(payload.MediaUrls).toEqual([
       "https://cdn.example.com/a.jpg",
@@ -1911,7 +1911,7 @@ describe("pendingInboundContext", () => {
     expect(entry?.memberListPrefix).toBe("members...");
   });
 
-  // P1 (yujiawei): every group inbound sets pendingInboundContext before the
+  // Every group inbound sets pendingInboundContext before the
   // command split; the fork hook early-returns BEFORE the normal dispatch
   // delete and before the before_prompt_build get/delete, so the fork branch
   // must delete the entry itself or it leaks. This documents that invariant by
@@ -1975,7 +1975,7 @@ describe("sessionAccountMap (composite-keyed)", () => {
   });
 
   it("does NOT overwrite when two accounts share the same sessionKey (multi-account isolation)", () => {
-    // 🔴 PR#69 R3 regression guard: two distinct accounts can legitimately
+    // 🔴 Regression guard: two distinct accounts can legitimately
     // share the same sessionKey. The composite-key map must keep both
     // entries so the hook can disambiguate per-account; otherwise the
     // second account's persona prompt would leak into the first account's
@@ -2857,7 +2857,7 @@ describe("OBO v2 sender identity validation (GH#63)", () => {
 });
 
 /**
- * Tests for OBO v2 effective identity authority (PR#61 R5).
+ * Tests for OBO v2 effective identity authority.
  *
  * In the isOBOv2 branch of inbound.ts (~L1685), `effectiveOnBehalfOf` is the
  * identity we use as `on_behalf_of` for replies/typing. It MUST come from the
@@ -2865,7 +2865,7 @@ describe("OBO v2 sender identity validation (GH#63)", () => {
  * `obo_respond_as` (which is attacker-controllable in transit). When the two
  * disagree, we keep the configured grantor and emit a warn for visibility.
  */
-describe("OBO v2 effective identity authority (PR#61 R5)", () => {
+describe("OBO v2 effective identity authority", () => {
   type WarnSink = { warn: (msg: string) => void; info?: (msg: string) => void };
 
   // Mirrors the assignment at inbound.ts:1685 (post-fix).
@@ -3028,9 +3028,9 @@ describe("OBO v2 relevance filter", () => {
 });
 
 /**
- * Tests for OBO v2 detection + relevance filter ordering (PR#61 R10).
+ * Tests for OBO v2 detection + relevance filter ordering.
  *
- * Jerry-Xin + lml2468 R10 found: at d46efad8, `recordInboundSession` was
+ * Regression: at d46efad8, `recordInboundSession` was
  * fired BEFORE the OBO v2 relevance filter, so irrelevant OBO v2 fan-out
  * messages (e.g. AI-only) were already persisted to the bot's DM session
  * with the grantor — including any `obo_system_hint` from the payload as
@@ -3042,7 +3042,7 @@ describe("OBO v2 relevance filter", () => {
  * BEFORE finalizeInboundContext / recordInboundSession in inbound.ts.
  * These tests guard against regressing the ordering.
  */
-describe("OBO v2 detection + filter ordering vs recordInboundSession (PR#61 R10)", () => {
+describe("OBO v2 detection + filter ordering vs recordInboundSession", () => {
   type ObovPayload = {
     obo_origin_channel_id?: string;
     obo_origin_channel_type?: number;
@@ -3228,7 +3228,7 @@ describe("OBO v2 detection + filter ordering vs recordInboundSession (PR#61 R10)
   /**
    * Source-ordering regression guard: read inbound.ts and verify that the
    * `recordInboundSession` call is AFTER the OBO v2 relevance-filter early
-   * return. This is the structural invariant R10 enforces — if a future
+   * return. This is the structural ordering invariant — if a future
    * patch reorders the calls back to the buggy d46efad8 layout, this test
    * fails immediately.
    */
@@ -3242,7 +3242,7 @@ describe("OBO v2 detection + filter ordering vs recordInboundSession (PR#61 R10)
 
     const lines = src.split("\n");
     // First `if (isOBOv2)` block in the inbound function gates the early
-    // return that R10 introduces.
+    // return for the OBO v2 relevance filter.
     let firstIsObovBlockLine = -1;
     let firstReturnAfterIsObov = -1;
     let recordInboundSessionLine = -1;
@@ -3646,7 +3646,7 @@ describe("/fork command history leak filter (regression)", () => {
 
   // Simulate the filteredApiMsgs filter pipeline from handleInboundMessage:
   // the existing (drop-bot/empty) filter plus the new fork-command filter.
-  // String(m.content ?? "") mirrors the production coerce (P2, yujiawei).
+  // String(m.content ?? "") mirrors the production coerce.
   const filterApiMsgs = (apiMessages: any[]) =>
     apiMessages
       .filter((m: any) => m.from_uid !== botUid && (m.content || m.type !== 1))
@@ -3687,7 +3687,7 @@ describe("/fork command history leak filter (regression)", () => {
     expect(bodies).toEqual(["@Max 我想用 /fork 功能", "/forked repo 怎么同步"]);
   });
 
-  it("does NOT throw on non-string content (RichText etc.) and keeps it (P2, yujiawei)", () => {
+  it("does NOT throw on non-string content (RichText etc.) and keeps it", () => {
     // getChannelMessages types content as string, but RichText (type 14) and
     // similar payloads carry a non-string m.content. A bare .replace() on those
     // crashes the whole backfill; String(...) coerce keeps it safe. A coerced

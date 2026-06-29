@@ -64,7 +64,7 @@ const _firstFetchLogged = new Set<string>();
  * Without this guard, an account stop/reconfigure that races with an
  * in-flight `getBotOboGrant` call would let the old fetch resolve later
  * and overwrite the cleared cache (or replace the next account's fresh
- * hint). See PR#69 review.
+ * hint).
  */
 const _generation = new Map<string, number>();
 
@@ -216,7 +216,7 @@ export function initPersonaPromptCache(
 ): void {
   const acc = withNormalizedAccount(account);
   if (!acc.onBehalfOf) {
-    // PR#69 R4 (Jerry-Xin) Blocking 1: when an account is reconfigured
+    // When an account is reconfigured
     // from persona-clone (`onBehalfOf` set) to a regular bot (`onBehalfOf`
     // cleared), a bare early return would leave the previous timer and
     // cached hint in place, so the before_prompt_build hook would keep
@@ -236,7 +236,7 @@ export function initPersonaPromptCache(
   // and bail out before mutating _cache.
   _bumpGeneration(acc.accountId);
 
-  // PR#69 R4 (Jerry-Xin) Blocking 2: on reconfigure (e.g. grantor
+  // On reconfigure (e.g. grantor
   // switched from A to B), the previous grantor's hint is still sitting
   // in _cache. The new fetch we kick off below is async — until it
   // resolves, getPersonaPromptForSession would keep serving the OLD
@@ -327,8 +327,7 @@ export function getRegisteredPersonaAccountIds(): string[] {
  * sessionKey?". If exactly one persona account matches we return its cached
  * hint; on 0 or >1 matches we return undefined (fail safe — better to drop
  * the persona injection than to attach the wrong account's identity to the
- * prompt). This is the multi-account isolation fix called out in PR#69 R3
- * (Jerry-Xin).
+ * prompt). This is the multi-account isolation guard.
  *
  * Extracted as a pure helper so the resolution logic is unit-testable
  * without standing up the full plugin hook surface.

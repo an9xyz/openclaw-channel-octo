@@ -14,7 +14,7 @@ import { extractFilename, sanitizeFilename } from "./inbound.js";
  */
 
 // ---------------------------------------------------------------------------
-// sanitizeFilename + extractFilename — path traversal defense (P1-2)
+// sanitizeFilename + extractFilename — path traversal defense
 // ---------------------------------------------------------------------------
 describe("sanitizeFilename — path traversal defense", () => {
   it("strips leading directory components", () => {
@@ -40,7 +40,7 @@ describe("sanitizeFilename — path traversal defense", () => {
   });
 });
 
-describe("extractFilename — path traversal via URL-encoded segments (P1-2)", () => {
+describe("extractFilename — path traversal via URL-encoded segments", () => {
   it("URL-encoded ..%2F..%2Fetc%2Fpasswd does NOT escape temp dir", () => {
     // Before fix: extractFilename returned "../../etc/passwd" and a caller
     // doing `path.join("/tmp/octo-upload", filename)` resolved to

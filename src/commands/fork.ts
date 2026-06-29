@@ -135,7 +135,7 @@ export const DEFAULT_FORK_SCOPE: ForkScope = "owner-mentioned";
 
 /**
  * Startup warning for a configured `commands.fork.scope` that v1 does not yet
- * honor (F3, PR #131 review). v1's inbound hook always uses the default
+ * honor. v1's inbound hook always uses the default
  * `owner-mentioned`; wiring a configured value is a v1.1 TODO. So an operator
  * who sets a non-default scope would be silently fail-closed — confusing.
  *

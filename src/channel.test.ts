@@ -644,7 +644,7 @@ describe("outbound.sendMedia — threadId wiring", () => {
 });
 
 /**
- * Streaming size cap for the outbound HTTP-URL branch (PR#66 R2 — lml2468 阻断点).
+ * Streaming size cap for the outbound HTTP-URL branch.
  *
  * channel.ts#downloadToTempFile is the only line of defense after dropping the
  * HEAD-based pre-check. This test drives the cap through octoPlugin.outbound.sendMedia
@@ -653,7 +653,7 @@ describe("outbound.sendMedia — threadId wiring", () => {
  *   - presigned PUT is never called
  *   - partial temp file under /tmp/octo-upload is unlinked on failure
  */
-describe("outbound.sendMedia — HTTP streaming size cap (R2)", () => {
+describe("outbound.sendMedia — HTTP streaming size cap", () => {
   const cfg = {
     channels: {
       octo: {
@@ -945,7 +945,7 @@ describe("outbound sendText/sendMedia — messageId propagation (#51)", () => {
   });
 });
 
-// ─── P0-2: messageToolHints @mention format hint ─────────────────────────────
+// ─── messageToolHints @mention format hint ─────────────────────────────
 
 describe("agentPrompt.messageToolHints — @mention format hint", () => {
   it("appends the shared MENTION_FORMAT_HINT with group-members + anti-patterns", async () => {
@@ -976,9 +976,9 @@ describe("agentPrompt.messageToolHints — @mention format hint", () => {
   });
 });
 
-// ─── P0-1: outbound member prefetch (cold start) ─────────────────────────────
+// ─── outbound member prefetch (cold start) ─────────────────────────────
 
-describe("outbound.sendText — P0-1 member prefetch", () => {
+describe("outbound.sendText — member prefetch", () => {
   const cfg = {
     channels: {
       octo: {

@@ -393,7 +393,7 @@ describe("handleOctoMessageAction", () => {
         ["uid_bob", "bob"],
       ]);
       // uid_unknown is NOT in uidToNameMap and is not a 32-hex / space-prefixed
-      // uid, so the P0-3 outbound guard strips it (server would reject it
+      // uid, so the outbound guard strips it (server would reject it
       // anyway). uid_bob is in the map → kept.
 
       const { handleOctoMessageAction } = await import("./actions.js");
@@ -442,7 +442,7 @@ describe("handleOctoMessageAction", () => {
     });
   });
 
-  describe("send — P0-3 outbound sanitizer", () => {
+  describe("send — outbound sanitizer", () => {
     const HEX_A = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6";
 
     it("bracketless @uid:name (valid uid) → @displayName + entity, no raw uid:name leaked", async () => {
@@ -500,7 +500,7 @@ describe("handleOctoMessageAction", () => {
     });
   });
 
-  describe("send — P0-1 sub-topic parent group prefetch", () => {
+  describe("send — sub-topic parent group prefetch", () => {
     const HEX_A = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6";
 
     it("fetches members from the PARENT group_no for a sub-topic target", async () => {
@@ -1114,8 +1114,8 @@ describe("handleOctoMessageAction", () => {
       expect(sentPayload.channel_type).toBe(2);
     });
 
-    it("9h — stacked-prefix target (group:octo:<id>) — guard AND delivery use same normalization (PR#103 Jerry-Xin)", async () => {
-      // 🔴 Regression guard for the bug Jerry-Xin caught on PR #103:
+    it("9h — stacked-prefix target (group:octo:<id>) — guard AND delivery use same normalization", async () => {
+      // 🔴 Regression guard for stacked-prefix target handling:
       // handleSend's effectiveThreadId guard collapsed stacked prefixes
       // recursively (stripAllChannelPrefixes), but resolveOutboundOctoTarget
       // only stripped a SINGLE leading prefix. So target="group:octo:grp1"
@@ -1429,7 +1429,7 @@ describe("handleOctoMessageAction", () => {
     });
 
     it("scope:'parent' on a DM target → sent as DM, NOT rewritten to a group", async () => {
-      // Boundary bug (issue #98 review round 4): scope:"parent" used to
+      // Boundary bug: scope:"parent" used to
       // unconditionally strip the suffix and rewrite the target to
       // "group:<bare>". For a DM (`user:<uid>`) target that produced
       // "group:user:uid", which resolved to a Group and sent the message to a
@@ -3555,8 +3555,8 @@ describe("resolveOutboundOctoTarget", () => {
       .toBe("grp1____topicA");
   });
 
-  it("collapses stacked prefixes on the TARGET itself, not just threadId (PR#103 Jerry-Xin)", async () => {
-    // 🔴 PR #103 Jerry-Xin blocking finding: the threadId path strips stacked
+  it("collapses stacked prefixes on the TARGET itself, not just threadId", async () => {
+    // 🔴 The threadId path strips stacked
     // prefixes recursively, but the target path used to only strip one. A
     // stacked target like "group:octo:grp1" parsed to channelId="octo:grp1"
     // (wrong group), so threadId merge produced "octo:grp1____<short>". The

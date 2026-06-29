@@ -324,7 +324,7 @@ describe("registerOctoThreadBindingAdapter", () => {
   });
 
   // -------------------------------------------------------------------------
-  // Mixed-case account ID round-trip (regression for PR #32 review feedback).
+  // Mixed-case account ID round-trip (regression for issue #33).
   // -------------------------------------------------------------------------
   // OpenClaw's session-binding service normalizes adapter accountIds and
   // conversation refs to lowercase before invoking adapter methods. A previous

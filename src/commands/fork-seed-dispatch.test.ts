@@ -122,7 +122,7 @@ describe("dispatchForkSeedReply", () => {
     expect(ctx.AccountId).toBe("acctX");
   });
 
-  it("ISOLATION GUARD (fail-closed, P2-1): SessionKey === ParentSessionKey → throws, does NOT dispatch", async () => {
+  it("ISOLATION GUARD (fail-closed): SessionKey === ParentSessionKey → throws, does NOT dispatch", async () => {
     // Child route resolves to the SAME key as the seed's ParentSessionKey →
     // auto-fork would not trigger and the seed would run ON the parent session.
     // Upgraded from warn-and-continue to fail-closed: refuse to dispatch.
@@ -222,7 +222,7 @@ describe("dispatchForkSeedReply", () => {
     expect(arg.mentionEntities && arg.mentionEntities.length).toBeGreaterThan(0);
   });
 
-  it("TIMEOUT GUARD (Critical, #75): a hung dispatcher times out and rejects, never hangs forever", async () => {
+  it("TIMEOUT GUARD (issue #75): a hung dispatcher times out and rejects, never hangs forever", async () => {
     _setDispatchTimeoutForTests(50);
     mockDispatch.mockImplementation(() => new Promise<void>(() => {})); // never settles
     const warn = vi.fn();
@@ -261,7 +261,7 @@ describe("dispatchForkSeedReply", () => {
     expect(warn.mock.calls.some((c) => String(c[0]).includes("hung past"))).toBe(false);
   });
 
-  it("finally flush failure does NOT mask the original dispatch error (P2-5)", async () => {
+  it("finally flush failure does NOT mask the original dispatch error", async () => {
     driveDeliver([{ kind: "block", text: "partial" }], { throwAfter: true });
     // The single sendMessage call is the finally flush; make it throw too.
     mockSendMessage.mockImplementationOnce(async () => {
@@ -283,7 +283,7 @@ describe("dispatchForkSeedReply", () => {
     expect(error.mock.calls.some((c) => String(c[0]).includes("finally flush failed"))).toBe(true);
   });
 
-  it("DELIVERY FAILURE (P1): a final send error → throws (→ seedFailed → ok_seed_failed)", async () => {
+  it("DELIVERY FAILURE: a final send error → throws (→ seedFailed → ok_seed_failed)", async () => {
     // deliver() for a final block tries to send; the send throws. The SDK does
     // not reject the outer promise for this, so without tracking it the fork
     // would falsely report success. We track it and throw after settle.
@@ -294,7 +294,7 @@ describe("dispatchForkSeedReply", () => {
     await expect(run()).rejects.toThrow(/delivery failed/i);
   });
 
-  it("DELIVERY FAILURE (P1): onError(final) → throws even though the dispatcher resolved", async () => {
+  it("DELIVERY FAILURE: onError(final) → throws even though the dispatcher resolved", async () => {
     mockDispatch.mockImplementation(async (o: any) => {
       // dispatcher resolves normally; the failure surfaces only via onError.
       await o.dispatcherOptions.onError(new Error("upstream boom"), { kind: "final" });

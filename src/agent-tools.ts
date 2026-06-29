@@ -109,7 +109,7 @@ function isInsideRoot(root: string, candidate: string): boolean {
 /**
  * Confine a caller-supplied write target to an operator-approved jail root.
  *
- * 🔴 SECURITY (P0): `filePath` comes from the LLM tool call, which is reachable
+ * 🔴 SECURITY: `filePath` comes from the LLM tool call, which is reachable
  * via inbound group-chat messages — an untrusted, prompt-injectable surface.
  * Without confinement, `write-secret` is an arbitrary-file-write of the owner's
  * plaintext secret (e.g. "append my key to ~/.bashrc" / ".ssh/authorized_keys"

@@ -904,7 +904,7 @@ export async function getBotOboGrant(params: {
   // Accept grant when `has_grant: true` is explicit, OR when the field is
   // absent (undefined) and the response contains a `grantor_uid` — some
   // server versions omit `has_grant` entirely.  An explicit `has_grant: false`
-  // is authoritative denial and must fail closed (Jerry-Xin review R1).
+  // is authoritative denial and must fail closed.
   const hasGrant = raw.has_grant === true ||
     (raw.has_grant === undefined &&
       typeof raw.grantor_uid === "string" &&

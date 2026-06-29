@@ -34,7 +34,7 @@ import { executeFork, parseForkCommand, type ForkLogger, type ForkOrchestrator }
 import { buildForkOrchestrator, type ForkRuntimeDeps, type ForkSeedContext } from "./fork-runtime.js";
 
 /**
- * Bounded timeout for the parent-group receipt send (P2, yujiawei). The dispatch
+ * Bounded timeout for the parent-group receipt send. The dispatch
  * timeout only guards the seed dispatch; without this, a hung Octo API on the
  * receipt POST would still strand the parent enqueueInbound serial queue. Mirrors
  * the `AbortSignal.timeout(DISPATCH_TIMEOUT_APOLOGY_MS)` pattern in inbound.ts.
@@ -105,9 +105,9 @@ export async function dispatchForkSeedReply(params: {
     AccountId: childRoute.accountId ?? accountId,
   };
 
-  // Fork-isolation guard (PR #131 review — upgraded from warn-only to
-  // fail-closed). get-reply only forks the parent transcript when
-  // ParentSessionKey !== SessionKey. If they coincide, the seed would run ON the
+  // Fork-isolation guard (fail-closed). get-reply only forks the parent
+  // transcript when ParentSessionKey !== SessionKey. If they coincide, the seed
+  // would run ON the
   // parent session and pollute it — the exact outcome /fork promises to avoid.
   // So we refuse to dispatch instead of warn-and-continue. Only reachable on a
   // user-defined group-merged route (octo's default per-thread routing gives the
@@ -139,7 +139,7 @@ export async function dispatchForkSeedReply(params: {
     });
   };
 
-  // Timeout guard (PR #131 Critical, issue #75). dispatchReplyWithBufferedBlock-
+  // Timeout guard (issue #75). dispatchReplyWithBufferedBlock-
   // Dispatcher is observed to occasionally hang forever (no resolve/reject/
   // onError). This seed is awaited synchronously inside the parent group's
   // enqueueInbound serial queue, so a bare await would lock that queue until the
@@ -155,7 +155,7 @@ export async function dispatchForkSeedReply(params: {
 
   const buffer = { lastText: null as string | null };
   let delivered = false;
-  // P1 (Jerry-Xin): the SDK dispatcher routes deliver()/onError failures WITHOUT
+  // The SDK dispatcher routes deliver()/onError failures WITHOUT
   // rejecting the outer promise, so a failed user-facing send would otherwise
   // look like fork success and the user gets "已开 fork 子区" while the first
   // reply never landed. Track delivery failure and convert it to a thrown error
@@ -211,7 +211,7 @@ export async function dispatchForkSeedReply(params: {
     throw err; // → spawnChildBoundSession catch → seedFailed: true
   } finally {
     if (dispatchTimeoutHandle) clearTimeout(dispatchTimeoutHandle);
-    // P2-5: isolate the flush. If the dispatcher already threw, a flush failure
+    // Isolate the flush. If the dispatcher already threw, a flush failure
     // must NOT replace the original error (it carries the root-cause signal).
     // Log and swallow the flush error; never let it shadow the dispatch error.
     if (buffer.lastText && !delivered) {
@@ -227,7 +227,7 @@ export async function dispatchForkSeedReply(params: {
 
   // Settled without throwing, but a final/tool delivery may have failed silently
   // (the SDK does not reject the outer promise for deliver/onError failures).
-  // Surface it so spawnChildBoundSession reports seedFailed → ok_seed_failed (P1).
+  // Surface it so spawnChildBoundSession reports seedFailed → ok_seed_failed.
   if (deliverFailed) {
     throw new Error("octo: [fork-seed] delivery failed: user-facing reply did not send");
   }
@@ -328,7 +328,7 @@ export async function handleForkCommandIfMatched(params: {
         channelType: params.parentChannelType,
         content: text,
         // Bound the receipt POST so a hung Octo API cannot strand the parent
-        // enqueueInbound queue (P2). safeSendReceipt swallows the resulting
+        // enqueueInbound queue. safeSendReceipt swallows the resulting
         // timeout error, so the fork's main effect (thread + seed) still stands.
         signal: AbortSignal.timeout(RECEIPT_SEND_TIMEOUT_MS),
       });

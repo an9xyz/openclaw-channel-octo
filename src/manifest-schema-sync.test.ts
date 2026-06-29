@@ -36,7 +36,7 @@ describe("openclaw.plugin.json channelConfigs", () => {
 
   // Description drift guard: secretsFileRoot carries operator-facing semantics
   // (the write-secret jail default + fail-closed behavior). A stale manifest
-  // description here is what Jerry-Xin flagged on PR#92, so pin both copies to
+  // description here drifts from the schema, so pin both copies to
   // the single source of truth in OctoConfigJsonSchema.
   it("secretsFileRoot description matches between manifest and OctoConfigJsonSchema", () => {
     const tsDesc = (OctoConfigJsonSchema.schema.properties.secretsFileRoot as any)
