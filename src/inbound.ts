@@ -148,7 +148,7 @@ export const pendingInboundContext = new Map<string, { historyPrefix: string; me
 // octo-adapters#68) depends on this — without it, getPersonaPromptForSession
 // can never be called with the correct accountId from the hook.
 //
-// 🔴 Multi-account isolation (PR#69 R3, Jerry-Xin):
+// 🔴 Multi-account isolation:
 // The map is keyed by the COMPOSITE `${accountId}:${sessionKey}`, NOT by
 // `sessionKey` alone. Two distinct bot accounts (e.g. a persona clone and a
 // regular bot, or two persona clones) running on the same OpenClaw node can
@@ -1738,7 +1738,7 @@ export async function handleInboundMessage(params: {
   // /v1/bot/groups/:group_no/mention_pref (TTL 30s); any failure falls back to
   // the account-level config, so the gate never crashes.
   //
-  // The 免@ relaxation is HUMAN-ONLY and FAIL-CLOSED (PR#57 round-4 P1).
+  // The 免@ relaxation is HUMAN-ONLY and FAIL-CLOSED.
   // channel.ts forwards other bots' group messages into here on purpose,
   // relying on this mention gate to drop the non-@ ones. If we relaxed
   // requireMention for a non-human sender, two 免@ bots in the same group would
@@ -1971,7 +1971,7 @@ export async function handleInboundMessage(params: {
           // content with String(): getChannelMessages types it as string, but
           // RichText (type 14) and similar payloads can carry a non-string
           // m.content, and a bare .replace() on those throws and crashes the
-          // whole backfill (P2, yujiawei).
+          // whole backfill.
           .filter((m: any) => !isForkCommandHistoryMessage(
             String(m.content ?? ""),
             extractMentionUids(m.payload?.mention).includes(botUid),
@@ -2256,12 +2256,12 @@ export async function handleInboundMessage(params: {
     // dispatch path's pendingInboundContext.delete (below) and before the
     // before_prompt_build hook's get/delete (index.ts) — neither runs for a
     // fork. Drop the entry set above (pendingInboundContext.set) so a fork does
-    // not leak a Map entry / inject a stale historyPrefix later (P1, yujiawei).
+    // not leak a Map entry / inject a stale historyPrefix later.
     pendingInboundContext.delete(route.sessionKey);
     return;
   }
 
-  // OBO v2 detection + relevance filter (R10): Must run BEFORE
+  // OBO v2 detection + relevance filter: Must run BEFORE
   // finalizeInboundContext / recordInboundSession so that irrelevant
   // OBO v2 messages (e.g. AI-only fan-out) do not leak any state —
   // including `obo_system_hint` as GroupSystemPrompt — into the bot's
@@ -2297,7 +2297,7 @@ export async function handleInboundMessage(params: {
   // grantor UID mentions also remain relevant, because they target the grantor
   // identity directly.
   //
-  // CRITICAL (R10): this filter MUST run before finalizeInboundContext /
+  // CRITICAL: this filter MUST run before finalizeInboundContext /
   // recordInboundSession — otherwise an irrelevant OBO v2 message would
   // already have been persisted to the bot's DM session with the grantor,
   // including any `obo_system_hint` as GroupSystemPrompt.
@@ -2459,7 +2459,7 @@ export async function handleInboundMessage(params: {
   //
   // Detection (`isOBOv2`) and the relevance filter that gates an early-return
   // have already run BEFORE finalizeInboundContext / recordInboundSession
-  // (see R10 fix above) so that irrelevant OBO v2 fan-out messages do not
+  // (see the filter above) so that irrelevant OBO v2 fan-out messages do not
   // leak `obo_system_hint` (as GroupSystemPrompt) into the bot's DM session.
   // The reply-routing variables below (`replyChannelId`, `replyChannelType`,
   // `effectiveOnBehalfOf`) are derived here using the previously-computed
@@ -2781,7 +2781,7 @@ export async function handleInboundMessage(params: {
               // Same bounded signal as the timeout-path apology: if upstream
               // signals an error AND the Octo API is also sick, this recovery
               // sendMessage would otherwise hold the per-group queue until
-              // the outer dispatch timeout kicks in. PR #83 review.
+              // the outer dispatch timeout kicks in.
               signal: AbortSignal.timeout(DISPATCH_TIMEOUT_APOLOGY_MS),
             });
           } catch (sendErr) {

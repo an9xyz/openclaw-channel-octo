@@ -406,8 +406,8 @@ describe("generation guard (abort in-flight fetches)", () => {
   });
 });
 
-describe("cache lifecycle on reconfigure (PR#69 R4 Jerry-Xin)", () => {
-  // Blocking 1: persona → regular bot must not leave a stale hint behind.
+describe("cache lifecycle on reconfigure", () => {
+  // persona → regular bot must not leave a stale hint behind.
   it("clears the cached hint when the account is reconfigured to drop onBehalfOf", async () => {
     // 1. Seed the cache as a persona-clone.
     mockFetchOnce({
@@ -447,7 +447,7 @@ describe("cache lifecycle on reconfigure (PR#69 R4 Jerry-Xin)", () => {
     expect(getRegisteredPersonaAccountIds()).not.toContain("bot_switch");
   });
 
-  // Blocking 2: re-init with a different grantor must not serve the old
+  // Re-init with a different grantor must not serve the old
   // grantor's hint during the new fetch's in-flight window.
   it("returns undefined during the refetch window when re-init switches grantor", async () => {
     // Seed cache with grantor A's hint.
@@ -544,7 +544,7 @@ describe("getRegisteredPersonaAccountIds", () => {
   });
 });
 
-describe("resolvePersonaHintForSession — multi-account isolation (PR#69 R3)", () => {
+describe("resolvePersonaHintForSession — multi-account isolation", () => {
   async function seedPersonaCache(accountId: string, personaPrompt: string) {
     mockFetchOnce({
       has_grant: true,
@@ -614,7 +614,7 @@ describe("resolvePersonaHintForSession — multi-account isolation (PR#69 R3)", 
   });
 
   it("returns undefined when two persona accounts share the same sessionKey (no cross-account leak)", async () => {
-    // 🔴 Core regression guard for PR#69 R3 (Jerry-Xin blocker):
+    // 🔴 Core regression guard for cross-account isolation:
     // when two persona-clone accounts collide on a sessionKey we MUST
     // refuse to inject either persona prompt rather than guessing,
     // because the hook cannot tell which account the prompt build is for.

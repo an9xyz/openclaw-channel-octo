@@ -99,8 +99,8 @@ function stripGroupPrefix(raw: string): string {
  * agent-tool / multi-bot routing layer occasionally produces stacked forms
  * such as `"group:octo:grp1"` or `"channel:octo:grp1"`. Without canonical
  * collapse, the downstream parseTarget would only strip one leading prefix and
- * mis-parse the stacked inner segment as part of the group id (PR #103
- * Jerry-Xin: `"group:octo:grp1"` → channelId `"octo:grp1"` → message routed to
+ * mis-parse the stacked inner segment as part of the group id
+ * (`"group:octo:grp1"` → channelId `"octo:grp1"` → message routed to
  * the wrong group). The recursive collapse below makes the guard at handleSend
  * (which uses stripAllChannelPrefixes) and this delivery path agree on the
  * canonical bare groupId.
@@ -534,8 +534,7 @@ async function handleSend(params: {
   // different group than the current session. Normalization on BOTH sides
   // (currentChannelId via bareCurrentChannelId; target via bareTarget) so
   // prefixed forms ("octo:grp1", "group:grp1____x", "group:grp1@uid1,uid2")
-  // do not mis-compare and silently drop a legitimate threadId. Fixes a
-  // latent bug exposed by issue #98 review (codex round 3 MAJOR #1).
+  // do not mis-compare and silently drop a legitimate threadId.
   let effectiveThreadId: typeof threadId = threadId;
   if (effectiveThreadId != null && bareCurrentChannelId) {
     const currentParent = extractParentGroupNo(bareCurrentChannelId);
@@ -566,7 +565,7 @@ async function handleSend(params: {
   // no parent group, so the "strip suffix + rewrite group:" logic must NOT run
   // on it — otherwise "user:uid" would become "group:user:uid", resolve to a
   // Group, and the message would be sent to a bogus group instead of the DM,
-  // destroying the `user:` prefix semantics (issue #98 review round 4). scope is
+  // destroying the `user:` prefix semantics. scope is
   // meaningless on a DM, so leave the target untouched and let it pass through
   // as a normal DM. Reuse the same parse path as resolveOutboundOctoTarget
   // (normalizeOutboundChannelPrefix + parseTarget + getKnownGroupIds) so the
@@ -591,7 +590,7 @@ async function handleSend(params: {
 
   const { channelId, channelType } = resolveOutboundOctoTarget(targetForResolve, effectiveThreadId);
 
-  // P0 #98: auto-reroute bare-parent target back to current thread when the
+  // Auto-reroute bare-parent target back to current thread when the
   // agent is operating inside a thread session AND the resolved target is the
   // SAME group's parent. Overwhelmingly an LLM mistake ("send to the group"
   // when the user means "send here"); silent misrouting causes visibility/
@@ -671,7 +670,7 @@ async function handleSend(params: {
     resolutionReason = "passthrough";
   }
 
-  // P0-1: ensure member maps are populated before @ conversion. The message-tool
+  // Ensure member maps are populated before @ conversion. The message-tool
   // send path (agent-initiated @, new sub-topic) has no inbound refresh, so the
   // passed-in maps can be empty/stale. Only when the message contains an `@`,
   // pull the target group's members from the shared 5-min-TTL cache (cache hit =
@@ -739,7 +738,7 @@ async function handleSend(params: {
         mentionUids = mentionEntities.map(e => e.uid);
       }
 
-      // P0-3: last-line guard — rewrite/downgrade/strip malformed @ that the
+      // Last-line guard — rewrite/downgrade/strip malformed @ that the
       // conversion+fallback couldn't resolve, and drop illegal uids so a bad
       // mention is never leaked to the server.
       if (uidToNameMap) {

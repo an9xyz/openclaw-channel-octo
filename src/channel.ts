@@ -243,7 +243,7 @@ function getOrCreateGroupCacheTimestamps(accountId: string): Map<string, number>
 }
 
 /**
- * Outbound @mention prefetch (P0-1).
+ * Outbound @mention prefetch.
  *
  * Proactive sends (cron, new sub-topic, agent-initiated @) never go through the
  * inbound member-cache refresh, so the per-account memberMap/uidToNameMap can be
@@ -917,7 +917,7 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
         const accountMemberMap = getOrCreateMemberMap(accountId);
         const uidToNameMap = getOrCreateUidToNameMap(accountId);
 
-        // P0-1: ensure member maps are populated for proactive sends (cron / new
+        // Ensure member maps are populated for proactive sends (cron / new
         // sub-topic / agent-initiated @) where the inbound refresh never ran.
         await prefetchOutboundMembers({
           content: finalContent,
@@ -955,7 +955,7 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
           }
         }
 
-        // P0-3: last-line guard — rewrite/downgrade/strip any malformed @ the
+        // Last-line guard — rewrite/downgrade/strip any malformed @ the
         // conversion+fallback couldn't resolve, and drop illegal uids so a bad
         // mention is never leaked to the server.
         const sanitized = sanitizeOutboundMentions({
@@ -1216,7 +1216,7 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
         }
       } catch { /* config snapshot inaccessible — non-fatal */ }
 
-      // F3 (PR #131 review, Octo-Q): `commands.fork.scope` accepts four values in
+      // `commands.fork.scope` accepts four values in
       // the schema, but v1's fork hook only honors the default "owner-mentioned"
       // (wiring inbound to a configured value is a v1.1 TODO). Warn once per
       // account at startup if an operator set a non-default value, so it is not

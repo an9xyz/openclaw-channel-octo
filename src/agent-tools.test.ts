@@ -1387,7 +1387,7 @@ describe("createOctoManagementTools", () => {
     });
 
     // -------------------------------------------------------------------
-    // 🔴 PATH CONFINEMENT (P0): the file destination must stay in the jail.
+    // 🔴 PATH CONFINEMENT: the file destination must stay in the jail.
     // -------------------------------------------------------------------
     it("rejects parent-directory traversal, no resolve, no write", async () => {
       const result = await writeSecret({ alias: "k", filePath: "../escape.txt" });
@@ -1437,7 +1437,7 @@ describe("createOctoManagementTools", () => {
       }
     });
 
-    // 🔴 P0 REGRESSION — dangling-symlink jail escape. The earlier guard only
+    // 🔴 REGRESSION — dangling-symlink jail escape. The earlier guard only
     // rejected symlinks whose target ALREADY existed; a symlink pointing OUT of
     // the jail at a target that does NOT yet exist (dangling) slipped through,
     // and writeFile() then created the plaintext secret at the out-of-jail
@@ -1504,7 +1504,7 @@ describe("createOctoManagementTools", () => {
       await expect(readFile(inJailButMissing, "utf8")).rejects.toThrow();
     });
 
-    // 🔴 P1 REGRESSION — intermediate-dir symlink TOCTOU. confineSecretPath()
+    // 🔴 REGRESSION — intermediate-dir symlink TOCTOU. confineSecretPath()
     // walks the path BEFORE the parent dirs exist, so it cannot catch a symlink
     // swapped onto a parent AFTER mkdir creates it. O_NOFOLLOW only guards the
     // leaf basename, not intermediate components — the kernel still follows a
@@ -1573,7 +1573,7 @@ describe("createOctoManagementTools", () => {
       expect(await readFile(join(root, "atroot.txt"), "utf8")).toBe(PLAINTEXT);
     });
 
-    // 🔴 FAIL-CLOSED (P0): no secretsFileRoot configured → refuse every write.
+    // 🔴 FAIL-CLOSED: no secretsFileRoot configured → refuse every write.
     // There is deliberately NO process.cwd() fallback (that fallback was the
     // root cause of the `/`-degenerate self-lock + fail-open bugs).
     it("fails closed when secretsFileRoot is unset — no resolve, no write", async () => {
@@ -1797,7 +1797,7 @@ describe("createOctoManagementTools", () => {
         expect(await readFile(join(root, "via-defaults.env"), "utf8")).toBe(PLAINTEXT);
       });
 
-      // 🔴 P0 (Jerry-Xin + yujiawei) — NON-DEFAULT agent jail = per-agent
+      // 🔴 NON-DEFAULT agent jail = per-agent
       // SUBDIRECTORY of defaults.workspace, NEVER the bare shared parent. Here
       // bot-A is not the default agent (someone-else is), so the platform's
       // canonical resolveAgentWorkspaceDir derives <defaults.workspace>/<agentId>.
@@ -1823,7 +1823,7 @@ describe("createOctoManagementTools", () => {
         ).rejects.toThrow();
       });
 
-      // 🔴 P0 (Jerry-Xin + yujiawei) — a non-default agent must NOT be able to
+      // 🔴 A non-default agent must NOT be able to
       // climb out of its per-agent subdir into a SIBLING agent's directory and
       // write the owner's plaintext there. This is the concrete cross-agent
       // secret-write escape the bare-defaults jail allowed: a `worker` writing
@@ -1929,7 +1929,7 @@ describe("createOctoManagementTools", () => {
         expect(resolveSecret).not.toHaveBeenCalled();
       });
 
-      // 🔴 BLOCKING REGRESSION (Jerry-Xin) — symlink-to-`/` fail-open.
+      // 🔴 REGRESSION — symlink-to-`/` fail-open.
       // The old guard checked the LEXICAL form (`resolvePath(workspace) === sep`),
       // so a workspace configured as a symlink whose REAL target is "/" slipped
       // past it (the lexical path is the link, ≠ "/") and only degenerated into a
@@ -1956,7 +1956,7 @@ describe("createOctoManagementTools", () => {
         expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
       });
 
-      // 🔴 BLOCKING (Jerry-Xin) — Windows drive root must fail closed too. The old
+      // 🔴 Windows drive root must fail closed too. The old
       // `=== sep` compare never matched "C:\\" (resolvePath("C:\\") !== "/"), so a
       // drive-root workspace would have degenerated into a root-wide jail. The
       // path.parse(p).root === p check covers POSIX and Windows roots alike.
@@ -1975,7 +1975,7 @@ describe("createOctoManagementTools", () => {
         expect(resolveSecret).not.toHaveBeenCalled();
       });
 
-      // 必修2 — match key namespace. The workspace is indexed by OpenClaw AGENT
+      // match key namespace. The workspace is indexed by OpenClaw AGENT
       // id, not the channel/Octo account id. When the two differ (e.g. agent
       // `main` ↔ octo account `default`), keying on the account id silently misses
       // the per-agent workspace and falls back to defaults. Assert that passing a
@@ -2003,7 +2003,7 @@ describe("createOctoManagementTools", () => {
         expect(JSON.stringify(result)).not.toContain(PLAINTEXT);
       });
 
-      // 必修2 — agentId takes precedence over agentAccountId when both match
+      // agentId takes precedence over agentAccountId when both match
       // different entries. The correct (per-agent-id) workspace must win.
       it("prefers agentId over agentAccountId when both match different entries", async () => {
         setupMocks();
@@ -2034,7 +2034,7 @@ describe("createOctoManagementTools", () => {
         }
       });
 
-      // 必修2 — agent id matching is namespace-normalized (lower/slug), matching
+      // agent id matching is namespace-normalized (lower/slug), matching
       // the platform's normalizeAgentId. A config entry id with different casing
       // must still match the runtime agent id.
       it("matches the agent workspace case-insensitively (normalizeAgentId)", async () => {
@@ -2051,7 +2051,7 @@ describe("createOctoManagementTools", () => {
         expect(await readFile(join(root, "case.env"), "utf8")).toBe(PLAINTEXT);
       });
 
-      // 必修3 — `~` expansion. A workspace configured as "~/<subdir>" must expand
+      // `~` expansion. A workspace configured as "~/<subdir>" must expand
       // to $HOME, matching the platform's canonical resolveAgentWorkspaceDir,
       // rather than being treated as a literal "./~" segment.
       it("expands a leading ~ in the workspace to the home directory", async () => {
@@ -2076,7 +2076,7 @@ describe("createOctoManagementTools", () => {
         }
       });
 
-      // 必修3 — $VAR / ${VAR} expansion. A workspace parameterized by an env var
+      // $VAR / ${VAR} expansion. A workspace parameterized by an env var
       // must expand before the path is used as the jail root.
       it("expands $VAR / ${VAR} in the workspace path", async () => {
         setupMocks();
@@ -2098,7 +2098,7 @@ describe("createOctoManagementTools", () => {
         }
       });
 
-      // 🔴 必修2 / P1-A (lml2468) — symlink-ANCESTOR first-write must NOT be
+      // 🔴 Symlink-ANCESTOR first-write must NOT be
       // false-rejected. When the jail root sits under a symlinked ancestor AND
       // the workspace dir does not exist yet (the common first-write case), the
       // old code stored the root in its LEXICAL form but compared it post-mkdir
@@ -2108,7 +2108,7 @@ describe("createOctoManagementTools", () => {
       // the jail root (confineSecretPath) through their nearest existing ancestor,
       // so every comparison is symlink-free.
       //
-      // lml2468 asked for coverage of three real-world ancestor-symlink shapes,
+      // Cover three real-world ancestor-symlink shapes,
       // not just one. Each case builds a genuine symlinked-ancestor root whose
       // workspace leaf does not exist yet, then asserts the FIRST write succeeds
       // and the file materializes at the REAL (symlink-resolved) target.
@@ -2199,7 +2199,7 @@ describe("createOctoManagementTools", () => {
         });
       }
 
-      // 🔴 P1-B (Yu CR) — an UNDEFINED env var in the workspace path must FAIL
+      // 🔴 An UNDEFINED env var in the workspace path must FAIL
       // CLOSED, not anchor the jail to process.cwd(). A literal, unexpanded
       // `${UNDEF}` fed to path.resolve() silently roots the relative remainder at
       // the current working directory, which would sail past both filesystem-root
@@ -2317,7 +2317,7 @@ describe("createOctoManagementTools", () => {
       expect(data.candidates).toBeUndefined();
     });
 
-    // 🔴 BLOCKER: a single RETURNED candidate that is NOT the whole match set
+    // 🔴 A single RETURNED candidate that is NOT the whole match set
     // (total>1 and/or truncated) must NOT auto-resolve — otherwise a limit:1
     // request over 5 matches would silently treat a partial result as a
     // confident pick. It must fall through to the candidates branch so the agent

@@ -753,7 +753,7 @@ describe("inbound text fallback regex", () => {
   });
 });
 
-// ── Outbound mention sanitizer (P0-3) + shared format hint (P1) ──────────────
+// ── Outbound mention sanitizer + shared format hint ──────────────
 
 const HEX_A = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"; // Alice
 const HEX_B = "0f1e2d3c4b5a69788796a5b4c3d2e1f0"; // Bob
@@ -869,7 +869,7 @@ describe("sanitizeOutboundMentions", () => {
     expect(r.uids).not.toContain("somebody_bot");
   });
 
-  it("@username with usernameMap hit → reverse-looked-up entity (P2)", () => {
+  it("@username with usernameMap hit → reverse-looked-up entity", () => {
     const uidToNameMap = new Map([[HEX_A, "Alice"]]);
     const usernameMap = new Map([["somebody_bot", HEX_A]]);
     const r = sanitizeOutboundMentions({
@@ -1092,7 +1092,7 @@ describe("sanitizeOutboundMentions", () => {
     expect(r.uids).toEqual([spaceUid]);
   });
 
-  // ── Blocking #1: bareHex left-boundary anchor — @<32hex> embedded inside an
+  // ── bareHex left-boundary anchor — @<32hex> embedded inside an
   // email local part / SSH URL / mailto must NOT be matched (the @ used to be
   // swallowed, corrupting the surrounding text). ──────────────────────────────
   describe("bareHex left boundary: email / SSH / mailto preserved", () => {
@@ -1153,7 +1153,7 @@ describe("sanitizeOutboundMentions", () => {
     });
   });
 
-  // ── Blocking #2: cold-start (empty map) structured mention must survive ──────
+  // ── Cold-start (empty map) structured mention must survive ──────
   it("cold start (empty uidToNameMap): structured @[uid:name] uid survives the final guard", () => {
     // prefetch failed → uidToNameMap empty. Agent wrote a correct @[uid:Alice].
     // The structured-source uid is trusted and must NOT be dropped by the guard,
@@ -1192,7 +1192,7 @@ describe("sanitizeOutboundMentions", () => {
   });
 });
 
-describe("MENTION_FORMAT_HINT (P1) + >10 prefix regression guard (test #13)", () => {
+describe("MENTION_FORMAT_HINT + >10 prefix regression guard", () => {
   it("never itself parses into an illegal {uid:'uid'} mention", () => {
     const parsed = parseStructuredMentions(MENTION_FORMAT_HINT);
     expect(parsed.every((m) => m.uid !== "uid")).toBe(true);

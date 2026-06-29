@@ -625,7 +625,7 @@ describe("broadcastGroupMdUpdate", () => {
 });
 
 // =========================================================================
-// P0: getGroupMdForPrompt with thread channelIds
+// getGroupMdForPrompt with thread channelIds
 // =========================================================================
 
 describe("getGroupMdForPrompt (thread support)", () => {

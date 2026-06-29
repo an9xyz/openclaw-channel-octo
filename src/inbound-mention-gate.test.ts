@@ -7,11 +7,11 @@ import { _clearMentionPrefCache, _setMentionPrefEntry, _hasMentionPrefEntry } fr
 import type { ResolvedOctoAccount } from "./accounts.js";
 
 /**
- * Integration test for the inbound mention-gate 免@ relaxation (PR#57 review P1).
+ * Integration test for the inbound mention-gate 免@ relaxation.
  *
  * The 免@ (no_mention=true) group preference relaxes requireMention so the bot
  * replies to non-@ messages. The fix scopes that relaxation to HUMAN senders,
- * and does so FAIL-CLOSED (round-4): the gate relaxes requireMention ONLY for a
+ * and does so FAIL-CLOSED: the gate relaxes requireMention ONLY for a
  * sender the server-authoritative member list positively confirms is human
  * (memberRobotMap.get(uid) === false). Unknown senders, ANY robot, and the case
  * where the member refresh fails/returns empty (so the robot flag is undefined)
@@ -173,7 +173,7 @@ function installFetchStubMembersDown(mode: "error" | "empty" = "error") {
   return { sends };
 }
 
-describe("inbound mention-gate 免@ relaxation (P1: human-only)", () => {
+describe("inbound mention-gate 免@ relaxation (human-only)", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     _clearKnownBots();
@@ -305,7 +305,7 @@ describe("inbound mention-gate 免@ relaxation (P1: human-only)", () => {
   });
 
   it("suppresses the group-pref lookup for an explicit @bot message (no needless latency)", async () => {
-    // round-3 non-blocking #1: an explicit @bot message already passes the gate,
+    // An explicit @bot message already passes the gate,
     // so the 免@ pref can't change the outcome. The lookup must be short-
     // circuited (computed AFTER mention flags, only when !isMentioned) so a
     // cold/slow pref backend never adds latency to normal @bot replies.
@@ -336,7 +336,7 @@ describe("inbound mention-gate 免@ relaxation (P1: human-only)", () => {
   });
 
   it("does NOT reply to a CROSS-PROCESS bot (robot:true in member list, NOT registerKnownBot'd)", async () => {
-    // Regression for PR#57 round-2 P1: the loop guard must use the
+    // Regression: the loop guard must use the
     // server-authoritative GroupMember.robot signal, not just the local
     // registerKnownBot() set. EXTERNAL_BOT_UID is robot:true in the group
     // member list but was never registered, so isKnownBot() returns false for
@@ -366,7 +366,7 @@ describe("inbound mention-gate 免@ relaxation (P1: human-only)", () => {
   });
 
   it("does NOT reply to a CROSS-PROCESS bot whose robot flag is NUMERIC (robot:1)", async () => {
-    // Regression for PR#57 round-3 P1: the backend serializes GroupMember.robot
+    // Regression: the backend serializes GroupMember.robot
     // as a number, so a strict `=== true` would treat robot:1 as human → relax
     // requireMention → reply to the non-@ bot message → bot-to-bot loop. The
     // gate must coerce robot:1 to a bot exactly like robot:true.
@@ -418,7 +418,7 @@ describe("inbound mention-gate 免@ relaxation (P1: human-only)", () => {
   });
 
   it("does NOT reply to a HUMAN non-@ message when member refresh FAILS (fail-closed)", async () => {
-    // round-4 P1: the loop guard inverts to a whitelist. A sender is relaxed
+    // The loop guard inverts to a whitelist. A sender is relaxed
     // ONLY when the member list positively confirms them human. When the
     // members endpoint errors out, refreshGroupMemberCache leaves memberRobotMap
     // unpopulated → robot flag is undefined → classification unknown → keep

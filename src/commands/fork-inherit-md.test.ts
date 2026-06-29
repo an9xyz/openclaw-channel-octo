@@ -135,7 +135,7 @@ describe("inheritParentMdToChildThread", () => {
     expect(updateThreadMd).not.toHaveBeenCalled();
   });
 
-  it("13. ok write → mirrors content into local disk cache via broadcastThreadMdUpdate (P2)", async () => {
+  it("13. ok write → mirrors content into local disk cache via broadcastThreadMdUpdate", async () => {
     getGroupMd.mockResolvedValue(mdResp("group rules"));
     updateThreadMd.mockResolvedValue({ version: 7 });
     const status = await inheritParentMdToChildThread(groupParent);

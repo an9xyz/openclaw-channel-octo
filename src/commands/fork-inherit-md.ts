@@ -98,7 +98,7 @@ export async function inheritParentMdToChildThread(params: {
   // 4) Write the child thread's THREAD.md.
   try {
     const { version } = await updateThreadMd({ apiUrl, botToken, groupNo: childGroupNo, shortId: childShortId, content });
-    // Mirror the write into the local disk cache (P2, Jerry-Xin). updateThreadMd
+    // Mirror the write into the local disk cache. updateThreadMd
     // only writes the octo server, but before_prompt_build's getGroupMdForPrompt
     // reads the local cache — without this, the inherited md would be invisible
     // to the child's first dispatch. The server write is the SSOT, so a local
