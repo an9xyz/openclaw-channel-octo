@@ -29,6 +29,7 @@ import {
   type ResolveFileResult,
 } from "./inbound.js";
 import { extractMentionUids, parseStructuredMentions } from "./mention-utils.js";
+import { isForkCommandHistoryMessage } from "./commands/fork-history-filter.js";
 import type { GroupMember } from "./api-fetch.js";
 import { normalizeMediaAttachments } from "openclaw/plugin-sdk/media-runtime";
 import { existsSync, unlinkSync, readFileSync } from "node:fs";
@@ -1910,6 +1911,19 @@ describe("pendingInboundContext", () => {
     expect(entry?.memberListPrefix).toBe("members...");
   });
 
+  // P1 (yujiawei): every group inbound sets pendingInboundContext before the
+  // command split; the fork hook early-returns BEFORE the normal dispatch
+  // delete and before the before_prompt_build get/delete, so the fork branch
+  // must delete the entry itself or it leaks. This documents that invariant by
+  // mirroring the set→fork-delete sequence. (The real call site is asserted via
+  // the dist build; inbound.test.ts has no full handleInboundMessage harness.)
+  it("fork early-return must delete the entry it set (no leak)", () => {
+    const key = "octo:acct1:group123";
+    pendingInboundContext.set(key, { historyPrefix: "h", memberListPrefix: "m" });
+    pendingInboundContext.delete(key); // the explicit delete added before `return`
+    expect(pendingInboundContext.has(key)).toBe(false);
+  });
+
   it("should allow delete after read (consume-once pattern)", () => {
     const key = "octo:group:consume";
     pendingInboundContext.set(key, {
@@ -3624,5 +3638,67 @@ describe("recordSessionAccount normalizes both key AND value", () => {
     expect(sessionAccountMap.size).toBe(2);
     expect(sessionAccountMap.get("mixed_bot:sess1")).toBe("mixed_bot");
     expect(sessionAccountMap.get("mixed_bot:sess2")).toBe("mixed_bot");
+  });
+});
+
+describe("/fork command history leak filter (regression)", () => {
+  const botUid = "bot_uid_123";
+
+  // Simulate the filteredApiMsgs filter pipeline from handleInboundMessage:
+  // the existing (drop-bot/empty) filter plus the new fork-command filter.
+  // String(m.content ?? "") mirrors the production coerce (P2, yujiawei).
+  const filterApiMsgs = (apiMessages: any[]) =>
+    apiMessages
+      .filter((m: any) => m.from_uid !== botUid && (m.content || m.type !== 1))
+      .filter((m: any) => !isForkCommandHistoryMessage(
+        String(m.content ?? ""),
+        extractMentionUids(m.payload?.mention).includes(botUid),
+      ));
+
+  const mentionBot = (): MentionPayload => ({
+    entities: [{ uid: botUid, offset: 0, length: 4 }],
+  });
+
+  it("drops a prior @bot /fork command from backfilled history", () => {
+    const apiMessages = [
+      { from_uid: "u1", content: "@Max 帮我看下这个", type: 1 },
+      { from_uid: "u1", content: "@Max /fork 今天天气如何", type: 1, payload: { mention: mentionBot() } },
+      { from_uid: "u1", content: "好的谢谢", type: 1 },
+    ];
+    const bodies = filterApiMsgs(apiMessages).map((m) => m.content);
+    expect(bodies).toEqual(["@Max 帮我看下这个", "好的谢谢"]);
+  });
+
+  it("drops a bare @bot /fork (empty prompt) from history", () => {
+    const apiMessages = [
+      { from_uid: "u1", content: "@Max /fork", type: 1, payload: { mention: mentionBot() } },
+      { from_uid: "u1", content: "正常消息", type: 1 },
+    ];
+    const bodies = filterApiMsgs(apiMessages).map((m) => m.content);
+    expect(bodies).toEqual(["正常消息"]);
+  });
+
+  it("keeps ordinary messages and non-command text mentioning /fork mid-sentence", () => {
+    const apiMessages = [
+      { from_uid: "u1", content: "@Max 我想用 /fork 功能", type: 1, payload: { mention: mentionBot() } },
+      { from_uid: "u1", content: "/forked repo 怎么同步", type: 1 },
+    ];
+    const bodies = filterApiMsgs(apiMessages).map((m) => m.content);
+    expect(bodies).toEqual(["@Max 我想用 /fork 功能", "/forked repo 怎么同步"]);
+  });
+
+  it("does NOT throw on non-string content (RichText etc.) and keeps it (P2, yujiawei)", () => {
+    // getChannelMessages types content as string, but RichText (type 14) and
+    // similar payloads carry a non-string m.content. A bare .replace() on those
+    // crashes the whole backfill; String(...) coerce keeps it safe. A coerced
+    // object stringifies to "[object Object]" which is never a /fork command.
+    const apiMessages = [
+      { from_uid: "u1", content: { richText: [{ text: "hi" }] }, type: 14 },
+      { from_uid: "u1", content: ["arr", "ay"], type: 1 },
+      { from_uid: "u1", content: "正常消息", type: 1 },
+    ];
+    expect(() => filterApiMsgs(apiMessages)).not.toThrow();
+    // None of them are fork commands, so all survive the fork filter.
+    expect(filterApiMsgs(apiMessages)).toHaveLength(3);
   });
 });

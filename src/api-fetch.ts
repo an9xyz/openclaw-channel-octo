@@ -43,6 +43,30 @@ function parseOctoJson<T>(text: string): T {
   return JSON.parse(safeText) as T;
 }
 
+/**
+ * Regex matching the `failed (<status>)` fragment in this module's thrown error
+ * messages. Single source of truth for the throw format so external parsers do
+ * not hardcode their own copy. See {@link httpStatusFromApiFetchError}.
+ */
+export const API_FETCH_STATUS_RE = /failed \((\d{3})\)/;
+
+/**
+ * Extract the HTTP status from an api-fetch error. The fetch helpers here throw
+ * `Error("<who> failed (<status>): <text>")` on non-2xx, so the status is only
+ * recoverable from the message. Centralizing the parse here means a caller (e.g.
+ * fork-inherit-md) does not couple to the throw format, and a future format
+ * change only needs updating in this module.
+ *
+ * @returns The 3-digit status, or undefined for errors without an embedded
+ *   `(NNN)` (e.g. a network timeout, or a non-Error throw) — callers treat that
+ *   as a generic failure.
+ */
+export function httpStatusFromApiFetchError(err: unknown): number | undefined {
+  const message = err instanceof Error ? err.message : String(err);
+  const match = message.match(API_FETCH_STATUS_RE);
+  return match ? Number(match[1]) : undefined;
+}
+
 export async function postJson<T>(
   apiUrl: string,
   botToken: string,
