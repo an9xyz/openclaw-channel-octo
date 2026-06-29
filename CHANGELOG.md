@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.19](https://github.com/Mininglamp-OSS/openclaw-channel-octo/compare/v1.0.18...v1.0.19) (2026-06-29)
+
+
+### Added
+
+* **fork:** /fork command — create child thread with parent context ([#131](https://github.com/Mininglamp-OSS/openclaw-channel-octo/issues/131)) ([bf90e2e](https://github.com/Mininglamp-OSS/openclaw-channel-octo/commit/bf90e2e25e3ed0737687f8c4fbd377c77ec94f4b))
+* **prompt:** explain octo_management unavailability under restrictive tools profiles ([#137](https://github.com/Mininglamp-OSS/openclaw-channel-octo/issues/137)) ([#142](https://github.com/Mininglamp-OSS/openclaw-channel-octo/issues/142)) ([48ff969](https://github.com/Mininglamp-OSS/openclaw-channel-octo/commit/48ff9697fa353f4e5f041d08faeccf97ca29c877))
+
+
+### Fixed
+
+* cleanupStaleCaches misses parent-keyed cache entries for thread channels ([#128](https://github.com/Mininglamp-OSS/openclaw-channel-octo/issues/128)) ([#135](https://github.com/Mininglamp-OSS/openclaw-channel-octo/issues/135)) ([55b1a6a](https://github.com/Mininglamp-OSS/openclaw-channel-octo/commit/55b1a6a83030145762c795a1d41f7a4a22b050ca))
+* **outbound:** reject empty target before send instead of posting empty channel_id ([#138](https://github.com/Mininglamp-OSS/openclaw-channel-octo/issues/138)) ([#141](https://github.com/Mininglamp-OSS/openclaw-channel-octo/issues/141)) ([bbf4620](https://github.com/Mininglamp-OSS/openclaw-channel-octo/commit/bbf46206920a908bc8208c4244970abdab8eb20b))
+
+
+### Internal
+
+* release as 1.0.19 ([7b4ada9](https://github.com/Mininglamp-OSS/openclaw-channel-octo/commit/7b4ada9e86bb10c307b144333eea497134ea7d57))
+
 ## [1.0.18](https://github.com/Mininglamp-OSS/openclaw-channel-octo/compare/v1.0.17...v1.0.18) (2026-06-27)
 
 ### Fixed
