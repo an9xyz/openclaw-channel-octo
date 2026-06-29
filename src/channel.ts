@@ -4,6 +4,7 @@ import type {
   ChannelMessageActionAdapter,
 } from "openclaw/plugin-sdk";
 import type { ChannelOutboundContext } from "openclaw/plugin-sdk/channel-contract";
+import { createChannelMessageAdapterFromOutbound } from "openclaw/plugin-sdk/channel-message";
 import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
 import { OctoConfigJsonSchema, type OctoConfig } from "./config-schema.js";
 import { CHANNEL_ID, MAX_UPLOAD_SIZE, stripAllChannelPrefixes, getChannelConfig } from "./constants.js";
@@ -506,7 +507,11 @@ function getAvailableActions(cfg: any): string[] {
   } catch {
     return [];
   }
-  return ["send", "read", "search"];
+  // "react" is exposed (add/remove a single reaction); "reactions" (list) is
+  // intentionally NOT exposed yet — it needs a server-side bot query endpoint
+  // that isn't shipping this round, so advertising it would surface an
+  // unimplemented action on the shared message tool (#111 B3).
+  return ["send", "read", "search", "react"];
 }
 
 const meta = {
@@ -691,7 +696,7 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
   capabilities: {
     chatTypes: ["direct", "group"],
     media: true,
-    reactions: false,
+    reactions: true,
     threads: true,
   },
   reload: { configPrefixes: [`channels.${CHANNEL_ID}`] },
@@ -833,6 +838,13 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
         groupMdCache,
         currentChannelId: ctx.toolContext?.currentChannelId ?? undefined,
         threadId: ctx.toolContext?.threadId ?? ctx.params?.threadId ?? undefined,
+        // Forward the inbound turn's message id so `react` can target the
+        // current message without the agent having to source an id that isn't
+        // surfaced anywhere LLM-visible (history/read both omit it). Runtime
+        // populates currentMessageId from the inbound MessageSid.
+        currentMessageId: ctx.toolContext?.currentMessageId != null
+          ? String(ctx.toolContext.currentMessageId)
+          : undefined,
         requesterSenderId: ctx.requesterSenderId ?? undefined,
         accountId,
         log: ctx.log,
@@ -850,7 +862,12 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
         `For searching: use action="search" with query="shared-groups" to find groups that the bot and the current user both belong to.`,
         `For @mentions in a group: FIRST look up the target member's real uid + display name with octo_management action="group-members" (target="group:<groupId>"). ${MENTION_FORMAT_HINT}`,
         `When the user names a target by NAME (not id), e.g. "forward to 'XXX' group/chat", FIRST call octo_management action="resolve" with name:"XXX" to resolve it. If multiple candidates are returned, ask the user which group/thread; if exactly one, use its channelId to send. Never hand-build a "group:" address from a name.`,
+        `To react to a message with an emoji: use action="react" with emoji="👍" (any emoji). To react to the message that triggered the current turn, you may omit messageId — it defaults to the current inbound message. To react to a specific earlier message, pass its messageId. Pass remove:true to take your reaction back. Target defaults to the current conversation.`,
       ];
+    },
+    reactionGuidance: ({ accountId }: { cfg: any; accountId?: string | null }) => {
+      void accountId;
+      return { level: "minimal" as const, channelLabel: "Octo" };
     },
   },
   configSchema: OctoConfigJsonSchema,
@@ -1617,3 +1634,28 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
     },
   },
 };
+
+// ---------------------------------------------------------------------------
+// #111 Sprint A — new `message` (ChannelMessageAdapterShape) slot.
+//
+// OpenClaw's runtime (deliver-*.js createPluginHandler) prefers
+// `message.send.{text,media}` over `outbound.send*`, but still reads the
+// presentation-layer hooks (chunker / sanitizeText / normalizePayload /
+// renderPresentation / pinDeliveredMessage) ONLY from `outbound`. So the
+// migration ADDS a message slot and KEEPS outbound — it is not a replacement.
+//
+// We wrap the existing, well-tested outbound sendText/sendMedia via
+// createChannelMessageAdapterFromOutbound (the Discord pattern): the factory
+// normalizes our legacy `{channel,to,messageId}` results into
+// ChannelMessageSendResult { receipt, messageId }. durableFinal advertises the
+// content types we can durably deliver; we do not implement reconcileUnknownSend
+// yet (opt-in enhancement).
+// ---------------------------------------------------------------------------
+octoPlugin.message = createChannelMessageAdapterFromOutbound({
+  id: CHANNEL_ID,
+  outbound: {
+    sendText: (ctx) => octoPlugin.outbound!.sendText!(ctx as unknown as ChannelOutboundContext),
+    sendMedia: (ctx) => octoPlugin.outbound!.sendMedia!(ctx as unknown as ChannelOutboundContext),
+    deliveryCapabilities: { durableFinal: { text: true, media: true } },
+  },
+}) as any;

@@ -18,6 +18,8 @@ import {
   getGroupInfo,
   getGroupMd,
   updateGroupMd,
+  addReaction,
+  removeReaction,
 } from "./api-fetch.js";
 import { uploadAndSendMedia, uploadMedia, resolveRichTextContent, type UploadedMedia } from "./inbound.js";
 import { buildEntitiesFromFallback, parseStructuredMentions, convertStructuredMentions, sanitizeOutboundMentions } from "./mention-utils.js";
@@ -257,11 +259,12 @@ export async function handleOctoMessageAction(params: {
   groupMdCache?: Map<string, { content: string; version: number }>;
   currentChannelId?: string;
   threadId?: string | number | null;
+  currentMessageId?: string;
   requesterSenderId?: string;
   accountId?: string;
   log?: LogSink;
 }): Promise<MessageActionResult> {
-  const { action, args, apiUrl, botToken, memberMap, uidToNameMap, groupMdCache, currentChannelId, threadId, requesterSenderId, accountId, log } =
+  const { action, args, apiUrl, botToken, memberMap, uidToNameMap, groupMdCache, currentChannelId, threadId, currentMessageId, requesterSenderId, accountId, log } =
     params;
 
   if (!botToken) {
@@ -285,10 +288,101 @@ export async function handleOctoMessageAction(params: {
       return handleGroupMdRead({ args, apiUrl, botToken, groupMdCache, currentChannelId, log });
     case "group-md-update":
       return handleGroupMdUpdate({ args, apiUrl, botToken, groupMdCache, currentChannelId, log });
+    case "react":
+      return handleReact({ args, apiUrl, botToken, currentChannelId, threadId, currentMessageId, requesterSenderId, log });
     // 群管理操作（create-group/update-group/add-members/remove-members）
     // 统一通过 octo_management tool 入口，不走 message action
     default:
       return { ok: false, error: `Unknown action: ${action}` };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// react (#111 Sprint B) — add/remove the bot's reaction on a message
+// ---------------------------------------------------------------------------
+
+async function handleReact(params: {
+  args: Record<string, unknown>;
+  apiUrl: string;
+  botToken: string;
+  currentChannelId?: string;
+  threadId?: string | number | null;
+  currentMessageId?: string;
+  requesterSenderId?: string;
+  log?: LogSink;
+}): Promise<MessageActionResult> {
+  const { args, apiUrl, botToken, currentChannelId, threadId, currentMessageId, requesterSenderId, log } = params;
+
+  // messageId: explicit arg wins; otherwise fall back to the current inbound
+  // turn's message id (forwarded from toolContext.currentMessageId). The id is
+  // not surfaced in history/read output, so without this fallback "react to the
+  // message I'm replying to" would be impossible for the agent.
+  const messageId = (args.messageId as string | undefined)?.trim()
+    ?? (args.message_id as string | undefined)?.trim()
+    ?? currentMessageId?.trim();
+  if (!messageId) {
+    return { ok: false, error: "Missing required parameter: messageId (the id of the message to react to)" };
+  }
+  const emoji = (args.emoji as string | undefined)?.trim();
+  if (!emoji) {
+    return { ok: false, error: "Missing required parameter: emoji" };
+  }
+  const remove = args.remove === true;
+
+  // Target defaults to the current conversation (react in place). An explicit
+  // target is accepted for cross-channel reactions. Resolution reuses the
+  // outbound resolver so thread routing (#98) and empty/prefix-only fail-fast
+  // (#138) behave exactly like a send.
+  const explicitTarget = (args.target as string | undefined)?.trim();
+  let target = explicitTarget || currentChannelId;
+  if (!target || !stripAllChannelPrefixes(target.trim()).trim()) {
+    return { ok: false, error: "Missing or empty required parameter: target (and no current channel context)" };
+  }
+
+  // DM peer correction — MUST run BEFORE resolveOutboundOctoTarget.
+  //
+  // In a DM the runtime hands us currentChannelId as `octo:<peerUid>` (or
+  // `octo:<spaceId>:<peerUid>`) — it's the conversation's `To`, derived from
+  // the inbound from_uid. resolveOutboundOctoTarget → normalizeOutboundChannelPrefix
+  // turns ANY `octo:`/`channel:`-prefixed bare id that isn't `user:`-prefixed
+  // into `group:<bare>`, so `octo:<peer>` becomes `group:<peer>` and parseTarget
+  // returns channelType=Group → the server runs a group-membership check and
+  // rejects with not_group_member. (A post-resolve DM check can't help: the
+  // mis-classification already happened at the prefix step.)
+  //
+  // Fix: when the agent didn't pin an explicit target and the bare
+  // currentChannelId resolves to the trusted requesterSenderId (the DM peer for
+  // this turn — bare == peer, or `<space>:<peer>`), force the canonical DM form
+  // `user:<peer>` so the resolver routes it as a DM (channel_type=1) to the peer.
+  const peer = requesterSenderId?.trim();
+  if (!explicitTarget && peer && currentChannelId) {
+    const bare = stripAllChannelPrefixes(currentChannelId.trim());
+    if (bare === peer || bare.endsWith(`:${peer}`)) {
+      log?.info?.(`octo: react DM target corrected ${currentChannelId} → user:${peer}`);
+      target = `user:${peer}`;
+    }
+  }
+
+  let channelId: string;
+  let channelType: ChannelType;
+  try {
+    ({ channelId, channelType } = resolveOutboundOctoTarget(target, threadId));
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+
+  try {
+    if (remove) {
+      await removeReaction({ apiUrl, botToken, channelId, channelType, messageId, emoji });
+      log?.info?.(`octo: removed reaction ${emoji} from ${messageId}`);
+      return { ok: true, data: { removed: emoji, messageId } };
+    }
+    await addReaction({ apiUrl, botToken, channelId, channelType, messageId, emoji });
+    log?.info?.(`octo: added reaction ${emoji} to ${messageId}`);
+    return { ok: true, data: { added: emoji, messageId } };
+  } catch (err) {
+    log?.info?.(`octo: react failed — channelId=${channelId} channelType=${channelType} msg=${messageId}: ${(err as Error).message}`);
+    return { ok: false, error: (err as Error).message };
   }
 }
 

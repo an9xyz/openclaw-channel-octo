@@ -3779,3 +3779,243 @@ describe("extractInlineMentionUids", () => {
     expect(extractInlineMentionUids("group:grp1@uid1,,uid2,")).toEqual(["uid1", "uid2"]);
   });
 });
+
+// #111 Sprint B — react action
+describe("handleOctoMessageAction — react", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("react add POSTs to the reactions endpoint with the emoji", async () => {
+    let url = "";
+    let method = "";
+    let body: any = null;
+    globalThis.fetch = mockFetch({
+      "/reactions": async (u, init) => {
+        url = u;
+        method = init?.method ?? "POST";
+        body = init?.body ? JSON.parse(init.body as string) : null;
+        return jsonResponse({}, 200);
+      },
+    });
+
+    const { handleOctoMessageAction } = await import("./actions.js");
+    const result = await handleOctoMessageAction({
+      action: "react",
+      args: { target: "group:chan123", messageId: "m1", emoji: "👍" },
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(url).toContain("/v1/bot/messages/m1/reactions");
+    expect(method).toBe("POST");
+    expect(body.emoji).toBe("👍");
+    expect(body.channel_id).toBe("chan123");
+  });
+
+  it("react remove DELETEs the reaction", async () => {
+    let method = "";
+    let url = "";
+    globalThis.fetch = mockFetch({
+      "/reactions": async (u, init) => {
+        url = u;
+        method = init?.method ?? "";
+        return new Response("", { status: 200 });
+      },
+    });
+
+    const { handleOctoMessageAction } = await import("./actions.js");
+    const result = await handleOctoMessageAction({
+      action: "react",
+      args: { target: "group:chan123", messageId: "m1", emoji: "👍", remove: true },
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(method).toBe("DELETE");
+    expect(url).toContain(encodeURIComponent("👍"));
+  });
+
+  it("react falls back to currentChannelId when no target is given", async () => {
+    let body: any = null;
+    globalThis.fetch = mockFetch({
+      "/reactions": async (_u, init) => {
+        body = init?.body ? JSON.parse(init.body as string) : null;
+        return jsonResponse({}, 200);
+      },
+    });
+
+    const { handleOctoMessageAction } = await import("./actions.js");
+    const result = await handleOctoMessageAction({
+      action: "react",
+      args: { messageId: "m1", emoji: "🎉" },
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      currentChannelId: "group:chan999",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(body.channel_id).toBe("chan999");
+  });
+
+  it("react fails when messageId is missing", async () => {
+    const { handleOctoMessageAction } = await import("./actions.js");
+    const result = await handleOctoMessageAction({
+      action: "react",
+      args: { target: "group:chan123", emoji: "👍" },
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/messageId/);
+  });
+
+  it("react falls back to currentMessageId (current inbound message)", async () => {
+    let url = "";
+    globalThis.fetch = mockFetch({
+      "/reactions": async (u, init) => {
+        url = u;
+        return jsonResponse({}, 200);
+      },
+    });
+    const { handleOctoMessageAction } = await import("./actions.js");
+    const result = await handleOctoMessageAction({
+      action: "react",
+      args: { emoji: "👍" }, // no messageId
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      currentChannelId: "group:chan123",
+      currentMessageId: "inbound-msg-77",
+    });
+    expect(result.ok).toBe(true);
+    expect(url).toContain("/v1/bot/messages/inbound-msg-77/reactions");
+  });
+
+  it("react in a DM corrects target to user:<peer> (DM currentChannelId is octo:<peer>)", async () => {
+    // Regression (real DM shape, confirmed in runtime): the runtime hands
+    // currentChannelId as `octo:<peerUid>`. resolveOutboundOctoTarget's prefix
+    // normalization would turn that into `group:<peerUid>` → channel_type=2 →
+    // server not_group_member. The fix detects bare==peer (requesterSenderId)
+    // and forces `user:<peer>` so it routes as a DM (channel_type=1).
+    let body: any = null;
+    globalThis.fetch = mockFetch({
+      "/reactions": async (_u, init) => {
+        body = init?.body ? JSON.parse(init.body as string) : null;
+        return jsonResponse({}, 200);
+      },
+    });
+    const { handleOctoMessageAction } = await import("./actions.js");
+    const result = await handleOctoMessageAction({
+      action: "react",
+      args: { emoji: "👀", messageId: "m-dm-1" },
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      currentChannelId: "octo:peerUid", // real DM shape from runtime
+      requesterSenderId: "peerUid",
+    });
+    expect(result.ok).toBe(true);
+    expect(body.channel_type).toBe(ChannelType.DM); // 1, not group(2)
+    expect(body.channel_id).toBe("peerUid"); // routed to the peer as a DM
+  });
+
+  it("react in a DM with space-prefixed currentChannelId (octo:<space>:<peer>) still corrects", async () => {
+    let body: any = null;
+    globalThis.fetch = mockFetch({
+      "/reactions": async (_u, init) => {
+        body = init?.body ? JSON.parse(init.body as string) : null;
+        return jsonResponse({}, 200);
+      },
+    });
+    const { handleOctoMessageAction } = await import("./actions.js");
+    const result = await handleOctoMessageAction({
+      action: "react",
+      args: { emoji: "👀", messageId: "m-dm-1b" },
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      currentChannelId: "octo:space123:peerUid",
+      requesterSenderId: "peerUid",
+    });
+    expect(result.ok).toBe(true);
+    expect(body.channel_type).toBe(ChannelType.DM);
+    expect(body.channel_id).toBe("peerUid");
+  });
+
+  it("react with an explicit DM target is NOT overridden by the peer correction", async () => {
+    let body: any = null;
+    globalThis.fetch = mockFetch({
+      "/reactions": async (_u, init) => {
+        body = init?.body ? JSON.parse(init.body as string) : null;
+        return jsonResponse({}, 200);
+      },
+    });
+    const { handleOctoMessageAction } = await import("./actions.js");
+    const result = await handleOctoMessageAction({
+      action: "react",
+      args: { emoji: "👀", messageId: "m-dm-2", target: "user:explicitPeer" },
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      currentChannelId: "octo:peerUid",
+      requesterSenderId: "someoneElse",
+    });
+    expect(result.ok).toBe(true);
+    expect(body.channel_id).toBe("explicitPeer"); // explicit target wins
+  });
+
+  it("react in a GROUP is NOT mis-corrected by the DM peer logic", async () => {
+    // Group currentChannelId is the group_no, which never equals requesterSenderId,
+    // so the DM correction must not fire — channel_type stays Group(2).
+    let body: any = null;
+    globalThis.fetch = mockFetch({
+      "/reactions": async (_u, init) => {
+        body = init?.body ? JSON.parse(init.body as string) : null;
+        return jsonResponse({}, 200);
+      },
+    });
+    const { handleOctoMessageAction } = await import("./actions.js");
+    const result = await handleOctoMessageAction({
+      action: "react",
+      args: { emoji: "👀", messageId: "m-grp-1" },
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      currentChannelId: "group:grp123",
+      requesterSenderId: "peerUid", // a member, != group_no
+    });
+    expect(result.ok).toBe(true);
+    expect(body.channel_id).toBe("grp123");
+    expect(body.channel_type).toBe(ChannelType.Group);
+  });
+
+  it("react fails when emoji is missing", async () => {
+    const { handleOctoMessageAction } = await import("./actions.js");
+    const result = await handleOctoMessageAction({
+      action: "react",
+      args: { target: "group:chan123", messageId: "m1" },
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/emoji/);
+  });
+});
+
+describe("#111 capabilities + actions", () => {
+  it("declares capabilities.reactions = true", async () => {
+    const { octoPlugin } = await import("./channel.js");
+    expect(octoPlugin.capabilities?.reactions).toBe(true);
+  });
+
+  it("getAvailableActions includes react but NOT reactions (no list endpoint yet)", async () => {
+    const { octoPlugin } = await import("./channel.js");
+    const cfg = {
+      channels: { octo: { accounts: { default: { botToken: "bf_t", apiUrl: "http://x" } } } },
+    };
+    const actions = (octoPlugin.actions as any).listActions({ cfg });
+    expect(actions).toContain("react");
+    expect(actions).not.toContain("reactions");
+  });
+});

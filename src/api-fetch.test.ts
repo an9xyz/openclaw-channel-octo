@@ -2217,3 +2217,122 @@ describe("#138 — send functions reject empty channelId", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 });
+
+// #111 Sprint B — reaction helpers
+describe("addReaction / removeReaction", () => {
+  const originalFetch = global.fetch;
+  let fetchSpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: vi.fn().mockResolvedValue(""),
+      json: vi.fn().mockResolvedValue({}),
+    });
+    global.fetch = fetchSpy as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("addReaction POSTs to the reactions endpoint with emoji in the body", async () => {
+    const { addReaction } = await import("./api-fetch.js");
+    await addReaction({
+      apiUrl: "http://localhost:8090",
+      botToken: "bf_t",
+      channelId: "chan1",
+      channelType: ChannelType.Group,
+      messageId: "m123",
+      emoji: "👍",
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, opts] = fetchSpy.mock.calls[0];
+    expect(url).toContain("/v1/bot/messages/m123/reactions");
+    expect(opts.method).toBe("POST");
+    const body = JSON.parse(opts.body);
+    expect(body.emoji).toBe("👍");
+    expect(body.channel_id).toBe("chan1");
+    expect(body.channel_type).toBe(ChannelType.Group);
+  });
+
+  it("removeReaction DELETEs with the emoji URL-encoded in the path", async () => {
+    const { removeReaction } = await import("./api-fetch.js");
+    await removeReaction({
+      apiUrl: "http://localhost:8090",
+      botToken: "bf_t",
+      channelId: "chan1",
+      channelType: ChannelType.Group,
+      messageId: "m123",
+      emoji: "👍",
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, opts] = fetchSpy.mock.calls[0];
+    expect(opts.method).toBe("DELETE");
+    expect(url).toContain("/v1/bot/messages/m123/reactions/");
+    // emoji must be percent-encoded, never raw, in the path
+    expect(url).toContain(encodeURIComponent("👍"));
+    expect(url).not.toContain("👍");
+  });
+
+  it("addReaction rejects an empty channelId (fail-fast, #138 style)", async () => {
+    const { addReaction } = await import("./api-fetch.js");
+    await expect(
+      addReaction({
+        apiUrl: "http://localhost:8090",
+        botToken: "bf_t",
+        channelId: "  ",
+        channelType: ChannelType.Group,
+        messageId: "m123",
+        emoji: "👍",
+      }),
+    ).rejects.toThrow();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("addReaction rejects an empty messageId / emoji", async () => {
+    const { addReaction } = await import("./api-fetch.js");
+    await expect(
+      addReaction({
+        apiUrl: "http://localhost:8090",
+        botToken: "bf_t",
+        channelId: "chan1",
+        channelType: ChannelType.Group,
+        messageId: "",
+        emoji: "👍",
+      }),
+    ).rejects.toThrow();
+    await expect(
+      addReaction({
+        apiUrl: "http://localhost:8090",
+        botToken: "bf_t",
+        channelId: "chan1",
+        channelType: ChannelType.Group,
+        messageId: "m1",
+        emoji: "  ",
+      }),
+    ).rejects.toThrow();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("propagates a non-2xx error", async () => {
+    fetchSpy.mockResolvedValueOnce({
+      ok: false,
+      status: 403,
+      text: vi.fn().mockResolvedValue("forbidden"),
+      statusText: "Forbidden",
+    });
+    const { addReaction } = await import("./api-fetch.js");
+    await expect(
+      addReaction({
+        apiUrl: "http://localhost:8090",
+        botToken: "bf_t",
+        channelId: "chan1",
+        channelType: ChannelType.Group,
+        messageId: "m123",
+        emoji: "👍",
+      }),
+    ).rejects.toThrow(/403/);
+  });
+});

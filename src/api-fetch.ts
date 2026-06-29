@@ -417,6 +417,85 @@ export async function sendHeartbeat(params: {
   await postJson(params.apiUrl, params.botToken, "/v1/bot/heartbeat", {}, params.signal);
 }
 
+// ---- Reactions (#111 Sprint B) ----
+
+/**
+ * Add (or change) the bot's reaction on a message.
+ * POST /v1/bot/messages/{messageId}/reactions  body {channel_id, channel_type, emoji}
+ *
+ * The server treats the bot as a single-reaction actor per message: posting a
+ * different emoji replaces the bot's previous one (see server reaction_store
+ * state machine). channelId / messageId / emoji are validated client-side
+ * (fail-fast, #138 style) so an unroutable request never leaves the process.
+ */
+export async function addReaction(params: {
+  apiUrl: string;
+  botToken: string;
+  channelId: string;
+  channelType: ChannelType;
+  messageId: string;
+  emoji: string;
+  signal?: AbortSignal;
+}): Promise<void> {
+  if (!params.channelId || !params.channelId.trim()) {
+    throw new Error("octo: channelId is required to add a reaction");
+  }
+  if (!params.messageId || !params.messageId.trim()) {
+    throw new Error("octo: messageId is required to add a reaction");
+  }
+  if (!params.emoji || !params.emoji.trim()) {
+    throw new Error("octo: emoji is required to add a reaction");
+  }
+  await postJson(
+    params.apiUrl,
+    params.botToken,
+    `/v1/bot/messages/${encodeURIComponent(params.messageId)}/reactions`,
+    {
+      channel_id: params.channelId,
+      channel_type: params.channelType,
+      emoji: params.emoji,
+    },
+    // Symmetric with removeReaction (botFetchJson): bound the request so a
+    // stalled server can't hang an add indefinitely. A caller-supplied signal
+    // takes precedence.
+    params.signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  );
+}
+
+/**
+ * Remove the bot's reaction (matching `emoji`) from a message.
+ * DELETE /v1/bot/messages/{messageId}/reactions/{emoji}?channel_id&channel_type
+ *
+ * The emoji is percent-encoded into the path (multi-byte unicode). Removing an
+ * emoji the bot didn't set is a server-side no-op success.
+ */
+export async function removeReaction(params: {
+  apiUrl: string;
+  botToken: string;
+  channelId: string;
+  channelType: ChannelType;
+  messageId: string;
+  emoji: string;
+  signal?: AbortSignal;
+}): Promise<void> {
+  if (!params.channelId || !params.channelId.trim()) {
+    throw new Error("octo: channelId is required to remove a reaction");
+  }
+  if (!params.messageId || !params.messageId.trim()) {
+    throw new Error("octo: messageId is required to remove a reaction");
+  }
+  if (!params.emoji || !params.emoji.trim()) {
+    throw new Error("octo: emoji is required to remove a reaction");
+  }
+  const qs = `channel_id=${encodeURIComponent(params.channelId)}&channel_type=${params.channelType}`;
+  await botFetchJson({
+    apiUrl: params.apiUrl,
+    botToken: params.botToken,
+    path: `/v1/bot/messages/${encodeURIComponent(params.messageId)}/reactions/${encodeURIComponent(params.emoji)}?${qs}`,
+    method: "DELETE",
+  });
+}
+
 
 
 export async function registerBot(params: {
