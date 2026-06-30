@@ -3750,7 +3750,7 @@ describe("buildConversationAddress", () => {
  * replyChannelType stays DM.
  */
 describe("resolveReplyTarget", () => {
-  it("DM (isGroup=false) replies to bare from_uid with ChannelType.DM", () => {
+  it("DM inbound replyChannelId stays bare from_uid + DM type (unaffected by conversation-id encoding)", () => {
     const result = resolveReplyTarget(false, "some-channel-id", "user123", undefined);
     expect(result.replyChannelId).toBe("user123");
     expect(result.replyChannelType).toBe(ChannelType.DM);
