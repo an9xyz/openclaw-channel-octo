@@ -538,7 +538,8 @@ function getAvailableActions(cfg: any): string[] {
  *
  * Returns undefined when the key encodes no peer — e.g. dmScope "main" collapses
  * every DM to `agent:<id>:main`. The caller treats undefined as "cannot recover"
- * and skips the mirror rather than writing a wrong session.
+ * and falls back to the bare wire uid (which under main scope is dropped from the
+ * key anyway, staying isomorphic with inbound's `agent:<id>:main`).
  */
 const DM_DIRECT_MARKER = ":direct:";
 function recoverDmPeerFromSessionKey(sessionKey: string | undefined): string | undefined {
@@ -947,21 +948,32 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
       const isDm = channelType === ChannelType.DM;
 
       if (isDm) {
-        // peer.id must equal the inbound DM sessionId (`<space>:<uid>`) for the
-        // outbound key to be isomorphic with the inbound route.
+        // peer.id must equal the inbound DM sessionId for the outbound key to be
+        // isomorphic with the inbound route. This hook NEVER returns null for a
+        // DM: when a plugin resolver returns null the SDK does NOT fall back to
+        // its default session resolver — it leaves the route unmirrored and never
+        // sets __sessionKey — so returning null would DROP the mirror that the
+        // default (main) dmScope would otherwise land correctly.
         let peerId: string;
         if (ref.id.includes(":")) {
           // Target already carries the space — runtime-injected current DM.
           peerId = ref.id;
         } else {
-          // Bare-uid target (explicit cross-DM): the space is unknown. Only the
+          // Bare-uid target (explicit cross-DM): the space is unknown. The
           // current conversation's sessionKey can supply the space-scoped
-          // identity, and only when it actually belongs to THIS peer. If it
-          // can't be recovered, or recovers a different peer, return null to
-          // skip the mirror — never write a bare-uid (wrong) session.
-          const recovered = recoverDmPeerFromSessionKey(params.currentSessionKey);
-          if (!recovered || dmPeerUid(recovered) !== ref.id) return null;
-          peerId = recovered;
+          // identity, but only when it actually belongs to THIS peer. The SDK
+          // lowercases the encoded peerId while ref.id comes from the raw target,
+          // so compare case-insensitively. If it can't be recovered (or recovers
+          // a different peer), fall back to the bare uid: under peer-encoding
+          // dmScopes this equals the legacy SDK fallback, and under the default
+          // main scope the peer is dropped from the key anyway — fully isomorphic
+          // with inbound's `agent:<id>:main`.
+          const recovered = params.currentSessionKey
+            ? recoverDmPeerFromSessionKey(params.currentSessionKey)
+            : undefined;
+          peerId = recovered && dmPeerUid(recovered).toLowerCase() === ref.id.toLowerCase()
+            ? recovered
+            : ref.id;
         }
         return buildChannelOutboundSessionRoute({
           cfg: params.cfg,
@@ -980,8 +992,9 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
       // key matches inbound (whose peer.id is the channel_id incl. `grp1____abc`).
       // resolveOutboundOctoTarget already owns the separator-merge rules.
       const { channelId: groupPeerId } = resolveOutboundOctoTarget(params.target, params.threadId);
-      const sep = groupPeerId.indexOf(THREAD_ID_SEPARATOR);
-      const shortId = sep >= 0 ? groupPeerId.slice(sep + THREAD_ID_SEPARATOR.length) : undefined;
+      // Reuse the shared separator parser so the `____` split rule lives in one
+      // place (group-md.ts) rather than re-implemented here.
+      const shortId = extractThreadShortId(groupPeerId) ?? undefined;
       return buildChannelOutboundSessionRoute({
         cfg: params.cfg,
         agentId: params.agentId,

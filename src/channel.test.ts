@@ -1204,8 +1204,9 @@ describe("resolveSessionConversation", () => {
 // buildChannelOutboundSessionRoute), so isomorphism ⟺ identical `peer`.
 //
 // `testCfg` uses dmScope "per-channel-peer" so DM peer IDs are actually encoded
-// into the session key — otherwise the default "main" scope collapses every DM
-// to `agent:<id>:main` and the bare-uid recover path can't be exercised.
+// into the session key, exercising the bare-uid recover path. A second
+// main-scope cfg (the default) is also tested below, where the peer is dropped
+// from the key and the bare-uid DM stays isomorphic with `agent:<id>:main`.
 describe("resolveOutboundSessionRoute", () => {
   // Inbound oracle: the real SDK key builder. Inbound peer.id == octo sessionId
   // (DM: <space>:<uid> or bare <uid>; group/topic: channel_id incl grp1____abc).
@@ -1227,6 +1228,7 @@ describe("resolveOutboundSessionRoute", () => {
   };
 
   const testCfg: any = { session: { dmScope: "per-channel-peer" } };
+  const mainScopeCfg: any = { session: { dmScope: "main" } };
 
   // Generate a real DM currentSessionKey for a (uid, space) pair through the
   // SAME cfg + key builder the runtime uses — never hand-built, so the recover
@@ -1237,6 +1239,16 @@ describe("resolveOutboundSessionRoute", () => {
       cfg: testCfg, channel: "octo", accountId: "acc",
       peer: { kind: "direct", id },
     }).sessionKey;
+  };
+
+  // Invoke the hook with an explicit cfg (so the main-scope cases below don't
+  // have to mutate the per-channel-peer default).
+  const rosWith = async (cfg: any, target: string, extra: Record<string, unknown> = {}) => {
+    vi.resetModules();
+    const { octoPlugin } = await import("./channel.js");
+    return octoPlugin.messaging!.resolveOutboundSessionRoute!({
+      cfg, agentId: "a1", accountId: "acc", channel: "octo", target, ...extra,
+    } as any);
   };
 
   let ros: (target: string, extra?: Record<string, unknown>) => Promise<any>;
@@ -1276,6 +1288,9 @@ describe("resolveOutboundSessionRoute", () => {
       { sessionId: "uid",         isGroup: false, target: "octo:user:uid",
         extra: { currentSessionKey: someDmSessionKeyForUid("uid", "") } }, // single-space bare uid
       { sessionId: "42:uid",      isGroup: false, target: "octo:user:42:uid" },
+      // mixed-case space-scoped DM. Inbound lowercases the peerId in the key;
+      // outbound must yield the SAME key (BotFather mixed-case bot ids, issue #33).
+      { sessionId: "42:UidUpper", isGroup: false, target: "octo:user:42:UidUpper" },
       { sessionId: "grp1",        isGroup: true,  target: "octo:group:grp1" },
       { sessionId: "grp1____abc", isGroup: true,  target: "octo:group:grp1____abc" },
       { sessionId: "grp1____abc", isGroup: true,  target: "octo:group:grp1", extra: { threadId: "abc" } },
@@ -1291,12 +1306,42 @@ describe("resolveOutboundSessionRoute", () => {
     }
   });
 
-  it("DM returns null when bare-uid target cannot recover space from currentSessionKey", async () => {
-    // bare user:other, no currentSessionKey → cannot determine space-scoped id → null
-    expect(await ros("user:other")).toBeNull();
-    // currentSessionKey belongs to a different peer (uid, space 42); dmPeerUid
-    // of the recovered identity != "other" → still null (never write a wrong session)
-    expect(await ros("user:other", { currentSessionKey: someDmSessionKeyForUid("uid", "42") })).toBeNull();
+  // The default dmScope is "main", not "per-channel-peer". Under main the DM peer
+  // is dropped from the key, so a bare-uid DM outbound (no recoverable space)
+  // still produces `agent:<id>:main` and is isomorphic with inbound. This pins
+  // the contract that the DM branch NEVER returns null: it falls back to the bare
+  // uid, which under main scope is fully isomorphic.
+  it("main-scope DM: bare-uid built with bare uid, isomorphic with agent:<id>:main", async () => {
+    const inboundKey = realResolveAgentRoute({
+      cfg: mainScopeCfg, channel: "octo", accountId: "acc",
+      peer: { kind: "direct", id: "other" },
+    }).sessionKey;
+    expect(inboundKey).toBe("agent:a1:main");
+    // No currentSessionKey at all — recover yields nothing, falls back to bare uid.
+    const out = await rosWith(mainScopeCfg, "user:other");
+    expect(out).not.toBeNull();
+    expect(out!.peer.id).toBe("other");          // built with the bare uid
+    expect(out!.to).toBe("other");
+    expect(out!.baseSessionKey).toBe(inboundKey); // still lands the same session
+  });
+
+  // Even when the bare-uid target can't recover a space (different-peer
+  // currentSessionKey, or none), the DM hook returns a route built with the bare
+  // uid — it does NOT return null. Returning null would make the SDK skip the
+  // mirror entirely (no fallback resolver), dropping a session main-scope would
+  // otherwise land correctly.
+  it("DM bare-uid that can't recover space falls back to bare uid (never null)", async () => {
+    // No currentSessionKey.
+    const r1 = await ros("user:other");
+    expect(r1).not.toBeNull();
+    expect(r1!.peer.id).toBe("other");
+    expect(r1!.to).toBe("other");
+    // currentSessionKey belongs to a different peer (uid, space 42); dmPeerUid of
+    // the recovered identity != "other" → still fall back to the bare uid.
+    const r2 = await ros("user:other", { currentSessionKey: someDmSessionKeyForUid("uid", "42") });
+    expect(r2).not.toBeNull();
+    expect(r2!.peer.id).toBe("other");
+    expect(r2!.to).toBe("other");
   });
 
   it("DM recovers space from currentSessionKey when bare-uid target IS the current peer", async () => {
