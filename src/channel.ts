@@ -7,7 +7,7 @@ import type { ChannelOutboundContext } from "openclaw/plugin-sdk/channel-contrac
 import { createChannelMessageAdapterFromOutbound } from "openclaw/plugin-sdk/channel-message";
 import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
 import { OctoConfigJsonSchema, type OctoConfig } from "./config-schema.js";
-import { CHANNEL_ID, MAX_UPLOAD_SIZE, stripAllChannelPrefixes, getChannelConfig, parseConversationRef } from "./constants.js";
+import { CHANNEL_ID, MAX_UPLOAD_SIZE, stripAllChannelPrefixes, getChannelConfig, parseConversationRef, THREAD_ID_SEPARATOR } from "./constants.js";
 import { streamToFileWithCap } from "./stream-helpers.js";
 import {
   listOctoAccountIds,
@@ -35,7 +35,7 @@ import { ChannelType, MessageType, type BotMessage, type MessagePayload, type Se
 import { buildEntitiesFromFallback, parseStructuredMentions, convertStructuredMentions, sanitizeOutboundMentions, MENTION_FORMAT_HINT } from "./mention-utils.js";
 import type { MentionEntity } from "./types.js";
 import { handleOctoMessageAction, parseTarget, resolveOutboundOctoTarget, normalizeOutboundChannelPrefix, extractInlineMentionUids } from "./actions.js";
-import { getOrCreateGroupMdCache, registerBotGroupIds, getKnownGroupIds, writeGroupMdToDisk, extractParentGroupNo } from "./group-md.js";
+import { getOrCreateGroupMdCache, registerBotGroupIds, getKnownGroupIds, writeGroupMdToDisk, extractParentGroupNo, extractThreadShortId } from "./group-md.js";
 import { registerOwnerUid } from "./owner-registry.js";
 import { registerKnownBot, isKnownBot } from "./bot-registry.js";
 import { preloadGroupMemberCache, getGroupMembersFromCache } from "./member-cache.js";
@@ -897,6 +897,14 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
     targetResolver: {
       looksLikeId: (input) => Boolean(input.trim()),
       hint: "<userId or channelId>",
+    },
+    resolveSessionConversation: ({ rawId }: { kind: "group" | "channel"; rawId: string }) => {
+      const id = stripAllChannelPrefixes((rawId ?? "").trim());
+      if (!id.includes(THREAD_ID_SEPARATOR)) return null;
+      const groupNo = extractParentGroupNo(id);
+      const shortId = extractThreadShortId(id);
+      if (!groupNo || !shortId) return null;
+      return { id: groupNo, threadId: shortId, baseConversationId: groupNo, parentConversationCandidates: [groupNo] };
     },
   },
   outbound: {

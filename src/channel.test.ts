@@ -1161,3 +1161,29 @@ describe("messaging.normalizeTarget canonical output", () => {
     expect(p.channelId).toBe("uid");
   });
 });
+
+// ─── resolveSessionConversation — thread id parsing ──────────────────────
+
+describe("resolveSessionConversation", () => {
+  let rsc: (rawId: string) => ReturnType<NonNullable<NonNullable<typeof octoPlugin.messaging>["resolveSessionConversation"]>> | null;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    const { octoPlugin } = await import("./channel.js");
+    rsc = (rawId: string) => octoPlugin.messaging!.resolveSessionConversation!({ kind: "group", rawId });
+  });
+
+  it("parses thread id into parent + short", () => {
+    expect(rsc("grp1____abc")).toEqual({
+      id: "grp1",
+      threadId: "abc",
+      baseConversationId: "grp1",
+      parentConversationCandidates: ["grp1"],
+    });
+  });
+
+  it("returns null for non-thread / empty", () => {
+    expect(rsc("grp1")).toBeNull();
+    expect(rsc("")).toBeNull();
+  });
+});
