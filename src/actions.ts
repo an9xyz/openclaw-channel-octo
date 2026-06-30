@@ -1003,18 +1003,32 @@ async function handleRead(params: {
   const { channelId, channelType } = parseTarget(target, currentChannelId, getKnownGroupIds());
 
   // ====== Permission check ======
-  // Strip channel-namespace prefix from currentChannelId for comparison.
-  // Uses the shared helper so all three runtime prefixes (octo:/channel:/group:)
-  // are handled — see src/constants.ts. Pre-fix this only stripped "octo:",
-  // so prefixed forms (channel:grp1____x, group:grp1____x) mis-compared
-  // against the prefix-stripped parsed channelId and treated legitimate
-  // same-channel reads as cross-channel queries. Fix tracked in #102.
-  const bareCurrentChannelId = currentChannelId ? stripAllChannelPrefixes(currentChannelId) : currentChannelId;
-  // Infer the current channel type
+  // Compare the target channel against the current session's channel using
+  // kind-aware parsing. parseConversationRef extracts {kind, id} from the
+  // runtime's canonical form (e.g. "octo:user:<space>:<uid>" for DMs). The bare
+  // comparison uses dmPeerUid for DM targets to match the delivery channelId, and
+  // ref.id directly for group/thread targets. currentChannelType honours the
+  // explicit kind first (user→DM, group→Group/Topic), falling back to shape-based
+  // inference only when kind is absent — this prevents a known-group uid collision
+  // from misclassifying a DM as a Group.
+  const currentRef = currentChannelId ? parseConversationRef(currentChannelId) : undefined;
+  // Bare id for comparison: DM uses dmPeerUid (extracts peer uid from space-scoped id),
+  // group/thread uses ref.id directly.
+  const bareCurrentChannelId = currentRef
+    ? (currentRef.kind === "user" ? dmPeerUid(currentRef.id) : currentRef.id)
+    : undefined;
+
+  // Infer current channel type: honour explicit kind first, then fall back to
+  // shape-based detection for legacy/bare forms.
   const knownGroups = getKnownGroupIds();
-  const currentChannelType = bareCurrentChannelId?.includes("____")
-    ? ChannelType.CommunityTopic
-    : knownGroups.has(bareCurrentChannelId ?? "") ? ChannelType.Group : ChannelType.DM;
+  const currentChannelType = currentRef?.kind === "user"
+    ? ChannelType.DM
+    : currentRef?.kind === "group"
+      ? (currentRef.id.includes("____") ? ChannelType.CommunityTopic : ChannelType.Group)
+      : bareCurrentChannelId?.includes("____")
+        ? ChannelType.CommunityTopic
+        : knownGroups.has(bareCurrentChannelId ?? "") ? ChannelType.Group : ChannelType.DM;
+
   // Must match both channelId AND channelType to be considered the same channel
   const isSameChannel = !!(bareCurrentChannelId && channelId === bareCurrentChannelId && channelType === currentChannelType);
 

@@ -3279,6 +3279,97 @@ describe("handleOctoMessageAction", () => {
   });
 
   // -----------------------------------------------------------------------
+  // Task 4: handleRead DM same-channel (kind-aware)
+  // -----------------------------------------------------------------------
+  describe("read — DM same-channel (kind-aware)", () => {
+    const fakeMessages = {
+      messages: [
+        {
+          from_uid: "peer-uid",
+          message_id: "m1",
+          timestamp: 1709654400,
+          payload: Buffer.from(JSON.stringify({ type: 1, content: "DM msg" })).toString("base64"),
+        },
+      ],
+    };
+
+    it("reads current DM without permission check (target matches octo:user:<space>:<uid>)", async () => {
+      registerBotGroupIds(["someGroup"]); // peer-uid is NOT a known group
+
+      globalThis.fetch = mockFetch({
+        "/v1/bot/messages/sync": async () => jsonResponse(fakeMessages),
+      });
+
+      const { handleOctoMessageAction } = await import("./actions.js");
+      // currentChannelId uses the runtime's octo:user:<space>:<uid> shape
+      const result = await handleOctoMessageAction({
+        action: "read",
+        args: { target: "user:peer-uid" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: "octo:user:space123:peer-uid",
+        requesterSenderId: "peer-uid",
+        accountId: "acct1",
+      });
+
+      expect(result.ok).toBe(true);
+      // Same-channel → no prompt-injection wrapper (cross-channel would add one)
+      const data = result.data as any;
+      expect(data.header).toBeUndefined();
+      expect(data.messages[0].content).toBe("DM msg");
+    });
+
+    it("currentChannelType honours user: kind even if uid collides with a known group", async () => {
+      // Scenario: currentChannelId = octo:user:grp1 where "grp1" is ALSO in knownGroupIds
+      // The kind-aware logic should treat this as DM (because kind=user), not Group.
+      // Without the fix, bareCurrentChannelId would be "grp1" which is in knownGroups,
+      // so currentChannelType would be Group → mismatch with parsed DM → cross-channel.
+      registerBotGroupIds(["grp1"]);
+
+      globalThis.fetch = mockFetch({
+        "/v1/bot/messages/sync": async () => jsonResponse(fakeMessages),
+      });
+
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
+        action: "read",
+        args: { target: "user:grp1" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: "octo:user:grp1",
+        requesterSenderId: "grp1",
+        accountId: "acct1",
+      });
+
+      expect(result.ok).toBe(true);
+      const data = result.data as any;
+      // Same-channel DM → no cross-channel wrapper
+      expect(data.header).toBeUndefined();
+    });
+
+    it("still denies cross-channel DM when uid differs", async () => {
+      globalThis.fetch = mockFetch({
+        "/v1/bot/messages/sync": async () => jsonResponse(fakeMessages),
+      });
+
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
+        action: "read",
+        args: { target: "user:different-peer" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: "octo:user:space123:peer-uid",
+        requesterSenderId: "peer-uid", // different from target
+        accountId: "acct1",
+      });
+
+      // Cross-channel DM to another user's DM → denied (not owner, not own DM)
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain("无权查询他人");
+    });
+  });
+
+  // -----------------------------------------------------------------------
   // read — isSameChannel channelType bypass prevention
   // -----------------------------------------------------------------------
   describe("read — channelType mismatch prevents same-channel bypass", () => {
