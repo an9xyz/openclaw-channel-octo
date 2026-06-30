@@ -2341,9 +2341,57 @@ describe("handleOctoMessageAction", () => {
       expect(data.count).toBe(2);
       expect(data.messages[0].content).toBe("Hello");
       expect(data.messages[1].content).toBe("Hi there");
+      // #111 — read must expose each message id so the agent can target an
+      // earlier message with `react` (see read→react chain test below).
+      expect(data.messages[0].messageId).toBe("m1");
+      expect(data.messages[1].messageId).toBe("m2");
       expect(data.hasMore).toBe(false);
       // Same-channel should NOT have prompt injection wrapper
       expect(data.header).toBeUndefined();
+    });
+
+    it("read messageId feeds react — agent can react to an earlier message", async () => {
+      registerBotGroupIds(["grp1"]);
+      const fakeMessages = {
+        messages: [
+          {
+            from_uid: "user1",
+            message_id: "earlier-99",
+            timestamp: 1709654400,
+            payload: Buffer.from(JSON.stringify({ type: 1, content: "Hello" })).toString("base64"),
+          },
+        ],
+      };
+      let reactUrl = "";
+      globalThis.fetch = mockFetch({
+        "/v1/bot/messages/sync": async () => jsonResponse(fakeMessages),
+        "/reactions": async (u) => {
+          reactUrl = u;
+          return jsonResponse({}, 200);
+        },
+      });
+
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const read = await handleOctoMessageAction({
+        action: "read",
+        args: { target: "group:grp1" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: "grp1",
+      });
+      const earlierId = (read.data as any).messages[0].messageId as string;
+      expect(earlierId).toBe("earlier-99");
+
+      // Feed the id straight back into react — this is the loop the prompt
+      // advertises and that was impossible before read exposed messageId.
+      const react = await handleOctoMessageAction({
+        action: "react",
+        args: { target: "group:grp1", messageId: earlierId, emoji: "👍" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+      });
+      expect(react.ok).toBe(true);
+      expect(reactUrl).toContain("/v1/bot/messages/earlier-99/reactions");
     });
   });
 

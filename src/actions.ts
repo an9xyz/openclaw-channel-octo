@@ -1083,6 +1083,11 @@ async function handleRead(params: {
       from_uid: m.from_uid,
       content,
       timestamp: m.timestamp,
+      // Expose the message id so the agent can target an earlier message with
+      // the `react` action (handleReact resolves args.messageId). Without this
+      // only the current inbound message was reachable, so "react to an earlier
+      // message" — which the read/react prompts advertise — was not possible.
+      ...(m.message_id ? { messageId: m.message_id } : {}),
     };
   });
 
