@@ -4246,3 +4246,100 @@ describe("#111 capabilities + actions", () => {
     expect(actions).not.toContain("reactions");
   });
 });
+
+// Task 11(C5): Simulate runtime real injection behavior — when target is omitted,
+// the runtime fills args.target with the same value as currentChannelId
+// ("octo:user:<space>:<uid>"). Verify send/read/react all resolve to DM + bare uid.
+describe("runtime-injected default target (omitted target path)", () => {
+  const injected = "octo:user:42:uid";
+
+  it("send: injected octo:user:<space>:<uid> resolves DM + bare uid", async () => {
+    let sentPayload: any = null;
+    globalThis.fetch = mockFetch({
+      "/v1/bot/sendMessage": async (_url, init) => {
+        sentPayload = JSON.parse(init?.body as string);
+        return jsonResponse({ message_id: 1, message_seq: 1 });
+      },
+    });
+
+    const { handleOctoMessageAction } = await import("./actions.js");
+    const result = await handleOctoMessageAction({
+      action: "send",
+      args: { message: "hi", target: injected },
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      currentChannelId: injected,
+      requesterSenderId: "uid",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(sentPayload.channel_type).toBe(ChannelType.DM);
+    expect(sentPayload.channel_id).toBe("uid");
+  });
+
+  it("read: injected octo:user:<space>:<uid> resolves DM + bare uid", async () => {
+    const fakeMessages = {
+      messages: [
+        {
+          from_uid: "peer",
+          message_id: "m1",
+          timestamp: 1709654400,
+          payload: Buffer.from(JSON.stringify({ type: 1, content: "DM msg" })).toString("base64"),
+        },
+      ],
+    };
+
+    let fetchUrl = "";
+    let fetchBody: any = null;
+    globalThis.fetch = mockFetch({
+      "/v1/bot/messages/sync": async (url, init) => {
+        fetchUrl = url;
+        fetchBody = JSON.parse(init?.body as string);
+        return jsonResponse(fakeMessages);
+      },
+    });
+
+    const { handleOctoMessageAction } = await import("./actions.js");
+    const result = await handleOctoMessageAction({
+      action: "read",
+      args: { target: injected },
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      currentChannelId: injected,
+      requesterSenderId: "uid",
+      accountId: "acct1",
+    });
+
+    expect(result.ok).toBe(true);
+    // Same-channel DM read — no cross-channel wrapper
+    const data = result.data as any;
+    expect(data.header).toBeUndefined();
+    // The API receives channel_id=bare uid, channel_type=DM
+    expect(fetchBody.channel_id).toBe("uid");
+    expect(fetchBody.channel_type).toBe(ChannelType.DM);
+  });
+
+  it("react: injected octo:user:<space>:<uid> resolves DM + bare uid", async () => {
+    let body: any = null;
+    globalThis.fetch = mockFetch({
+      "/reactions": async (_u, init) => {
+        body = init?.body ? JSON.parse(init.body as string) : null;
+        return jsonResponse({}, 200);
+      },
+    });
+
+    const { handleOctoMessageAction } = await import("./actions.js");
+    const result = await handleOctoMessageAction({
+      action: "react",
+      args: { emoji: "👀", messageId: "m1", target: injected },
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      currentChannelId: injected,
+      requesterSenderId: "uid",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(body.channel_type).toBe(ChannelType.DM);
+    expect(body.channel_id).toBe("uid");
+  });
+});
