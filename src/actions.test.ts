@@ -3482,6 +3482,36 @@ describe("parseTarget", () => {
     expect(result.channelId).toBe("grp1____topicA");
     expect(result.channelType).toBe(ChannelType.CommunityTopic);
   });
+
+  // Task 2: kind-aware parseTarget — root fix for not_group_member
+  describe("kind-aware (root-fix)", () => {
+    it("DM with space-scoped kind-tagged id → DM + bare uid", async () => {
+      const { parseTarget } = await import("./actions.js");
+      expect(parseTarget("octo:user:42:uid")).toEqual({ channelId: "uid", channelType: ChannelType.DM });
+      expect(parseTarget("octo:user:uid")).toEqual({ channelId: "uid", channelType: ChannelType.DM });
+      expect(parseTarget("user:42:uid")).toEqual({ channelId: "uid", channelType: ChannelType.DM });
+    });
+
+    it("group / topic unchanged", async () => {
+      const { parseTarget } = await import("./actions.js");
+      const known = new Set<string>(["grp1"]);
+      expect(parseTarget("octo:group:grp1", undefined, known)).toEqual({ channelId: "grp1", channelType: ChannelType.Group });
+      expect(parseTarget("group:grp1____x", undefined, known)).toEqual({ channelId: "grp1____x", channelType: ChannelType.CommunityTopic });
+    });
+
+    it("stacked prefixes route to group without inner-prefix residue", async () => {
+      const { parseTarget } = await import("./actions.js");
+      expect(parseTarget("group:octo:grp1")).toEqual({ channelId: "grp1", channelType: ChannelType.Group });
+      expect(parseTarget("octo:channel:group:grp1____x")).toEqual({ channelId: "grp1____x", channelType: ChannelType.CommunityTopic });
+    });
+
+    it("bare id still uses knownGroupIds", async () => {
+      const { parseTarget } = await import("./actions.js");
+      const known = new Set<string>(["grp1"]);
+      expect(parseTarget("octo:grp1", undefined, known)).toEqual({ channelId: "grp1", channelType: ChannelType.Group });
+      expect(parseTarget("octo:loneuid", undefined, known)).toEqual({ channelId: "loneuid", channelType: ChannelType.DM });
+    });
+  });
 });
 
 describe("resolveOutboundOctoTarget", () => {

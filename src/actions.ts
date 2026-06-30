@@ -7,7 +7,7 @@
 
 import { ChannelType, MessageType, RICH_TEXT_BLOCK_IMAGE, RICH_TEXT_BLOCK_TEXT, RICH_TEXT_IMAGE_PLACEHOLDER } from "./types.js";
 import type { MentionEntity, LogSink, RichTextBlock } from "./types.js";
-import { stripAllChannelPrefixes } from "./constants.js";
+import { stripAllChannelPrefixes, parseConversationRef, dmPeerUid } from "./constants.js";
 import {
   sendMessage,
   sendMediaMessage,
@@ -46,42 +46,25 @@ export function parseTarget(
   knownGroupIds?: Set<string>,
 ): { channelId: string; channelType: ChannelType } {
   const THREAD_SEP = "____";
+  const ref = parseConversationRef(target);
 
-  // Explicit prefixes always win
-  if (target.startsWith("group:")) {
-    const channelId = target.slice(6);
-    // groupNo____shortId → CommunityTopic
-    if (channelId.includes(THREAD_SEP)) {
-      return { channelId, channelType: ChannelType.CommunityTopic };
+  if (ref.kind === "user") {
+    // DM: delivery channelId is the bare peer uid (space-scoped id is the
+    // session identity, not the wire channel_id the server wants).
+    return { channelId: dmPeerUid(ref.id), channelType: ChannelType.DM };
+  }
+  if (ref.kind === "group") {
+    if (ref.id.includes(THREAD_SEP)) {
+      return { channelId: ref.id, channelType: ChannelType.CommunityTopic };
     }
-    return { channelId, channelType: ChannelType.Group };
+    return { channelId: ref.id, channelType: ChannelType.Group };
   }
-  // OpenClaw's delivery pipeline can emit `channel:<id>` as a parallel alias
-  // for group channels (#232 review: "channel: 支持下沉到 parseTarget"). Handle
-  // it here so every caller — outbound adapter, message tool, etc — sees
-  // consistent routing without having to normalise upstream first.
-  if (target.startsWith("channel:")) {
-    const channelId = target.slice(8);
-    if (channelId.includes(THREAD_SEP)) {
-      return { channelId, channelType: ChannelType.CommunityTopic };
-    }
-    return { channelId, channelType: ChannelType.Group };
+  // kind undefined → bare id. Thread id wins; else knownGroupIds decides.
+  if (ref.id.includes(THREAD_SEP)) {
+    return { channelId: ref.id, channelType: ChannelType.CommunityTopic };
   }
-  if (target.startsWith("user:"))
-    return { channelId: target.slice(5), channelType: ChannelType.DM };
-
-  // Strip octo: channel-namespace prefix if present
-  let bareId = target;
-  if (bareId.startsWith("octo:")) bareId = bareId.slice(5);
-
-  // Thread channel ID (groupNo____shortId)
-  if (bareId.includes(THREAD_SEP)) {
-    return { channelId: bareId, channelType: ChannelType.CommunityTopic };
-  }
-
-  // Bare ID: check knownGroupIds, also check parent group for thread context
-  const isGroup = knownGroupIds?.has(bareId) ?? false;
-  return { channelId: bareId, channelType: isGroup ? ChannelType.Group : ChannelType.DM };
+  const isGroup = knownGroupIds?.has(ref.id) ?? false;
+  return { channelId: ref.id, channelType: isGroup ? ChannelType.Group : ChannelType.DM };
 }
 
 /** Strip common prefixes to get the raw group_no */
