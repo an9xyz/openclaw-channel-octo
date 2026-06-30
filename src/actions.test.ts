@@ -2627,6 +2627,90 @@ describe("handleOctoMessageAction", () => {
   });
 
   // -----------------------------------------------------------------------
+  // group-only actions reject DM target (Task 5)
+  // -----------------------------------------------------------------------
+  describe("group-only actions reject DM target", () => {
+    const DM_TARGET = "octo:user:42:uid";
+
+    beforeEach(() => {
+      // Clear owner registry so cross-channel permission check is bypassed for self-DM
+      _clearOwnerRegistry();
+    });
+
+    it("member-info rejects octo:user:42:uid without calling group API", async () => {
+      const fetchSpy = vi.fn();
+      globalThis.fetch = fetchSpy as any;
+
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
+        action: "member-info",
+        args: { target: DM_TARGET },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        requesterSenderId: "42",
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/group/i);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it("channel-info rejects octo:user:42:uid without calling group API", async () => {
+      const fetchSpy = vi.fn();
+      globalThis.fetch = fetchSpy as any;
+
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
+        action: "channel-info",
+        args: { target: DM_TARGET },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        requesterSenderId: "42",
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/group/i);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it("group-md-read rejects octo:user:42:uid without calling group API", async () => {
+      const fetchSpy = vi.fn();
+      globalThis.fetch = fetchSpy as any;
+
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
+        action: "group-md-read",
+        args: { target: DM_TARGET },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: DM_TARGET,
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/group/i);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it("group-md-update rejects octo:user:42:uid without calling group API", async () => {
+      const fetchSpy = vi.fn();
+      globalThis.fetch = fetchSpy as any;
+
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
+        action: "group-md-update",
+        args: { target: DM_TARGET, content: "# Updated" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: DM_TARGET,
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/group/i);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  // -----------------------------------------------------------------------
   // channel-list action
   // -----------------------------------------------------------------------
   describe("channel-list — list bot groups", () => {

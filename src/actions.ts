@@ -210,6 +210,26 @@ export function resolveOutboundOctoTarget(
 }
 
 /**
+ * Resolve a group target from args, falling back to currentChannelId.
+ * Returns the group ID and whether it's a DM target (for rejection).
+ *
+ * Accepts: args.groupId, args.target (with optional prefix), or bare currentChannelId.
+ * Uses parseConversationRef for kind-aware parsing: explicit `user:` targets
+ * are identified as DMs and return isDm=true so callers can reject them.
+ */
+function resolveGroupTarget(
+  args: Record<string, unknown>,
+  currentChannelId?: string,
+): { groupNo: string; isDm: boolean } | undefined {
+  const raw = (args.groupId ?? args.target ?? args.to) as string | undefined;
+  const source = raw?.trim() || currentChannelId?.trim();
+  if (!source) return undefined;
+  const ref = parseConversationRef(source);
+  if (ref.kind === "user") return { groupNo: "", isDm: true };
+  return { groupNo: ref.id, isDm: false };
+}
+
+/**
  * Resolve the group ID from args, falling back to currentChannelId.
  * Accepts: args.groupId, args.target (with group: prefix), or bare currentChannelId.
  */
@@ -1235,12 +1255,10 @@ async function handleMemberInfo(params: {
 }): Promise<MessageActionResult> {
   const { args, apiUrl, botToken, log } = params;
 
-  const target = args.target as string | undefined;
-  if (!target) {
-    return { ok: false, error: "Missing required parameter: target" };
-  }
-
-  const { channelId } = parseTarget(target);
+  const gt = resolveGroupTarget(args);
+  if (!gt) return { ok: false, error: "Missing required parameter: groupId (or target the current group chat)" };
+  if (gt.isDm) return { ok: false, error: "This action requires a group target, not a DM (user) target" };
+  const channelId = gt.groupNo;
 
   let members;
   try {
@@ -1299,12 +1317,10 @@ async function handleChannelInfo(params: {
 }): Promise<MessageActionResult> {
   const { args, apiUrl, botToken, log } = params;
 
-  const target = args.target as string | undefined;
-  if (!target) {
-    return { ok: false, error: "Missing required parameter: target" };
-  }
-
-  const { channelId } = parseTarget(target);
+  const gt = resolveGroupTarget(args);
+  if (!gt) return { ok: false, error: "Missing required parameter: groupId (or target the current group chat)" };
+  if (gt.isDm) return { ok: false, error: "This action requires a group target, not a DM (user) target" };
+  const channelId = gt.groupNo;
 
   const info = await getGroupInfo({
     apiUrl,
@@ -1335,10 +1351,10 @@ async function handleGroupMdRead(params: {
 }): Promise<MessageActionResult> {
   const { args, apiUrl, botToken, groupMdCache, currentChannelId, log } = params;
 
-  const channelId = resolveGroupId(args, currentChannelId);
-  if (!channelId) {
-    return { ok: false, error: "Missing required parameter: groupId (or target the current group chat)" };
-  }
+  const gt = resolveGroupTarget(args, currentChannelId);
+  if (!gt) return { ok: false, error: "Missing required parameter: groupId (or target the current group chat)" };
+  if (gt.isDm) return { ok: false, error: "This action requires a group target, not a DM (user) target" };
+  const channelId = gt.groupNo;
 
   // Try cache first
   const cached = groupMdCache?.get(channelId);
@@ -1383,10 +1399,10 @@ async function handleGroupMdUpdate(params: {
 }): Promise<MessageActionResult> {
   const { args, apiUrl, botToken, groupMdCache, currentChannelId, log } = params;
 
-  const channelId = resolveGroupId(args, currentChannelId);
-  if (!channelId) {
-    return { ok: false, error: "Missing required parameter: groupId (or target the current group chat)" };
-  }
+  const gt = resolveGroupTarget(args, currentChannelId);
+  if (!gt) return { ok: false, error: "Missing required parameter: groupId (or target the current group chat)" };
+  if (gt.isDm) return { ok: false, error: "This action requires a group target, not a DM (user) target" };
+  const channelId = gt.groupNo;
 
   const content = (args.content ?? args.message ?? args.topic ?? args.desc) as string | undefined;
   if (content == null) {
