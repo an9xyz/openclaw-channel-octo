@@ -198,6 +198,30 @@ export function recordSessionAccount(accountId: string, sessionKey: string): voi
   sessionAccountMap.set(buildSessionAccountKey(id, sessionKey), id);
 }
 
+/**
+ * Build the conversation address used for To / OriginatingTo in inbound ctxPayload.
+ *
+ * - DM (isGroup=false): `${channelPrefix}:user:${sessionId}` — kind-tagged so
+ *   downstream routing can distinguish from group addresses; sessionId is kept
+ *   verbatim (may be `<space>:<uid>` or plain `<uid>`), preserving any space
+ *   prefix for multi-tenant isolation.
+ * - Group/thread (isGroup=true): `${channelPrefix}:${sessionId}` — unchanged
+ *   from current behavior.
+ *
+ * Centralized here so both To and OriginatingTo use identical logic, and tests
+ * can verify the encoding without mocking the full inbound pipeline.
+ */
+export function buildConversationAddress(
+  channelPrefix: string,
+  isGroup: boolean,
+  sessionId: string,
+): string {
+  if (isGroup) {
+    return `${channelPrefix}:${sessionId}`;
+  }
+  return `${channelPrefix}:user:${sessionId}`;
+}
+
 export type OctoStatusSink = (patch: {
   lastInboundAt?: number;
   lastOutboundAt?: number;
@@ -2422,7 +2446,7 @@ export async function handleInboundMessage(params: {
       return resolved.mediaType ? [resolved.mediaType] : undefined;
     })(),
     From: `${CHANNEL_ID}:${message.from_uid}`,
-    To: `${CHANNEL_ID}:${sessionId}`,
+    To: buildConversationAddress(CHANNEL_ID, isGroup, sessionId),
     SessionKey: route.sessionKey,
     AccountId: route.accountId,
     ChatType: isGroup ? "group" : "direct",
@@ -2438,7 +2462,7 @@ export async function handleInboundMessage(params: {
     Provider: CHANNEL_ID,
     Surface: CHANNEL_ID,
     OriginatingChannel: CHANNEL_ID,
-    OriginatingTo: `${CHANNEL_ID}:${sessionId}`,
+    OriginatingTo: buildConversationAddress(CHANNEL_ID, isGroup, sessionId),
   });
 
   await core.channel.session.recordInboundSession({

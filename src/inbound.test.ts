@@ -26,6 +26,7 @@ import {
   resolveInboundMediaList,
   resolveInboundMediaPaths,
   isRemoteMediaUrl,
+  buildConversationAddress,
   type ResolveFileResult,
 } from "./inbound.js";
 import { extractMentionUids, parseStructuredMentions } from "./mention-utils.js";
@@ -3700,5 +3701,42 @@ describe("/fork command history leak filter (regression)", () => {
     expect(() => filterApiMsgs(apiMessages)).not.toThrow();
     // None of them are fork commands, so all survive the fork filter.
     expect(filterApiMsgs(apiMessages)).toHaveLength(3);
+  });
+});
+
+/**
+ * Tests for buildConversationAddress — DM session address encoding (Task 3).
+ *
+ * DM: octo:user:<sessionId> where sessionId may be "<space>:<uid>" or "<uid>",
+ *     preserving the space prefix as-is.
+ * Group/thread: octo:<sessionId> (unchanged from current behavior).
+ */
+describe("buildConversationAddress", () => {
+  const CHANNEL_ID = "octo";
+
+  it("DM with space-scoped sessionId preserves space and adds user: kind tag", () => {
+    // spaceId=42, from_uid=uid → sessionId="42:uid"
+    const addr = buildConversationAddress(CHANNEL_ID, false, "42:uid");
+    expect(addr).toBe("octo:user:42:uid");
+  });
+
+  it("DM without space uses plain uid with user: kind tag", () => {
+    const addr = buildConversationAddress(CHANNEL_ID, false, "some_uid");
+    expect(addr).toBe("octo:user:some_uid");
+  });
+
+  it("Group uses octo: prefix without user: kind tag", () => {
+    const addr = buildConversationAddress(CHANNEL_ID, true, "grp123");
+    expect(addr).toBe("octo:grp123");
+  });
+
+  it("Community topic thread keeps groupNo____shortId format", () => {
+    const addr = buildConversationAddress(CHANNEL_ID, true, "12345____abc");
+    expect(addr).toBe("octo:12345____abc");
+  });
+
+  it("DM with complex space-id (alphanumeric) preserves full sessionId", () => {
+    const addr = buildConversationAddress(CHANNEL_ID, false, "space123:uid456");
+    expect(addr).toBe("octo:user:space123:uid456");
   });
 });
