@@ -5,9 +5,14 @@ import type {
 } from "openclaw/plugin-sdk";
 import type { ChannelOutboundContext } from "openclaw/plugin-sdk/channel-contract";
 import { createChannelMessageAdapterFromOutbound } from "openclaw/plugin-sdk/channel-message";
+// Outbound session route helper — same buildAgentSessionKey path inbound routing
+// uses, so an outbound send computes the identical session key (isomorphism).
+// NOT buildThreadAwareOutboundSessionRoute: that encodes threads as
+// `group:grp1:thread:abc`, which would NOT match inbound's `grp1____abc` peer id.
+import { buildChannelOutboundSessionRoute } from "openclaw/plugin-sdk/core";
 import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
 import { OctoConfigJsonSchema, type OctoConfig } from "./config-schema.js";
-import { CHANNEL_ID, MAX_UPLOAD_SIZE, stripAllChannelPrefixes, getChannelConfig, parseConversationRef, THREAD_ID_SEPARATOR } from "./constants.js";
+import { CHANNEL_ID, MAX_UPLOAD_SIZE, stripAllChannelPrefixes, getChannelConfig, parseConversationRef, dmPeerUid, THREAD_ID_SEPARATOR } from "./constants.js";
 import { streamToFileWithCap } from "./stream-helpers.js";
 import {
   listOctoAccountIds,
@@ -514,6 +519,36 @@ function getAvailableActions(cfg: any): string[] {
   return ["send", "read", "search", "react"];
 }
 
+/**
+ * Recover a DM peer's space-scoped identity (`"<space>:<uid>"` or bare `"<uid>"`)
+ * from an existing Octo DM `sessionKey`.
+ *
+ * Used by `resolveOutboundSessionRoute` for the bare-uid DM case: the outbound
+ * target may carry only the wire uid (no space), but the session peer.id must be
+ * the SAME space-scoped identity inbound routing keyed the conversation under,
+ * or the proactive reply spawns a fresh session.
+ *
+ * The key is built by the SDK's `buildAgentSessionKey` (same path inbound uses).
+ * Under the peer-encoding dmScopes the DM peerId is the tail after the LAST
+ * `:direct:` segment — `agent:<id>:direct:<peerId>` (per-peer),
+ * `agent:<id>:<channel>:direct:<peerId>` (per-channel-peer),
+ * `agent:<id>:<channel>:<account>:direct:<peerId>` (per-account-channel-peer).
+ * The peerId itself may contain a `:` (the `<space>:<uid>` joiner), so we split
+ * on the `:direct:` marker and keep the whole remainder verbatim.
+ *
+ * Returns undefined when the key encodes no peer — e.g. dmScope "main" collapses
+ * every DM to `agent:<id>:main`. The caller treats undefined as "cannot recover"
+ * and skips the mirror rather than writing a wrong session.
+ */
+const DM_DIRECT_MARKER = ":direct:";
+function recoverDmPeerFromSessionKey(sessionKey: string | undefined): string | undefined {
+  if (!sessionKey) return undefined;
+  const i = sessionKey.lastIndexOf(DM_DIRECT_MARKER);
+  if (i < 0) return undefined;
+  const peerId = sessionKey.slice(i + DM_DIRECT_MARKER.length).trim();
+  return peerId || undefined;
+}
+
 const meta = {
   id: "octo",
   label: "Octo",
@@ -905,6 +940,59 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
       const shortId = extractThreadShortId(id);
       if (!groupNo || !shortId) return null;
       return { id: groupNo, threadId: shortId, baseConversationId: groupNo, parentConversationCandidates: [groupNo] };
+    },
+    resolveOutboundSessionRoute: (params: any) => {
+      const ref = parseConversationRef(params.target);
+      const { channelType } = parseTarget(params.target, undefined, getKnownGroupIds());
+      const isDm = channelType === ChannelType.DM;
+
+      if (isDm) {
+        // peer.id must equal the inbound DM sessionId (`<space>:<uid>`) for the
+        // outbound key to be isomorphic with the inbound route.
+        let peerId: string;
+        if (ref.id.includes(":")) {
+          // Target already carries the space — runtime-injected current DM.
+          peerId = ref.id;
+        } else {
+          // Bare-uid target (explicit cross-DM): the space is unknown. Only the
+          // current conversation's sessionKey can supply the space-scoped
+          // identity, and only when it actually belongs to THIS peer. If it
+          // can't be recovered, or recovers a different peer, return null to
+          // skip the mirror — never write a bare-uid (wrong) session.
+          const recovered = recoverDmPeerFromSessionKey(params.currentSessionKey);
+          if (!recovered || dmPeerUid(recovered) !== ref.id) return null;
+          peerId = recovered;
+        }
+        return buildChannelOutboundSessionRoute({
+          cfg: params.cfg,
+          agentId: params.agentId,
+          channel: CHANNEL_ID,
+          accountId: params.accountId,
+          peer: { kind: "direct", id: peerId },
+          chatType: "direct",
+          from: `octo:${peerId}`,
+          to: dmPeerUid(peerId), // deliver to the bare wire uid
+        });
+      }
+
+      // group / topic: synthesize Octo's `grp1____abc` identity (parent +
+      // optional separate threadId) and use it AS the peer id, so the outbound
+      // key matches inbound (whose peer.id is the channel_id incl. `grp1____abc`).
+      // resolveOutboundOctoTarget already owns the separator-merge rules.
+      const { channelId: groupPeerId } = resolveOutboundOctoTarget(params.target, params.threadId);
+      const sep = groupPeerId.indexOf(THREAD_ID_SEPARATOR);
+      const shortId = sep >= 0 ? groupPeerId.slice(sep + THREAD_ID_SEPARATOR.length) : undefined;
+      return buildChannelOutboundSessionRoute({
+        cfg: params.cfg,
+        agentId: params.agentId,
+        channel: CHANNEL_ID,
+        accountId: params.accountId,
+        peer: { kind: "group", id: groupPeerId },
+        chatType: "group",
+        from: `octo:group:${groupPeerId}`,
+        to: groupPeerId,
+        ...(shortId ? { threadId: shortId } : {}),
+      });
     },
   },
   outbound: {

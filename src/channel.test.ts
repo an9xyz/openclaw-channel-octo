@@ -1192,3 +1192,116 @@ describe("resolveSessionConversation", () => {
     expect(rsc("grp1____")).toBeNull();  // missing shortId
   });
 });
+
+// ─── resolveOutboundSessionRoute — outbound/inbound session isomorphism ──────
+//
+// The whole point of this hook is that an outbound send computes the SAME
+// session key the inbound router would compute for that conversation, so a
+// proactive reply lands in the existing thread rather than spawning a fresh
+// session. The contract: outbound `baseSessionKey` === inbound route sessionKey
+// for the same peer. Both sides go through the SAME `buildAgentSessionKey`
+// (inbound's resolveAgentRoute calls it; our hook does via
+// buildChannelOutboundSessionRoute), so isomorphism ⟺ identical `peer`.
+//
+// `testCfg` uses dmScope "per-channel-peer" so DM peer IDs are actually encoded
+// into the session key — otherwise the default "main" scope collapses every DM
+// to `agent:<id>:main` and the bare-uid recover path can't be exercised.
+describe("resolveOutboundSessionRoute", () => {
+  // Inbound oracle: the real SDK key builder. Inbound peer.id == octo sessionId
+  // (DM: <space>:<uid> or bare <uid>; group/topic: channel_id incl grp1____abc).
+  const realResolveAgentRoute = (p: {
+    cfg: any; channel: string; accountId: string;
+    peer: { kind: "direct" | "group" | "channel"; id: string };
+  }) => {
+    const { buildAgentSessionKey } = require("openclaw/plugin-sdk/core");
+    return {
+      sessionKey: buildAgentSessionKey({
+        agentId: "a1",
+        channel: p.channel,
+        accountId: p.accountId,
+        peer: p.peer,
+        dmScope: p.cfg.session?.dmScope,
+        identityLinks: p.cfg.session?.identityLinks,
+      }),
+    };
+  };
+
+  const testCfg: any = { session: { dmScope: "per-channel-peer" } };
+
+  // Generate a real DM currentSessionKey for a (uid, space) pair through the
+  // SAME cfg + key builder the runtime uses — never hand-built, so the recover
+  // test can't be more optimistic than production. space "" → bare-uid DM.
+  const someDmSessionKeyForUid = (uid: string, space: string) => {
+    const id = space ? `${space}:${uid}` : uid;
+    return realResolveAgentRoute({
+      cfg: testCfg, channel: "octo", accountId: "acc",
+      peer: { kind: "direct", id },
+    }).sessionKey;
+  };
+
+  let ros: (target: string, extra?: Record<string, unknown>) => Promise<any>;
+  beforeEach(async () => {
+    vi.resetModules();
+    const { octoPlugin } = await import("./channel.js");
+    ros = (target: string, extra: Record<string, unknown> = {}) =>
+      octoPlugin.messaging!.resolveOutboundSessionRoute!({
+        cfg: testCfg, agentId: "a1", accountId: "acc", channel: "octo", target, ...extra,
+      } as any);
+  });
+
+  it("DM: to=bare uid, peer.id=space-scoped, chatType=direct", async () => {
+    const r = await ros("octo:user:42:uid");
+    expect(r!.to).toBe("uid");          // delivery target = bare uid
+    expect(r!.peer.id).toBe("42:uid");  // session identity = space-scoped
+    expect(r!.chatType).toBe("direct");
+  });
+
+  it("group / topic → group chatType", async () => {
+    expect((await ros("octo:group:grp1"))!.chatType).toBe("group");
+    expect((await ros("octo:group:grp1____abc"))!.chatType).toBe("group");
+  });
+
+  it("topic: BOTH encoded id and separate threadId give peer.id=grp1____abc + route.threadId=abc", async () => {
+    const a = await ros("octo:group:grp1____abc");        // thread encoded in target
+    const b = await ros("octo:group:grp1", { threadId: "abc" }); // parent + separate threadId
+    expect(a!.peer.id).toBe("grp1____abc");
+    expect(b!.peer.id).toBe("grp1____abc");
+    expect(a!.threadId).toBe("abc");
+    expect(b!.threadId).toBe("abc");
+    expect(a!.baseSessionKey).toBe(b!.baseSessionKey); // same session
+  });
+
+  it("isomorphic with inbound resolveAgentRoute (real SDK, no mock)", async () => {
+    const cases: Array<{ sessionId: string; isGroup: boolean; target: string; extra?: any }> = [
+      { sessionId: "uid",         isGroup: false, target: "octo:user:uid",
+        extra: { currentSessionKey: someDmSessionKeyForUid("uid", "") } }, // single-space bare uid
+      { sessionId: "42:uid",      isGroup: false, target: "octo:user:42:uid" },
+      { sessionId: "grp1",        isGroup: true,  target: "octo:group:grp1" },
+      { sessionId: "grp1____abc", isGroup: true,  target: "octo:group:grp1____abc" },
+      { sessionId: "grp1____abc", isGroup: true,  target: "octo:group:grp1", extra: { threadId: "abc" } },
+    ];
+    for (const c of cases) {
+      const inboundKey = realResolveAgentRoute({
+        cfg: testCfg, channel: "octo", accountId: "acc",
+        peer: { kind: c.isGroup ? "group" : "direct", id: c.sessionId },
+      }).sessionKey;
+      const out = await ros(c.target, c.extra ?? {});
+      expect(out, `case ${c.target}`).not.toBeNull();
+      expect(out!.baseSessionKey, `case ${c.target}`).toBe(inboundKey);
+    }
+  });
+
+  it("DM returns null when bare-uid target cannot recover space from currentSessionKey", async () => {
+    // bare user:other, no currentSessionKey → cannot determine space-scoped id → null
+    expect(await ros("user:other")).toBeNull();
+    // currentSessionKey belongs to a different peer (uid, space 42); dmPeerUid
+    // of the recovered identity != "other" → still null (never write a wrong session)
+    expect(await ros("user:other", { currentSessionKey: someDmSessionKeyForUid("uid", "42") })).toBeNull();
+  });
+
+  it("DM recovers space from currentSessionKey when bare-uid target IS the current peer", async () => {
+    const r = await ros("user:uid", { currentSessionKey: someDmSessionKeyForUid("uid", "42") });
+    expect(r!.peer.id).toBe("42:uid");
+    expect(r!.to).toBe("uid");
+  });
+});
