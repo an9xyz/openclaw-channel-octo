@@ -1186,4 +1186,9 @@ describe("resolveSessionConversation", () => {
     expect(rsc("grp1")).toBeNull();
     expect(rsc("")).toBeNull();
   });
+
+  it("returns null for malformed thread-id with missing parts", () => {
+    expect(rsc("____abc")).toBeNull();   // missing groupNo
+    expect(rsc("grp1____")).toBeNull();  // missing shortId
+  });
 });
