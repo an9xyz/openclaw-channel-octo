@@ -359,10 +359,13 @@ async function handleReact(params: {
     log?.info?.(`octo: added reaction ${emoji} to ${messageId}`);
     return { ok: true, data: { added: emoji, messageId } };
   } catch (err) {
+    // Debug diagnostic: reaction failures are most often routing-misjudgment
+    // (wrong channelId/channelType resolved for the target), which is hard to
+    // triage from the bare error alone. Keep the resolved route context.
+    log?.debug?.(`octo: react failed emoji=${emoji} messageId=${messageId} channelId=${channelId} channelType=${channelType}: ${(err as Error).message}`);
     return { ok: false, error: (err as Error).message };
   }
 }
-
 // ---------------------------------------------------------------------------
 // send
 // ---------------------------------------------------------------------------
