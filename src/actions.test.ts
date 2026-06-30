@@ -4101,12 +4101,9 @@ describe("handleOctoMessageAction — react", () => {
     expect(url).toContain("/v1/bot/messages/inbound-msg-77/reactions");
   });
 
-  it("react in a DM corrects target to user:<peer> (DM currentChannelId is octo:<peer>)", async () => {
-    // Regression (real DM shape, confirmed in runtime): the runtime hands
-    // currentChannelId as `octo:<peerUid>`. resolveOutboundOctoTarget's prefix
-    // normalization would turn that into `group:<peerUid>` → channel_type=2 →
-    // server not_group_member. The fix detects bare==peer (requesterSenderId)
-    // and forces `user:<peer>` so it routes as a DM (channel_type=1).
+  it("react in a DM via kind-tagged currentChannelId (no after-the-fact correction)", async () => {
+    // After Task 6: parseTarget/resolveOutboundOctoTarget already handle
+    // octo:user:<space>:<uid> → DM + bare uid. No requesterSenderId correction needed.
     let body: any = null;
     globalThis.fetch = mockFetch({
       "/reactions": async (_u, init) => {
@@ -4120,20 +4117,17 @@ describe("handleOctoMessageAction — react", () => {
       args: { emoji: "👀", messageId: "m-dm-1" },
       apiUrl: "http://localhost:8090",
       botToken: "test-token",
-      currentChannelId: "octo:peerUid", // real DM shape from runtime
-      requesterSenderId: "peerUid",
+      currentChannelId: "octo:user:42:uid",
+      requesterSenderId: "uid",
     });
     expect(result.ok).toBe(true);
     expect(body.channel_type).toBe(ChannelType.DM); // 1, not group(2)
-    expect(body.channel_id).toBe("peerUid"); // routed to the peer as a DM
+    expect(body.channel_id).toBe("uid"); // routed to the peer as a DM
   });
 
-  it("react in a DM when the runtime ALSO fills args.target with the ambient octo:<peer> (real case)", async () => {
-    // Confirmed in runtime: the message tool fills args.target with the current
-    // conversation id, so explicitTarget="octo:<peer>" is set even though the
-    // agent didn't deliberately pick a cross-channel target. The DM correction
-    // must NOT be gated on `!explicitTarget` — it must still rewrite to
-    // user:<peer>. (This is the exact failure that returned not_group_member.)
+  it("react in a DM when the runtime ALSO fills args.target with the ambient octo:user:42:uid (real case)", async () => {
+    // After Task 6: parseTarget/resolveOutboundOctoTarget already handle
+    // kind-tagged currentChannelId. No requesterSenderId correction needed.
     let body: any = null;
     globalThis.fetch = mockFetch({
       "/reactions": async (_u, init) => {
@@ -4144,18 +4138,19 @@ describe("handleOctoMessageAction — react", () => {
     const { handleOctoMessageAction } = await import("./actions.js");
     const result = await handleOctoMessageAction({
       action: "react",
-      args: { emoji: "👀", messageId: "m-dm-real", target: "octo:peerUid" },
+      args: { emoji: "👀", messageId: "m-dm-real", target: "octo:user:42:uid" },
       apiUrl: "http://localhost:8090",
       botToken: "test-token",
-      currentChannelId: "octo:peerUid",
-      requesterSenderId: "peerUid",
+      currentChannelId: "octo:user:42:uid",
+      requesterSenderId: "uid",
     });
     expect(result.ok).toBe(true);
     expect(body.channel_type).toBe(ChannelType.DM); // 1, not group(2)
-    expect(body.channel_id).toBe("peerUid");
+    expect(body.channel_id).toBe("uid");
   });
 
-  it("react in a DM with space-prefixed currentChannelId (octo:<space>:<peer>) still corrects", async () => {
+  it("react in a DM with space-prefixed currentChannelId (octo:user:<space>:<peer>) still corrects", async () => {
+    // After Task 6: kind-tagged form already handled by resolveOutboundOctoTarget.
     let body: any = null;
     globalThis.fetch = mockFetch({
       "/reactions": async (_u, init) => {
@@ -4169,12 +4164,12 @@ describe("handleOctoMessageAction — react", () => {
       args: { emoji: "👀", messageId: "m-dm-1b" },
       apiUrl: "http://localhost:8090",
       botToken: "test-token",
-      currentChannelId: "octo:space123:peerUid",
-      requesterSenderId: "peerUid",
+      currentChannelId: "octo:user:space123:uid",
+      requesterSenderId: "uid",
     });
     expect(result.ok).toBe(true);
     expect(body.channel_type).toBe(ChannelType.DM);
-    expect(body.channel_id).toBe("peerUid");
+    expect(body.channel_id).toBe("uid");
   });
 
   it("react with an explicit DM target is NOT overridden by the peer correction", async () => {

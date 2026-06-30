@@ -292,7 +292,7 @@ export async function handleOctoMessageAction(params: {
     case "group-md-update":
       return handleGroupMdUpdate({ args, apiUrl, botToken, groupMdCache, currentChannelId, log });
     case "react":
-      return handleReact({ args, apiUrl, botToken, currentChannelId, threadId, currentMessageId, requesterSenderId, log });
+      return handleReact({ args, apiUrl, botToken, currentChannelId, threadId, currentMessageId, log });
     // 群管理操作（create-group/update-group/add-members/remove-members）
     // 统一通过 octo_management tool 入口，不走 message action
     default:
@@ -311,10 +311,9 @@ async function handleReact(params: {
   currentChannelId?: string;
   threadId?: string | number | null;
   currentMessageId?: string;
-  requesterSenderId?: string;
   log?: LogSink;
 }): Promise<MessageActionResult> {
-  const { args, apiUrl, botToken, currentChannelId, threadId, currentMessageId, requesterSenderId, log } = params;
+  const { args, apiUrl, botToken, currentChannelId, threadId, currentMessageId, log } = params;
 
   // messageId: explicit arg wins; otherwise fall back to the current inbound
   // turn's message id (forwarded from toolContext.currentMessageId). The id is
@@ -342,52 +341,6 @@ async function handleReact(params: {
     return { ok: false, error: "Missing or empty required parameter: target (and no current channel context)" };
   }
 
-  // DM peer correction — MUST run BEFORE resolveOutboundOctoTarget.
-  //
-  // In a DM the runtime hands us currentChannelId as `octo:<peerUid>` (or
-  // `octo:<spaceId>:<peerUid>`) — it's the conversation's `To`, derived from
-  // the inbound from_uid. resolveOutboundOctoTarget → normalizeOutboundChannelPrefix
-  // turns ANY `octo:`/`channel:`-prefixed bare id that isn't `user:`-prefixed
-  // into `group:<bare>`, so `octo:<peer>` becomes `group:<peer>` and parseTarget
-  // returns channelType=Group → the server runs a group-membership check and
-  // rejects with not_group_member. (A post-resolve DM check can't help: the
-  // mis-classification already happened at the prefix step.)
-  //
-  // Fix: when the agent didn't pin an explicit target and the bare
-  // currentChannelId resolves to the trusted requesterSenderId (the DM peer for
-  // this turn — bare == peer, or `<space>:<peer>`), force the canonical DM form
-  // `user:<peer>` so the resolver routes it as a DM (channel_type=1) to the peer.
-  // DM peer correction — MUST run BEFORE resolveOutboundOctoTarget, and must
-  // NOT be gated on "no explicit target". The runtime fills args.target with the
-  // current conversation id, which in a DM is `octo:<peer>` (or
-  // `octo:<space>:<peer>`) — so explicitTarget is set, but it's just the ambient
-  // DM, not a deliberate cross-channel target. resolveOutboundOctoTarget →
-  // normalizeOutboundChannelPrefix would rewrite that `octo:<peer>` into
-  // `group:<peer>` → channelType=Group → server not_group_member.
-  //
-  // Rule: whatever the resolved target is (explicit arg OR currentChannelId),
-  // if its bare form is the DM peer (requesterSenderId — bare==peer, or
-  // `<space>:<peer>`), force `user:<peer>` so it routes as a DM (channel_type=1)
-  // to the peer. A deliberate cross-target (`group:<gid>`, `user:<other>`) has a
-  // bare that != peer, so it's left untouched.
-  const peer = requesterSenderId?.trim();
-  if (peer && target) {
-    const bare = stripAllChannelPrefixes(target.trim());
-    if (bare === peer || bare.endsWith(`:${peer}`)) {
-      log?.info?.(`octo: react DM target corrected ${target} → user:${peer}`);
-      target = `user:${peer}`;
-    }
-  }
-
-  // TEMP diagnostic — surface the REAL currentChannelId/peer so the DM
-  // correction can be tuned to the actual runtime shape.
-  console.log(
-    `[octo] react DM-check — currentChannelId=${JSON.stringify(currentChannelId)} ` +
-    `requesterSenderId=${JSON.stringify(requesterSenderId)} ` +
-    `bare=${JSON.stringify(currentChannelId ? stripAllChannelPrefixes(currentChannelId.trim()) : null)} ` +
-    `explicitTarget=${JSON.stringify(explicitTarget)} → target=${JSON.stringify(target)}`,
-  );
-
   let channelId: string;
   let channelType: ChannelType;
   try {
@@ -395,7 +348,6 @@ async function handleReact(params: {
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
-  console.log(`[octo] react resolved → channelId=${channelId} channelType=${channelType} (1=DM,2=Group,5=Topic)`);
 
   try {
     if (remove) {
@@ -407,7 +359,6 @@ async function handleReact(params: {
     log?.info?.(`octo: added reaction ${emoji} to ${messageId}`);
     return { ok: true, data: { added: emoji, messageId } };
   } catch (err) {
-    console.log(`[octo] react FAILED — channelId=${channelId} channelType=${channelType} msg=${messageId}: ${(err as Error).message}`);
     return { ok: false, error: (err as Error).message };
   }
 }
