@@ -222,6 +222,29 @@ export function buildConversationAddress(
   return `${channelPrefix}:user:${sessionId}`;
 }
 
+/**
+ * Resolve the base reply target for a non-OBO inbound message.
+ *
+ * DM messages reply to the bare from_uid with ChannelType.DM.
+ * Group messages reply to channel_id with the group type fallback.
+ *
+ * This is extracted as a pure function so the reply-routing logic can be
+ * unit-tested in isolation (Task 7 — assert Task 3 conversation-id encoding
+ * does not affect reply paths).
+ */
+export function resolveReplyTarget(isGroup: boolean, channelId: string | undefined, fromUid: string, channelType?: number): { replyChannelId: string; replyChannelType: ChannelType } {
+  if (isGroup) {
+    return {
+      replyChannelId: channelId!,
+      replyChannelType: (channelType ?? ChannelType.Group) as ChannelType,
+    };
+  }
+  return {
+    replyChannelId: fromUid,
+    replyChannelType: ChannelType.DM,
+  };
+}
+
 export type OctoStatusSink = (patch: {
   lastInboundAt?: number;
   lastOutboundAt?: number;
@@ -2521,8 +2544,9 @@ export async function handleInboundMessage(params: {
     }
     log?.info?.(`octo: OBO v2 detected — reply target=${replyChannelId} type=${replyChannelType} respondAs=${effectiveOnBehalfOf} payloadRespondAs=${oboV2RespondAs} originFrom=${oboV2OriginFromUid}`);
   } else {
-    replyChannelId = isGroup ? message.channel_id! : message.from_uid;
-    replyChannelType = isGroup ? (message.channel_type ?? ChannelType.Group) : ChannelType.DM;
+    const replyTarget = resolveReplyTarget(isGroup, message.channel_id, message.from_uid, message.channel_type);
+    replyChannelId = replyTarget.replyChannelId;
+    replyChannelType = replyTarget.replyChannelType;
     // Persona clone: only reply as grantor when triggered by @所有人 (mention.humans=1).
     // When the bot is directly mentioned (@James, @AI), respond as itself.
     effectiveOnBehalfOf = (isGroup && triggeredByMentionHumans && account.config.onBehalfOf) ? account.config.onBehalfOf : undefined;

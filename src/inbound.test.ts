@@ -27,6 +27,7 @@ import {
   resolveInboundMediaPaths,
   isRemoteMediaUrl,
   buildConversationAddress,
+  resolveReplyTarget,
   type ResolveFileResult,
 } from "./inbound.js";
 import { extractMentionUids, parseStructuredMentions } from "./mention-utils.js";
@@ -3738,5 +3739,40 @@ describe("buildConversationAddress", () => {
   it("DM with complex space-id (alphanumeric) preserves full sessionId", () => {
     const addr = buildConversationAddress(CHANNEL_ID, false, "space123:uid456");
     expect(addr).toBe("octo:user:space123:uid456");
+  });
+});
+
+/**
+ * Tests for resolveReplyTarget — reply target resolution for non-OBO messages (Task 7).
+ *
+ * Task 3 changed DM session address encoding (To/OriginatingTo), but the reply
+ * path must remain unaffected: DM inbound replyChannelId stays bare from_uid,
+ * replyChannelType stays DM.
+ */
+describe("resolveReplyTarget", () => {
+  it("DM (isGroup=false) replies to bare from_uid with ChannelType.DM", () => {
+    const result = resolveReplyTarget(false, "some-channel-id", "user123", undefined);
+    expect(result.replyChannelId).toBe("user123");
+    expect(result.replyChannelType).toBe(ChannelType.DM);
+  });
+
+  it("group (isGroup=true) replies to channel_id with provided channel_type", () => {
+    const result = resolveReplyTarget(true, "grp456", "user789", ChannelType.Group);
+    expect(result.replyChannelId).toBe("grp456");
+    expect(result.replyChannelType).toBe(ChannelType.Group);
+  });
+
+  it("group falls back to ChannelType.Group when channel_type is undefined", () => {
+    const result = resolveReplyTarget(true, "grp456", "user789", undefined);
+    expect(result.replyChannelId).toBe("grp456");
+    expect(result.replyChannelType).toBe(ChannelType.Group);
+  });
+
+  it("group preserves thread channel_type (not overridden)", () => {
+    // Community topic threads use a different numeric type; ensure we pass it through.
+    const threadType = 3; // hypothetical thread-specific type
+    const result = resolveReplyTarget(true, "12345____abc", "user789", threadType);
+    expect(result.replyChannelId).toBe("12345____abc");
+    expect(result.replyChannelType).toBe(threadType as ChannelType);
   });
 });
