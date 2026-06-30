@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { stripAllChannelPrefixes } from "./constants.js";
+import { stripAllChannelPrefixes, stripOctoNamespacePrefix, parseConversationRef, dmPeerUid } from "./constants.js";
 
 describe("stripAllChannelPrefixes", () => {
   it("strips octo: prefix", () => {
@@ -52,5 +52,41 @@ describe("stripAllChannelPrefixes", () => {
     for (const id of ["grp1", "octo:grp1", "channel:grp1____topicA", "octo:group:grp1"]) {
       expect(stripAllChannelPrefixes(stripAllChannelPrefixes(id))).toBe(stripAllChannelPrefixes(id));
     }
+  });
+});
+
+describe("stripOctoNamespacePrefix", () => {
+  it("strips only octo: namespace, keeps kind prefixes", () => {
+    expect(stripOctoNamespacePrefix("octo:group:grp1")).toBe("group:grp1");
+    expect(stripOctoNamespacePrefix("octo:octo:x")).toBe("x");
+    expect(stripOctoNamespacePrefix("group:grp1")).toBe("group:grp1");
+    expect(stripOctoNamespacePrefix("octo:user:42:uid")).toBe("user:42:uid");
+  });
+});
+
+describe("parseConversationRef", () => {
+  it("parses DM keeping space in id", () => {
+    expect(parseConversationRef("octo:user:42:uid")).toEqual({ kind: "user", id: "42:uid" });
+    expect(parseConversationRef("octo:user:uid")).toEqual({ kind: "user", id: "uid" });
+  });
+  it("parses group / topic", () => {
+    expect(parseConversationRef("octo:group:grp1")).toEqual({ kind: "group", id: "grp1" });
+    expect(parseConversationRef("group:grp1____x")).toEqual({ kind: "group", id: "grp1____x" });
+  });
+  it("normalises channel→group and peels stacked prefixes", () => {
+    expect(parseConversationRef("channel:octo:grp1")).toEqual({ kind: "group", id: "grp1" });
+    expect(parseConversationRef("group:octo:grp1")).toEqual({ kind: "group", id: "grp1" });
+    expect(parseConversationRef("octo:channel:group:grp1____x")).toEqual({ kind: "group", id: "grp1____x" });
+  });
+  it("returns undefined kind for bare id", () => {
+    expect(parseConversationRef("octo:grp1")).toEqual({ kind: undefined, id: "grp1" });
+    expect(parseConversationRef("")).toEqual({ kind: undefined, id: "" });
+  });
+});
+
+describe("dmPeerUid", () => {
+  it("takes the last colon segment (uid is colon-free in octo)", () => {
+    expect(dmPeerUid("42:uid")).toBe("uid");
+    expect(dmPeerUid("uid")).toBe("uid");
   });
 });

@@ -96,3 +96,61 @@ export function ensureChannelConfigObject(cfg: any): any {
   cfg.channels[CHANNEL_ID].accounts ??= {};
   return cfg.channels[CHANNEL_ID];
 }
+
+/** Conversation kind used by routing / session helpers. */
+export type ConversationKind = "user" | "group";
+
+/**
+ * Strip ONLY the provider namespace `octo:` (incl. stacked `octo:octo:`).
+ * Unlike stripAllChannelPrefixes this deliberately does NOT strip kind
+ * prefixes (`user:`/`group:`/`channel:`), so kind-aware parsing can read the
+ * kind afterwards instead of losing it.
+ */
+export function stripOctoNamespacePrefix(s: string): string {
+  let out = (s ?? "").trim();
+  while (true) {
+    const next = out.replace(/^octo:/i, "");
+    if (next === out) return out;
+    out = next;
+  }
+}
+
+/**
+ * Parse a channelId / target into its conversation kind + bare id.
+ *
+ * Loop-peels leading recognised tokens to canonicalise stacked runtime forms
+ * (multi-bot / agent-tool routing can produce `group:octo:grp1`,
+ * `octo:channel:group:grp1____x`): each iteration drops a leading `octo:`
+ * (namespace) or consumes a kind prefix. The FIRST kind seen wins (the
+ * outermost prefix expresses intent); `channel` is a group-class alias and
+ * normalises to `group`. `id` is the remaining tail kept verbatim — for a DM
+ * that is the space-scoped `<space>:<uid>` session identity, for a thread the
+ * `<groupNo>____<shortId>`. Bare uid extraction is a separate step (dmPeerUid).
+ */
+export function parseConversationRef(s: string): { kind: ConversationKind | undefined; id: string } {
+  let rest = (s ?? "").trim();
+  let kind: ConversationKind | undefined;
+  while (true) {
+    const m = /^(octo|user|group|channel):/i.exec(rest);
+    if (!m) break;
+    const tok = m[1].toLowerCase();
+    rest = rest.slice(m[0].length);
+    if (tok !== "octo" && kind === undefined) {
+      kind = tok === "user" ? "user" : "group"; // channel → group alias
+    }
+  }
+  return { kind, id: rest };
+}
+
+/**
+ * Extract the bare delivery uid from a DM id. Octo uids are colon-free
+ * (32-hex user uids, `<prefix>_bot` bot uids, fixed system uids like
+ * `botfather`); the only colon in a DM id comes from the `${spaceId}:${uid}`
+ * session joiner (src/inbound.ts), so the peer uid is the last colon segment.
+ * Used for the server delivery target + same-channel comparison ONLY — NOT for
+ * the WS2 session peer.id, which must keep the space-scoped identity.
+ */
+export function dmPeerUid(id: string): string {
+  const i = id.lastIndexOf(":");
+  return i >= 0 ? id.slice(i + 1) : id;
+}
