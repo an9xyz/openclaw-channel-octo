@@ -1116,3 +1116,48 @@ describe("octoSetupAdapter.validateInput token prefix", () => {
     expect(validate({ baseUrl: "https://im.example.com/api" })).toBeUndefined();
   });
 });
+
+describe("messaging.normalizeTarget canonical output", () => {
+  let nt: (s: string) => string;
+  beforeEach(async () => {
+    const { octoPlugin } = await import("./channel.js");
+    nt = (s: string) => octoPlugin.messaging!.normalizeTarget!(s);
+  });
+
+  it("canonicalises kind-tagged targets, strips octo namespace, channel→group", () => {
+    expect(nt("octo:user:42:uid")).toBe("user:42:uid");
+    expect(nt("octo:group:grp1")).toBe("group:grp1");
+    expect(nt("channel:grp1____x")).toBe("group:grp1____x");
+    expect(nt("group:octo:grp1")).toBe("group:grp1");
+  });
+
+  it("leaves a bare id as-is (knownGroupIds decides later)", () => {
+    expect(nt("grp1")).toBe("grp1");
+  });
+
+  it("integration: normalizeTarget → parseTarget stable for group forms", async () => {
+    const { parseTarget } = await import("./actions.js");
+    // Both octo:group:grp1 and group:octo:grp1 should normalize to group:grp1
+    // and parseTarget should recognise them as Group
+    const norm1 = nt("octo:group:grp1");
+    const norm2 = nt("group:octo:grp1");
+    expect(norm1).toBe("group:grp1");
+    expect(norm2).toBe("group:grp1");
+    const p1 = parseTarget(norm1, undefined, new Set(["grp1"]));
+    const p2 = parseTarget(norm2, undefined, new Set(["grp1"]));
+    expect(p1.channelType).toBe(2); // ChannelType.Group
+    expect(p2.channelType).toBe(2);
+    expect(p1.channelId).toBe("grp1");
+    expect(p2.channelId).toBe("grp1");
+  });
+
+  it("integration: normalizeTarget octo:user:42:uid → DM + bare uid", async () => {
+    const { parseTarget } = await import("./actions.js");
+    const norm = nt("octo:user:42:uid");
+    expect(norm).toBe("user:42:uid");
+    const p = parseTarget(norm, undefined, new Set());
+    expect(p.channelType).toBe(1); // ChannelType.DM
+    // dmPeerUid extracts the last colon segment: "42:uid" → "uid"
+    expect(p.channelId).toBe("uid");
+  });
+});

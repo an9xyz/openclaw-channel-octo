@@ -7,7 +7,7 @@ import type { ChannelOutboundContext } from "openclaw/plugin-sdk/channel-contrac
 import { createChannelMessageAdapterFromOutbound } from "openclaw/plugin-sdk/channel-message";
 import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
 import { OctoConfigJsonSchema, type OctoConfig } from "./config-schema.js";
-import { CHANNEL_ID, MAX_UPLOAD_SIZE, stripAllChannelPrefixes, getChannelConfig } from "./constants.js";
+import { CHANNEL_ID, MAX_UPLOAD_SIZE, stripAllChannelPrefixes, getChannelConfig, parseConversationRef } from "./constants.js";
 import { streamToFileWithCap } from "./stream-helpers.js";
 import {
   listOctoAccountIds,
@@ -888,7 +888,12 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
     }),
   },
   messaging: {
-    normalizeTarget: (target) => target.trim(),
+    normalizeTarget: (target) => {
+      const ref = parseConversationRef(target);
+      if (ref.kind === "user") return `user:${ref.id}`;
+      if (ref.kind === "group") return `group:${ref.id}`;
+      return ref.id; // bare id, let parseTarget/knownGroupIds decide
+    },
     targetResolver: {
       looksLikeId: (input) => Boolean(input.trim()),
       hint: "<userId or channelId>",
