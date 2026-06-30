@@ -354,14 +354,36 @@ async function handleReact(params: {
   // currentChannelId resolves to the trusted requesterSenderId (the DM peer for
   // this turn — bare == peer, or `<space>:<peer>`), force the canonical DM form
   // `user:<peer>` so the resolver routes it as a DM (channel_type=1) to the peer.
+  // DM peer correction — MUST run BEFORE resolveOutboundOctoTarget, and must
+  // NOT be gated on "no explicit target". The runtime fills args.target with the
+  // current conversation id, which in a DM is `octo:<peer>` (or
+  // `octo:<space>:<peer>`) — so explicitTarget is set, but it's just the ambient
+  // DM, not a deliberate cross-channel target. resolveOutboundOctoTarget →
+  // normalizeOutboundChannelPrefix would rewrite that `octo:<peer>` into
+  // `group:<peer>` → channelType=Group → server not_group_member.
+  //
+  // Rule: whatever the resolved target is (explicit arg OR currentChannelId),
+  // if its bare form is the DM peer (requesterSenderId — bare==peer, or
+  // `<space>:<peer>`), force `user:<peer>` so it routes as a DM (channel_type=1)
+  // to the peer. A deliberate cross-target (`group:<gid>`, `user:<other>`) has a
+  // bare that != peer, so it's left untouched.
   const peer = requesterSenderId?.trim();
-  if (!explicitTarget && peer && currentChannelId) {
-    const bare = stripAllChannelPrefixes(currentChannelId.trim());
+  if (peer && target) {
+    const bare = stripAllChannelPrefixes(target.trim());
     if (bare === peer || bare.endsWith(`:${peer}`)) {
-      log?.info?.(`octo: react DM target corrected ${currentChannelId} → user:${peer}`);
+      log?.info?.(`octo: react DM target corrected ${target} → user:${peer}`);
       target = `user:${peer}`;
     }
   }
+
+  // TEMP diagnostic — surface the REAL currentChannelId/peer so the DM
+  // correction can be tuned to the actual runtime shape.
+  console.log(
+    `[octo] react DM-check — currentChannelId=${JSON.stringify(currentChannelId)} ` +
+    `requesterSenderId=${JSON.stringify(requesterSenderId)} ` +
+    `bare=${JSON.stringify(currentChannelId ? stripAllChannelPrefixes(currentChannelId.trim()) : null)} ` +
+    `explicitTarget=${JSON.stringify(explicitTarget)} → target=${JSON.stringify(target)}`,
+  );
 
   let channelId: string;
   let channelType: ChannelType;
@@ -370,6 +392,7 @@ async function handleReact(params: {
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
+  console.log(`[octo] react resolved → channelId=${channelId} channelType=${channelType} (1=DM,2=Group,5=Topic)`);
 
   try {
     if (remove) {
@@ -381,7 +404,7 @@ async function handleReact(params: {
     log?.info?.(`octo: added reaction ${emoji} to ${messageId}`);
     return { ok: true, data: { added: emoji, messageId } };
   } catch (err) {
-    log?.info?.(`octo: react failed — channelId=${channelId} channelType=${channelType} msg=${messageId}: ${(err as Error).message}`);
+    console.log(`[octo] react FAILED — channelId=${channelId} channelType=${channelType} msg=${messageId}: ${(err as Error).message}`);
     return { ok: false, error: (err as Error).message };
   }
 }

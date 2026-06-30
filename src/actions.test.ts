@@ -3923,6 +3923,33 @@ describe("handleOctoMessageAction — react", () => {
     expect(body.channel_id).toBe("peerUid"); // routed to the peer as a DM
   });
 
+  it("react in a DM when the runtime ALSO fills args.target with the ambient octo:<peer> (real case)", async () => {
+    // Confirmed in runtime: the message tool fills args.target with the current
+    // conversation id, so explicitTarget="octo:<peer>" is set even though the
+    // agent didn't deliberately pick a cross-channel target. The DM correction
+    // must NOT be gated on `!explicitTarget` — it must still rewrite to
+    // user:<peer>. (This is the exact failure that returned not_group_member.)
+    let body: any = null;
+    globalThis.fetch = mockFetch({
+      "/reactions": async (_u, init) => {
+        body = init?.body ? JSON.parse(init.body as string) : null;
+        return jsonResponse({}, 200);
+      },
+    });
+    const { handleOctoMessageAction } = await import("./actions.js");
+    const result = await handleOctoMessageAction({
+      action: "react",
+      args: { emoji: "👀", messageId: "m-dm-real", target: "octo:peerUid" },
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      currentChannelId: "octo:peerUid",
+      requesterSenderId: "peerUid",
+    });
+    expect(result.ok).toBe(true);
+    expect(body.channel_type).toBe(ChannelType.DM); // 1, not group(2)
+    expect(body.channel_id).toBe("peerUid");
+  });
+
   it("react in a DM with space-prefixed currentChannelId (octo:<space>:<peer>) still corrects", async () => {
     let body: any = null;
     globalThis.fetch = mockFetch({
