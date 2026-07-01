@@ -3702,3 +3702,254 @@ describe("/fork command history leak filter (regression)", () => {
     expect(filterApiMsgs(apiMessages)).toHaveLength(3);
   });
 });
+
+// ─── 长任务 live 状态 edit-in-place（双轨：typing + status）────────────────
+//
+// handleInboundMessage 没有独立的完整 harness（见本文件顶部注释）。这里用与
+// inbound.ts 内联实现同构的最小 harness 复现 status 轨控制流，驱动真实的
+// sendMessage/editMessage（真 fetch mock），验证 GH#146 的关键不变量：
+//   1. edit 失败(fetch reject)不阻塞正文 sendMessage；
+//   2. OBO 会话占位 sendMessage 参数不含 onBehalfOf（占位恒 bot 本体身份）；
+//   3. finalize 幂等 + 停 status 轨。
+// 另用源码断言覆盖「clearInterval(statusInterval) 在全部 3 处退出点均被调用」。
+describe("长任务 live 状态 edit-in-place（status 轨）", () => {
+  const originalFetch = global.fetch;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  // 与 inbound.ts:handleInboundMessage 内联 status 轨同构的最小复现。
+  // effectiveOnBehalfOf 传入时，占位 send 仍刻意不带 onBehalfOf（bot 本体身份）。
+  async function runStatusTrack(opts: {
+    apiUrl: string;
+    botToken: string;
+    replyChannelId: string;
+    replyChannelType: ChannelType;
+    effectiveOnBehalfOf?: string;
+    placeholderSendId?: string; // 模拟占位 send 返回的 message_id；undefined=占位失败
+  }) {
+    const { sendMessage, editMessage } = await import("./api-fetch.js");
+    const statusStartTs = Date.now();
+    let statusMessageId: string | undefined;
+    let statusMessageSeq: number | undefined;
+    let statusFinalized = false;
+
+    // 开工发占位——刻意不带 onBehalfOf（硬约束3）。
+    const placeholderSend = sendMessage({
+      apiUrl: opts.apiUrl,
+      botToken: opts.botToken,
+      channelId: opts.replyChannelId,
+      channelType: opts.replyChannelType,
+      content: "⏳ 已接收，处理中…",
+    })
+      .then((r) => { statusMessageId = r?.message_id; statusMessageSeq = r?.message_seq; })
+      .catch(() => {});
+
+    const tickEdit = () => {
+      if (!statusMessageId || statusFinalized) return Promise.resolve();
+      const secs = Math.round((Date.now() - statusStartTs) / 1000);
+      return editMessage({
+        apiUrl: opts.apiUrl,
+        botToken: opts.botToken,
+        channelId: opts.replyChannelId,
+        channelType: opts.replyChannelType,
+        messageId: statusMessageId,
+        messageSeq: statusMessageSeq,
+        contentEdit: `⏳ 处理中 · 已运行 ${secs}s`,
+      }).catch(() => {});
+    };
+
+    const finalizeStatus = (kind: "ok" | "fail", detail?: string) => {
+      if (statusFinalized) return Promise.resolve();
+      statusFinalized = true;
+      if (!statusMessageId) return Promise.resolve();
+      const secs = Math.round((Date.now() - statusStartTs) / 1000);
+      const contentEdit = kind === "ok"
+        ? `✅ 已完成 · 用时 ${secs}s`
+        : `❌ 失败：${detail ?? "处理出错"}`;
+      return editMessage({
+        apiUrl: opts.apiUrl,
+        botToken: opts.botToken,
+        channelId: opts.replyChannelId,
+        channelType: opts.replyChannelType,
+        messageId: statusMessageId,
+        messageSeq: statusMessageSeq,
+        contentEdit,
+      }).catch(() => {});
+    };
+
+    // 正文回复（走 OBO 身份，若有）——与占位轨独立。
+    const sendBody = (content: string) => sendMessage({
+      apiUrl: opts.apiUrl,
+      botToken: opts.botToken,
+      channelId: opts.replyChannelId,
+      channelType: opts.replyChannelType,
+      content,
+      ...(opts.effectiveOnBehalfOf ? { onBehalfOf: opts.effectiveOnBehalfOf } : {}),
+    });
+
+    return { placeholderSend, tickEdit, finalizeStatus, sendBody, getStatusMessageId: () => statusMessageId };
+  }
+
+  it("edit 失败(fetch reject)不阻塞正文 sendMessage", async () => {
+    const bodies: any[] = [];
+    let editCalls = 0;
+    global.fetch = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      const body = JSON.parse(init?.body as string);
+      if (String(url).includes("/v1/bot/message/edit")) {
+        editCalls++;
+        // edit 端点：fetch reject（网络失败）——必须被 status 轨 .catch 吞掉。
+        throw new Error("network down");
+      }
+      // sendMessage 端点：占位 + 正文都走这里。
+      bodies.push({ url, body });
+      return new Response(JSON.stringify({ message_id: "111", message_seq: 7 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const track = await runStatusTrack({
+      apiUrl: "http://localhost:8090",
+      botToken: "t",
+      replyChannelId: "group1",
+      replyChannelType: ChannelType.Group,
+    });
+    await track.placeholderSend;
+    expect(track.getStatusMessageId()).toBe("111");
+
+    // edit 会 reject，但不得抛出未捕获错误。
+    await expect(track.tickEdit()).resolves.toBeUndefined();
+    // 正文照常发出。
+    await track.sendBody("这是最终回复");
+    // finalize 的 edit 也 reject，同样不得抛。
+    await expect(track.finalizeStatus("ok")).resolves.toBeUndefined();
+
+    expect(editCalls).toBeGreaterThanOrEqual(1);
+    const bodyContents = bodies.map((b) => b.body.payload.content);
+    expect(bodyContents).toContain("⏳ 已接收，处理中…"); // 占位
+    expect(bodyContents).toContain("这是最终回复");        // 正文仍发
+  });
+
+  it("OBO 会话占位 sendMessage 参数不含 onBehalfOf；正文走 OBO 身份", async () => {
+    const sends: any[] = [];
+    global.fetch = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      const body = JSON.parse(init?.body as string);
+      if (String(url).includes("/v1/bot/sendMessage")) {
+        sends.push(body);
+      }
+      return new Response(JSON.stringify({ message_id: "222", message_seq: 1 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const track = await runStatusTrack({
+      apiUrl: "http://localhost:8090",
+      botToken: "t",
+      replyChannelId: "group1",
+      replyChannelType: ChannelType.Group,
+      effectiveOnBehalfOf: "grantor-uid-xyz",
+    });
+    await track.placeholderSend;
+    await track.sendBody("正文（OBO）");
+
+    // 第一条是占位：必须不含 on_behalf_of（占位恒 bot 本体身份，否则 edit 403）。
+    const placeholder = sends.find((s) => s.payload.content === "⏳ 已接收，处理中…");
+    expect(placeholder).toBeDefined();
+    expect(placeholder).not.toHaveProperty("on_behalf_of");
+
+    // 正文：走 OBO 身份，含 on_behalf_of。
+    const bodyMsg = sends.find((s) => s.payload.content === "正文（OBO）");
+    expect(bodyMsg).toBeDefined();
+    expect(bodyMsg.on_behalf_of).toBe("grantor-uid-xyz");
+  });
+
+  it("占位 send 失败→status 轨空转（无 edit 调用），降级 typing-only", async () => {
+    let editCalls = 0;
+    global.fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (String(url).includes("/v1/bot/message/edit")) {
+        editCalls++;
+        return new Response("", { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      // 占位 send 失败。
+      return new Response("boom", { status: 500, statusText: "Internal Error" });
+    }) as unknown as typeof fetch;
+
+    const track = await runStatusTrack({
+      apiUrl: "http://localhost:8090",
+      botToken: "t",
+      replyChannelId: "group1",
+      replyChannelType: ChannelType.Group,
+    });
+    await track.placeholderSend;
+    expect(track.getStatusMessageId()).toBeUndefined();
+
+    // statusMessageId undefined → tick/finalize 都 no-op，不产生任何 edit。
+    await track.tickEdit();
+    await track.finalizeStatus("ok");
+    expect(editCalls).toBe(0);
+  });
+
+  it("finalize 幂等：重复调用只 edit 一次终态", async () => {
+    let editCalls = 0;
+    let editContents: string[] = [];
+    global.fetch = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (String(url).includes("/v1/bot/message/edit")) {
+        editCalls++;
+        editContents.push(JSON.parse(JSON.parse(init?.body as string).content_edit).content);
+        return new Response("", { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ message_id: "333", message_seq: 1 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const track = await runStatusTrack({
+      apiUrl: "http://localhost:8090",
+      botToken: "t",
+      replyChannelId: "group1",
+      replyChannelType: ChannelType.Group,
+    });
+    await track.placeholderSend;
+    await track.finalizeStatus("fail", "处理超时");
+    await track.finalizeStatus("ok"); // 第二次应 no-op
+    expect(editCalls).toBe(1);
+    expect(editContents[0]).toContain("失败：处理超时");
+  });
+});
+
+// ─── 源码结构断言：status 轨在全部 3 处退出点收尾（GH#146 验收 #3）──────────
+describe("inbound.ts status 轨退出点收尾（源码断言）", () => {
+  const readSource = () => {
+    const fs = require("node:fs") as typeof import("node:fs");
+    const path = require("node:path") as typeof import("node:path");
+    return fs.readFileSync(path.join(__dirname, "inbound.ts"), "utf-8");
+  };
+
+  it("clearInterval(statusInterval) 不泄漏：经由 finalizeStatus 在 3 处退出点均收尾", () => {
+    const src = readSource();
+    // typing 轨的 3 处退出点保持不变（fallback 绝不移除）。
+    const typingExits = src.match(/clearInterval\(typingInterval\)/g) ?? [];
+    expect(typingExits.length).toBe(3);
+    // status 轨在 finalizeStatus 内统一 clearInterval(statusInterval)（收敛点）。
+    expect(src).toMatch(/clearInterval\(statusInterval\)/);
+    // 3 处退出点各自触发 finalizeStatus（onError/timeout=fail，finally=ok）。
+    const finalizeCalls = src.match(/finalizeStatus\((?:"ok"|"fail")/g) ?? [];
+    expect(finalizeCalls.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("占位消息发送不带 onBehalfOf（bot 本体身份，硬约束3）", () => {
+    const src = readSource();
+    // 占位 send 的调用块：content 为占位文案且不出现 onBehalfOf。
+    const m = src.match(/sendMessage\(\{[^}]*?content:\s*"⏳ 已接收，处理中…"[^}]*?\}\)/s);
+    expect(m).not.toBeNull();
+    expect(m![0]).not.toMatch(/onBehalfOf/);
+  });
+});

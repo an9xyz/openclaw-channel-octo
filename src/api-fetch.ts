@@ -394,6 +394,50 @@ export async function sendTyping(params: {
   }, params.signal);
 }
 
+/**
+ * 原地编辑一条 bot 已发出的消息（长任务 live 状态占位的 edit-in-place）。
+ *
+ * POST /v1/bot/message/edit —— 对齐 sendTyping/sendMessage 的 postJson 风格。
+ *
+ * 契约（已核 octo-server send.go botMessageEdit + bot_api.go 路由）：
+ *   - body 字段是 `content_edit`（不是 content），必填 message_id+channel_id+
+ *     channel_type，可选 message_seq（走 seq 快路径）。
+ *   - edit **无** on_behalf_of 字段，编辑身份恒为 bot 本体。故本封装签名刻意不给
+ *     onBehalfOf 口子——OBO 占位消息不能被 edit（send.go 权限门 msgFromUID!=robotID
+ *     → 403），状态占位消息必须以 bot 本体身份发送。
+ *   - 幂等：服务端对 (message_id, content_edit_hash) 去重，相同内容重复 edit 为 no-op。
+ *
+ * 🔴 content_edit 编码（核 octo-server：写入侧 richtext.NormalizeContentEdit 对
+ * 「非 JSON 对象」原样放行返回 200，但回读侧 newMessageExtraResp / reply 路径对
+ * content_edit 做 json.Unmarshal，纯文本解析失败→nil→`content_edit,omitempty`
+ * 丢字段→客户端 sync 拿不到编辑内容→**UI 永不原地刷新**）：content_edit 必须是与
+ * send payload 同构的 JSON 对象。本封装对外仍暴露 `contentEdit: string`，内部把它
+ * 包成 `{type: MessageType.Text, content}` 再 JSON.stringify 落到 content_edit，
+ * 对齐 sendMessage 的 payload.content 口径，调用方无感。
+ */
+export async function editMessage(params: {
+  apiUrl: string;
+  botToken: string;
+  channelId: string;
+  channelType: ChannelType;
+  messageId: string;
+  contentEdit: string;
+  messageSeq?: number;
+  signal?: AbortSignal;
+}): Promise<void> {
+  if (!params.channelId?.trim()) throw new Error("octo: channelId is required to edit a message");
+  if (!params.messageId?.trim()) throw new Error("octo: messageId is required to edit a message");
+  await postJson(params.apiUrl, params.botToken, "/v1/bot/message/edit", {
+    message_id: params.messageId,
+    channel_id: params.channelId,
+    channel_type: params.channelType,
+    // 与 send payload 同构的 JSON 对象（见上方 content_edit 编码说明），
+    // 而非纯文本——纯文本会被服务端接受(200)但回读端丢弃，UI 永不刷新。
+    content_edit: JSON.stringify({ type: MessageType.Text, content: params.contentEdit }),
+    ...(params.messageSeq != null ? { message_seq: params.messageSeq } : {}),
+  }, params.signal);
+}
+
 export async function sendReadReceipt(params: {
   apiUrl: string;
   botToken: string;

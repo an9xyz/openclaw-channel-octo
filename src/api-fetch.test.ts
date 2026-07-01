@@ -2217,3 +2217,164 @@ describe("#138 — send functions reject empty channelId", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// editMessage — POST /v1/bot/message/edit (长任务 live 状态 edit-in-place)
+// ---------------------------------------------------------------------------
+describe("editMessage — /v1/bot/message/edit contract", () => {
+  const originalFetch = global.fetch;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  const captureEdit = () => {
+    const calls: Array<{ url: string; body: any }> = [];
+    global.fetch = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      calls.push({ url, body: JSON.parse(init?.body as string) });
+      return new Response("", {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    return calls;
+  };
+
+  it("POSTs to /v1/bot/message/edit with required fields", async () => {
+    const calls = captureEdit();
+    const { editMessage } = await import("./api-fetch.js");
+    await editMessage({
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      channelId: "group1",
+      channelType: ChannelType.Group,
+      messageId: "123456789012345678",
+      contentEdit: "⏳ 处理中 · 已运行 6s",
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("http://localhost:8090/v1/bot/message/edit");
+    const body = calls[0].body;
+    expect(body.message_id).toBe("123456789012345678");
+    expect(body.channel_id).toBe("group1");
+    expect(body.channel_type).toBe(ChannelType.Group);
+    expect(body).toHaveProperty("content_edit");
+  });
+
+  it("wraps content_edit as a JSON object {type:1,content} (not plain text)", async () => {
+    // 🔴 回归防护：纯文本 content_edit 会被服务端 200 接受但回读端 json.Unmarshal
+    // 失败→nil→omitempty 丢字段→UI 永不刷新。必须发同构 JSON 对象。
+    const calls = captureEdit();
+    const { editMessage } = await import("./api-fetch.js");
+    await editMessage({
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      channelId: "group1",
+      channelType: ChannelType.Group,
+      messageId: "999",
+      contentEdit: "✅ 已完成 · 用时 12s",
+    });
+    const body = calls[0].body;
+    // content_edit 是字符串（JSON 编码），不是裸对象
+    expect(typeof body.content_edit).toBe("string");
+    // 反序列化后深等 {type:1,content:'…'}
+    expect(JSON.parse(body.content_edit)).toEqual({
+      type: MessageType.Text,
+      content: "✅ 已完成 · 用时 12s",
+    });
+  });
+
+  it("omits on_behalf_of entirely (edit identity is always the bot)", async () => {
+    const calls = captureEdit();
+    const { editMessage } = await import("./api-fetch.js");
+    await editMessage({
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      channelId: "group1",
+      channelType: ChannelType.Group,
+      messageId: "999",
+      contentEdit: "⏳ 处理中",
+    });
+    expect(calls[0].body).not.toHaveProperty("on_behalf_of");
+  });
+
+  it("includes message_seq only when provided (seq fast-path)", async () => {
+    const calls = captureEdit();
+    const { editMessage } = await import("./api-fetch.js");
+    await editMessage({
+      apiUrl: "http://localhost:8090",
+      botToken: "t",
+      channelId: "c",
+      channelType: ChannelType.Group,
+      messageId: "1",
+      contentEdit: "x",
+      messageSeq: 42,
+    });
+    expect(calls[0].body.message_seq).toBe(42);
+
+    const calls2 = captureEdit();
+    await editMessage({
+      apiUrl: "http://localhost:8090",
+      botToken: "t",
+      channelId: "c",
+      channelType: ChannelType.Group,
+      messageId: "1",
+      contentEdit: "x",
+    });
+    expect(calls2[0].body).not.toHaveProperty("message_seq");
+  });
+
+  it("throws on non-2xx response", async () => {
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response("forbidden", { status: 403, statusText: "Forbidden" }),
+    ) as unknown as typeof fetch;
+    const { editMessage } = await import("./api-fetch.js");
+    await expect(
+      editMessage({
+        apiUrl: "http://localhost:8090",
+        botToken: "t",
+        channelId: "c",
+        channelType: ChannelType.Group,
+        messageId: "1",
+        contentEdit: "x",
+      }),
+    ).rejects.toThrow(/failed \(403\)/);
+  });
+
+  it("throws when channelId is empty (last-line guard)", async () => {
+    const fetchSpy = vi.fn();
+    global.fetch = fetchSpy as unknown as typeof fetch;
+    const { editMessage } = await import("./api-fetch.js");
+    await expect(
+      editMessage({
+        apiUrl: "http://localhost:8090",
+        botToken: "t",
+        channelId: "",
+        channelType: ChannelType.Group,
+        messageId: "1",
+        contentEdit: "x",
+      }),
+    ).rejects.toThrow(/channelId/i);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("throws when messageId is empty (last-line guard)", async () => {
+    const fetchSpy = vi.fn();
+    global.fetch = fetchSpy as unknown as typeof fetch;
+    const { editMessage } = await import("./api-fetch.js");
+    await expect(
+      editMessage({
+        apiUrl: "http://localhost:8090",
+        botToken: "t",
+        channelId: "c",
+        channelType: ChannelType.Group,
+        messageId: "",
+        contentEdit: "x",
+      }),
+    ).rejects.toThrow(/messageId/i);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});

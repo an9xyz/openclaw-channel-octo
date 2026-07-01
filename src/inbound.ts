@@ -20,7 +20,7 @@ const isReplyPayloadNonTerminalToolErrorWarning =
     ? replyPayloadCompat.isReplyPayloadNonTerminalToolErrorWarning
     : undefined;
 const resolveSendableOutboundReplyParts = replyPayloadSdk.resolveSendableOutboundReplyParts;
-import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson, sendMediaMessage, inferContentType, ensureTextCharset, parseImageDimensions, parseImageDimensionsFromFile, getUploadPresign, uploadFileToPresignedUrl, fetchUserInfo } from "./api-fetch.js";
+import { sendMessage, editMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson, sendMediaMessage, inferContentType, ensureTextCharset, parseImageDimensions, parseImageDimensionsFromFile, getUploadPresign, uploadFileToPresignedUrl, fetchUserInfo } from "./api-fetch.js";
 import type { GroupMember } from "./api-fetch.js";
 import { getMentionPrefFromCache, invalidateMentionPref } from "./mention-prefs.js";
 import { normalizeAccountId } from "./account-id.js";
@@ -2525,10 +2525,51 @@ export async function handleInboundMessage(params: {
       .catch((err) => log?.error?.(`octo: typing failed: ${String(err)}`));
   }
 
-  // Keep sending typing indicator while AI is processing
+  // Keep sending typing indicator while AI is processing.
+  // 这是 fallback 轨，绝不移除：占位 send 失败 / edit 不被支持时，长任务仍有 typing 心跳。
   const typingInterval = setInterval(() => {
     sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType, ...(effectiveOnBehalfOf ? { onBehalfOf: effectiveOnBehalfOf } : {}) }).catch(() => {});
   }, 5000);
+
+  // --- 长任务 live 状态：粗粒度 edit-in-place（与 typing 双轨并行）---
+  //
+  // 开工发一条状态占位消息，运行中周期性 edit 成「已运行 Ns」，结束 finalize 成
+  // ✅/❌。与 typing 轨互不阻塞：占位 send 失败 / edit 失败都静默降级到 typing-only。
+  //
+  // 🔴 身份硬约束：占位消息必须以 bot 本体身份发送（不带 onBehalfOf）——OBO 发的
+  // 消息 fromUID=on_behalf_of，编辑权限门 msgFromUID!=robotID 会 403。故 OBO 会话
+  // 下状态占位与 OBO 正文回复身份不一致（已知取舍，见 GH#146 plan 降级策略）。
+  const statusStartTs = Date.now();
+  let statusMessageId: string | undefined;
+  let statusMessageSeq: number | undefined;
+  let statusFinalized = false;
+  // 占位失败→statusMessageId 恒 undefined→全程降级 typing-only（status 轨空转）。
+  sendMessage({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType, content: "⏳ 已接收，处理中…" })
+    .then((r) => { statusMessageId = r?.message_id; statusMessageSeq = r?.message_seq; })
+    .catch(() => {});
+  // status edit 轨：独立 interval，节流 3s（前置真机 gate 结论后可调 2–5s）。
+  // 单次 edit 失败 .catch 静默，不阻塞正文。文案是 adapter 自造固定模板，
+  // 不拼接任何 runtime 输出/参数/路径/token（脱敏）。
+  const statusInterval = setInterval(() => {
+    if (!statusMessageId || statusFinalized) return;
+    const secs = Math.round((Date.now() - statusStartTs) / 1000);
+    editMessage({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType, messageId: statusMessageId, messageSeq: statusMessageSeq, contentEdit: `⏳ 处理中 · 已运行 ${secs}s` }).catch(() => {});
+  }, 3000);
+
+  // finalize 收敛 helper：结束时停 status 轨并把占位 edit 成终态。幂等（重复调用
+  // no-op）。成功→✅ 用时 Ns；失败/超时→❌ 脱敏原因。占位 send 未成功时静默跳过。
+  // detail 只取固定短语类别，绝不透传原始 error message（脱敏）。
+  const finalizeStatus = (kind: "ok" | "fail", detail?: string): void => {
+    if (statusFinalized) return;
+    statusFinalized = true;
+    clearInterval(statusInterval);
+    if (!statusMessageId) return;
+    const secs = Math.round((Date.now() - statusStartTs) / 1000);
+    const contentEdit = kind === "ok"
+      ? `✅ 已完成 · 用时 ${secs}s`
+      : `❌ 失败：${detail ?? "处理出错"}`;
+    editMessage({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType, messageId: statusMessageId, messageSeq: statusMessageSeq, contentEdit }).catch(() => {});
+  };
 
   // Buffer text across streaming deliver calls; only send once after dispatcher finishes.
   // Media is sent immediately (no edit problem); text is buffered (each call overwrites).
@@ -2765,6 +2806,9 @@ export async function handleInboundMessage(params: {
         },
         onError: async (err: unknown, info: { kind: string }) => {
           clearInterval(typingInterval);
+          // status 轨同步收尾：占位 edit 成失败终态（脱敏，不透传 err 原文），
+          // 与下方 apology sendMessage 并存不互斥。
+          finalizeStatus("fail", "上游错误");
           log?.error?.(`octo ${info.kind} reply failed: ${String(err)}`);
           // Prevent finally block from sending stale buffered text after error
           deliverBuffer.lastText = null;
@@ -2832,6 +2876,8 @@ export async function handleInboundMessage(params: {
     // out of scope for #75 (see scope-note comment above timeoutError).
     if (err === timeoutError) {
       clearInterval(typingInterval);
+      // status 轨同步收尾：占位 edit 成超时终态（复用 timeout 分支同款脱敏文案）。
+      finalizeStatus("fail", "处理超时");
       log?.warn?.(
         `octo: dispatch hung past ${dispatchTimeoutMs}ms, aborting to unblock per-group queue (session=${route?.sessionKey ?? "?"})`,
       );
@@ -2879,6 +2925,10 @@ export async function handleInboundMessage(params: {
       }
     }
     clearInterval(typingInterval);
+    // status 轨最终收尾（所有正常/异常路径都经 finally）：finalizeStatus 幂等——
+    // onError/timeout 分支已 finalize 成 fail 的场景这里是 no-op；正常完成则占位
+    // edit 成 ✅ 已完成。即便占位未成功(statusMessageId undefined)也 no-op。
+    finalizeStatus("ok");
     // Safety net: clean up pending inbound context in case the hook didn't fire
     pendingInboundContext.delete(route.sessionKey);
 
