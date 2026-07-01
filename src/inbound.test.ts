@@ -3738,6 +3738,25 @@ describe("长任务 live 状态 edit-in-place（status 轨）", () => {
     let statusMessageId: string | undefined;
     let statusMessageSeq: number | undefined;
     let statusFinalized = false;
+    // B1：占位 id 未就绪时 finalize 记下终态，占位 resolve 后 flush。
+    let pendingTerminalContent: string | undefined;
+    // N1：周期 edit 的 in-flight 句柄（Promise 或 null）——重叠守卫 + 终态串行化。
+    let statusEditInFlight: Promise<void> | null = null;
+
+    const applyTerminalEdit = (id: string, contentEdit: string) => {
+      const fire = () =>
+        editMessage({
+          apiUrl: opts.apiUrl,
+          botToken: opts.botToken,
+          channelId: opts.replyChannelId,
+          channelType: opts.replyChannelType,
+          messageId: id,
+          messageSeq: statusMessageSeq,
+          contentEdit,
+        }).catch(() => {});
+      // 终态串到最后一次周期 edit 之后，避免旧 `⏳` 请求覆盖终态。
+      return statusEditInFlight ? statusEditInFlight.then(fire, fire) : fire();
+    };
 
     // 开工发占位——刻意不带 onBehalfOf（硬约束3）。
     const placeholderSend = sendMessage({
@@ -3747,13 +3766,24 @@ describe("长任务 live 状态 edit-in-place（status 轨）", () => {
       channelType: opts.replyChannelType,
       content: "⏳ 已接收，处理中…",
     })
-      .then((r) => { statusMessageId = r?.message_id; statusMessageSeq = r?.message_seq; })
+      .then((r) => {
+        statusMessageId = r?.message_id;
+        statusMessageSeq = r?.message_seq;
+        // B1 flush：id 就绪且已有待决终态 → 立刻 edit 成终态，消除孤儿。
+        if (statusMessageId && pendingTerminalContent !== undefined) {
+          const contentEdit = pendingTerminalContent;
+          pendingTerminalContent = undefined;
+          return applyTerminalEdit(statusMessageId, contentEdit);
+        }
+        return undefined;
+      })
       .catch(() => {});
 
+    // N1：in-flight 守卫——上一 edit 未落地则跳过本 tick。
     const tickEdit = () => {
-      if (!statusMessageId || statusFinalized) return Promise.resolve();
+      if (!statusMessageId || statusFinalized || statusEditInFlight) return Promise.resolve();
       const secs = Math.round((Date.now() - statusStartTs) / 1000);
-      return editMessage({
+      const p = editMessage({
         apiUrl: opts.apiUrl,
         botToken: opts.botToken,
         channelId: opts.replyChannelId,
@@ -3762,25 +3792,24 @@ describe("长任务 live 状态 edit-in-place（status 轨）", () => {
         messageSeq: statusMessageSeq,
         contentEdit: `⏳ 处理中 · 已运行 ${secs}s`,
       }).catch(() => {});
+      statusEditInFlight = p;
+      p.finally(() => { if (statusEditInFlight === p) statusEditInFlight = null; });
+      return p;
     };
 
     const finalizeStatus = (kind: "ok" | "fail", detail?: string) => {
       if (statusFinalized) return Promise.resolve();
       statusFinalized = true;
-      if (!statusMessageId) return Promise.resolve();
       const secs = Math.round((Date.now() - statusStartTs) / 1000);
       const contentEdit = kind === "ok"
         ? `✅ 已完成 · 用时 ${secs}s`
         : `❌ 失败：${detail ?? "处理出错"}`;
-      return editMessage({
-        apiUrl: opts.apiUrl,
-        botToken: opts.botToken,
-        channelId: opts.replyChannelId,
-        channelType: opts.replyChannelType,
-        messageId: statusMessageId,
-        messageSeq: statusMessageSeq,
-        contentEdit,
-      }).catch(() => {});
+      if (!statusMessageId) {
+        // B1：占位 id 未就绪 → 记下终态待 flush（占位真失败则永不 flush）。
+        pendingTerminalContent = contentEdit;
+        return Promise.resolve();
+      }
+      return applyTerminalEdit(statusMessageId, contentEdit);
     };
 
     // 正文回复（走 OBO 身份，若有）——与占位轨独立。
@@ -3923,6 +3952,145 @@ describe("长任务 live 状态 edit-in-place（status 轨）", () => {
     expect(editCalls).toBe(1);
     expect(editContents[0]).toContain("失败：处理超时");
   });
+
+  // ─── B1 回归：占位 POST 在任务完成之后才 resolve（快完成竞态）──────────────
+  // 旧代码：finalize 时 statusMessageId 还 undefined → 直接 no-op，占位 POST 随后
+  // resolve 记下 id 但已无人 edit → 永久 `⏳ 处理中` 孤儿。
+  // 新代码：finalize 记下 pending 终态，占位 resolve 后 flush 成终态。
+  it("B1：占位 POST 晚于任务完成 resolve → 仍 edit 到终态，无孤儿", async () => {
+    const edits: string[] = [];
+    let resolvePlaceholder!: (r: Response) => void;
+    const placeholderGate = new Promise<Response>((res) => { resolvePlaceholder = res; });
+
+    global.fetch = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (String(url).includes("/v1/bot/message/edit")) {
+        edits.push(JSON.parse(JSON.parse(init?.body as string).content_edit).content);
+        return new Response("", { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      // 占位 sendMessage：刻意 gate 住，直到测试放行才 resolve（模拟慢 POST）。
+      return placeholderGate;
+    }) as unknown as typeof fetch;
+
+    const track = await runStatusTrack({
+      apiUrl: "http://localhost:8090",
+      botToken: "t",
+      replyChannelId: "group1",
+      replyChannelType: ChannelType.Group,
+    });
+
+    // 任务「秒完成」：占位 POST 尚未 resolve → id 仍 undefined。
+    expect(track.getStatusMessageId()).toBeUndefined();
+    await track.finalizeStatus("ok"); // 此刻无 id → 记 pending 终态，尚未 edit。
+    expect(edits.length).toBe(0);
+
+    // 占位 POST 现在才 resolve，带回 id → 应 flush pending 终态。
+    resolvePlaceholder(new Response(JSON.stringify({ message_id: "late-1", message_seq: 9 }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    await track.placeholderSend;
+
+    // 关键断言：占位最终被 edit 成 ✅ 终态，没有僵尸 `⏳ 处理中`。
+    expect(track.getStatusMessageId()).toBe("late-1");
+    expect(edits.length).toBe(1);
+    expect(edits[0]).toContain("✅ 已完成");
+    expect(edits.some((e) => e.includes("处理中"))).toBe(false);
+  });
+
+  // ─── B2 回归：非超时 dispatcher rejection 必须 finalize 成 ❌（非 ✅）─────────
+  // 旧代码：finally 恒 finalizeStatus("ok") → 非超时 rejection 也把占位 edit 成
+  // ✅ 已完成，实际失败。新代码：dispatchSucceeded 仅正常返回时置真，finally 用
+  // finalizeStatus(dispatchSucceeded ? "ok" : "fail")。
+  it("B2：dispatcher 抛非超时 rejection → finalize 为 fail(❌) 而非 ok(✅)", async () => {
+    const edits: string[] = [];
+    global.fetch = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (String(url).includes("/v1/bot/message/edit")) {
+        edits.push(JSON.parse(JSON.parse(init?.body as string).content_edit).content);
+        return new Response("", { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ message_id: "b2-1", message_seq: 3 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const track = await runStatusTrack({
+      apiUrl: "http://localhost:8090",
+      botToken: "t",
+      replyChannelId: "group1",
+      replyChannelType: ChannelType.Group,
+    });
+    await track.placeholderSend;
+    expect(track.getStatusMessageId()).toBe("b2-1");
+
+    // 模拟 inbound.ts 的 try/finally 控制流：dispatch 抛非超时 rejection。
+    // dispatchSucceeded 只有 race 正常返回后才置真——此处永不置真。
+    let dispatchSucceeded = false;
+    let caught: unknown;
+    try {
+      // 非超时 rejection（resolver/runtime rejection，非我方 timeoutError）。
+      await Promise.reject(new Error("resolver blew up"));
+      dispatchSucceeded = true; // 不可达
+    } catch (err) {
+      caught = err; // 非 timeoutError → 不 finalize fail，交给 finally
+    } finally {
+      await track.finalizeStatus(dispatchSucceeded ? "ok" : "fail");
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    // 关键断言：终态是 ❌ 失败，绝不能是 ✅ 已完成。
+    expect(edits.length).toBe(1);
+    expect(edits[0]).toContain("❌ 失败");
+    expect(edits[0]).not.toContain("✅");
+  });
+
+  // ─── N1 回归：终态 edit 串在飞行中的周期 edit 之后（不被旧 `⏳` 覆盖）─────────
+  // 若终态在周期 edit 仍飞行时发出，且服务端按到达顺序应用，旧 `⏳` 若晚于终态到达
+  // 会把终态覆盖回处理中。修法：applyTerminalEdit 串到 in-flight 周期 edit 之后。
+  it("N1：周期 edit 在飞行中时 finalize → 终态请求晚于该周期 edit 发出", async () => {
+    const editOrder: string[] = [];
+    let resolveTick!: () => void;
+    const tickGate = new Promise<void>((res) => { resolveTick = res; });
+
+    global.fetch = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (String(url).includes("/v1/bot/message/edit")) {
+        const content = JSON.parse(JSON.parse(init?.body as string).content_edit).content;
+        // 周期 `⏳` edit：gate 住直到测试放行，模拟一个仍在飞行的请求。
+        if (content.includes("处理中")) {
+          await tickGate;
+        }
+        editOrder.push(content);
+        return new Response("", { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ message_id: "ord-1", message_seq: 2 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const track = await runStatusTrack({
+      apiUrl: "http://localhost:8090",
+      botToken: "t",
+      replyChannelId: "group1",
+      replyChannelType: ChannelType.Group,
+    });
+    await track.placeholderSend;
+
+    // 启动一个周期 edit（`⏳`）——它会 gate 住不落地。
+    track.tickEdit();
+    // 任务此刻完成 → finalize 终态；应串到周期 edit 之后，尚未落地。
+    const finalizePromise = track.finalizeStatus("ok");
+    expect(editOrder.length).toBe(0);
+
+    // 放行周期 edit：`⏳` 先落地，终态随后落地。
+    resolveTick();
+    await finalizePromise;
+
+    // 关键断言：落地顺序 = 周期 `⏳` 在前、终态 ✅ 在后（终态不被覆盖）。
+    expect(editOrder.length).toBe(2);
+    expect(editOrder[0]).toContain("处理中");
+    expect(editOrder[1]).toContain("✅ 已完成");
+  });
 });
 
 // ─── 源码结构断言：status 轨在全部 3 处退出点收尾（GH#146 验收 #3）──────────
@@ -3940,9 +4108,31 @@ describe("inbound.ts status 轨退出点收尾（源码断言）", () => {
     expect(typingExits.length).toBe(3);
     // status 轨在 finalizeStatus 内统一 clearInterval(statusInterval)（收敛点）。
     expect(src).toMatch(/clearInterval\(statusInterval\)/);
-    // 3 处退出点各自触发 finalizeStatus（onError/timeout=fail，finally=ok）。
-    const finalizeCalls = src.match(/finalizeStatus\((?:"ok"|"fail")/g) ?? [];
-    expect(finalizeCalls.length).toBeGreaterThanOrEqual(3);
+    // 3 处退出点各自触发 finalizeStatus：onError=fail、timeout=fail、finally=
+    // 三元(dispatchSucceeded ? "ok" : "fail")。
+    const finalizeFailCalls = src.match(/finalizeStatus\("fail"/g) ?? [];
+    expect(finalizeFailCalls.length).toBeGreaterThanOrEqual(2); // onError + timeout
+    // B2：finally 分支据 dispatchSucceeded 决定终态，不再恒 "ok"。
+    expect(src).toMatch(/finalizeStatus\(dispatchSucceeded \? "ok" : "fail"\)/);
+    // B2：dispatchSucceeded 仅在 race 正常返回后置真。
+    expect(src).toMatch(/dispatchSucceeded = true;/);
+  });
+
+  it("N1：status 轨 edit 均带 bounded AbortSignal + in-flight 守卫（无重叠 edit）", () => {
+    const src = readSource();
+    // bounded signal 常量存在且喂给 status 轨的 editMessage。
+    expect(src).toMatch(/STATUS_EDIT_TIMEOUT_MS/);
+    expect(src).toMatch(/AbortSignal\.timeout\(STATUS_EDIT_TIMEOUT_MS\)/);
+    // periodic tick 有 in-flight 守卫：未落地则跳过本 tick。
+    expect(src).toMatch(/statusEditInFlight/);
+  });
+
+  it("B1：finalize 在占位 id 未就绪时记 pending 终态，占位 resolve 后 flush", () => {
+    const src = readSource();
+    // finalize 无 id 时不再直接 return no-op，而是记下待决终态。
+    expect(src).toMatch(/pendingTerminalContent = contentEdit;/);
+    // 占位 .then 里在 id 就绪后 flush 待决终态。
+    expect(src).toMatch(/pendingTerminalContent !== undefined/);
   });
 
   it("占位消息发送不带 onBehalfOf（bot 本体身份，硬约束3）", () => {

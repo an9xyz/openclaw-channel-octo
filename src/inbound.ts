@@ -95,6 +95,14 @@ let dispatchTimeoutTestOverrideMs: number | null = null;
 const DISPATCH_TIMEOUT_APOLOGY_DEFAULT_MS = 10_000;
 let DISPATCH_TIMEOUT_APOLOGY_MS = DISPATCH_TIMEOUT_APOLOGY_DEFAULT_MS;
 
+// N1: bounded signal for status-track edits. The periodic edit (and the flush
+// on the placeholder-resolve path) hits the same Octo API that issue #75 warns
+// can hang; a hung edit must not pin the in-flight guard forever. 5s is a
+// healthy round-trip yet short enough that a sick API releases the guard within
+// ~2 skipped ticks. Status-track failures are always silently degraded to
+// typing-only, so this signal only bounds, it never surfaces.
+const STATUS_EDIT_TIMEOUT_MS = 5_000;
+
 export function _setDispatchTimeoutForTests(ms: number | null): void {
   dispatchTimeoutTestOverrideMs = ms;
 }
@@ -2543,32 +2551,76 @@ export async function handleInboundMessage(params: {
   let statusMessageId: string | undefined;
   let statusMessageSeq: number | undefined;
   let statusFinalized = false;
+  // B1（快完成竞态）：短任务（缓存/trivial 回复/早退错误）可能在占位 POST resolve
+  // 前就跑完 → finalize 时 statusMessageId 仍 undefined，无从 edit，留下永久
+  // `⏳ 处理中` 僵尸。修法：finalize 若 id 未就绪，把已决定的终态文案记进
+  // pendingTerminalContent，待占位 .then 拿到 id 后立刻 flush。undefined=无待决终态。
+  // 注意：占位 send 真失败时 id 恒 undefined、flush 永不触发——这正是「占位失败→
+  // 降级 typing-only、无占位消息可孤儿」的既有不变量，不受影响。
+  let pendingTerminalContent: string | undefined;
+  // N1：周期 edit 的 in-flight 句柄（Promise 或 null）。既做「未落地则跳过本 tick」
+  // 的重叠守卫，又让终态 edit 串到最后一次周期 edit 之后（见 applyTerminalEdit）——
+  // 避免一个仍在飞行的旧 `⏳ 处理中` 请求在终态之后落地、把终态覆盖回处理中。
+  let statusEditInFlight: Promise<void> | null = null;
+  // 统一终态 edit：占位恒 bot 本体身份；bounded signal（N1）防单次 edit 挂起。
+  // 若有周期 edit 尚在飞行，串到它之后再发终态，保证客户端发出顺序 = 终态请求
+  // 晚于最后一次 `⏳` 请求（同一 message，服务端按到达顺序应用）。
+  const applyTerminalEdit = (id: string, contentEdit: string): void => {
+    const fire = () => {
+      editMessage({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType, messageId: id, messageSeq: statusMessageSeq, contentEdit, signal: AbortSignal.timeout(STATUS_EDIT_TIMEOUT_MS) }).catch(() => {});
+    };
+    if (statusEditInFlight) {
+      statusEditInFlight.then(fire, fire);
+    } else {
+      fire();
+    }
+  };
   // 占位失败→statusMessageId 恒 undefined→全程降级 typing-only（status 轨空转）。
   sendMessage({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType, content: "⏳ 已接收，处理中…" })
-    .then((r) => { statusMessageId = r?.message_id; statusMessageSeq = r?.message_seq; })
+    .then((r) => {
+      statusMessageId = r?.message_id;
+      statusMessageSeq = r?.message_seq;
+      // B1 flush：若在 id 就绪前已 finalize，占位一到位立刻 edit 成终态。
+      if (statusMessageId && pendingTerminalContent !== undefined) {
+        const contentEdit = pendingTerminalContent;
+        pendingTerminalContent = undefined;
+        applyTerminalEdit(statusMessageId, contentEdit);
+      }
+    })
     .catch(() => {});
   // status edit 轨：独立 interval，节流 3s（前置真机 gate 结论后可调 2–5s）。
   // 单次 edit 失败 .catch 静默，不阻塞正文。文案是 adapter 自造固定模板，
   // 不拼接任何 runtime 输出/参数/路径/token（脱敏）。
+  // N:in-flight 守卫——上一 edit 未落地则跳过本 tick，避免 edit 挂起时对同一
+  // 消息堆叠重叠 edit；配合 bounded signal 兜底一个挂死的 edit 最多占一档节流窗。
   const statusInterval = setInterval(() => {
-    if (!statusMessageId || statusFinalized) return;
+    if (!statusMessageId || statusFinalized || statusEditInFlight) return;
     const secs = Math.round((Date.now() - statusStartTs) / 1000);
-    editMessage({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType, messageId: statusMessageId, messageSeq: statusMessageSeq, contentEdit: `⏳ 处理中 · 已运行 ${secs}s` }).catch(() => {});
+    const p = editMessage({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType, messageId: statusMessageId, messageSeq: statusMessageSeq, contentEdit: `⏳ 处理中 · 已运行 ${secs}s`, signal: AbortSignal.timeout(STATUS_EDIT_TIMEOUT_MS) })
+      .catch(() => {});
+    statusEditInFlight = p;
+    p.finally(() => { if (statusEditInFlight === p) statusEditInFlight = null; });
   }, 3000);
 
   // finalize 收敛 helper：结束时停 status 轨并把占位 edit 成终态。幂等（重复调用
-  // no-op）。成功→✅ 用时 Ns；失败/超时→❌ 脱敏原因。占位 send 未成功时静默跳过。
+  // no-op）。成功→✅ 用时 Ns；失败/超时→❌ 脱敏原因。占位 id 未就绪时（B1）记下
+  // 终态待 flush，占位 send 真失败时静默丢弃（降级 typing-only）。
   // detail 只取固定短语类别，绝不透传原始 error message（脱敏）。
   const finalizeStatus = (kind: "ok" | "fail", detail?: string): void => {
     if (statusFinalized) return;
     statusFinalized = true;
     clearInterval(statusInterval);
-    if (!statusMessageId) return;
     const secs = Math.round((Date.now() - statusStartTs) / 1000);
     const contentEdit = kind === "ok"
       ? `✅ 已完成 · 用时 ${secs}s`
       : `❌ 失败：${detail ?? "处理出错"}`;
-    editMessage({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType, messageId: statusMessageId, messageSeq: statusMessageSeq, contentEdit }).catch(() => {});
+    if (!statusMessageId) {
+      // B1：占位 id 还没就绪 → 记下终态，占位 .then resolve 后 flush（若占位最终
+      // 失败则永不 flush = 无占位消息可孤儿，符合降级不变量）。
+      pendingTerminalContent = contentEdit;
+      return;
+    }
+    applyTerminalEdit(statusMessageId, contentEdit);
   };
 
   // Buffer text across streaming deliver calls; only send once after dispatcher finishes.
@@ -2698,6 +2750,12 @@ export async function handleInboundMessage(params: {
   };
 
   let replySucceeded = false;
+  // B2（非超时派发失败被误标成功）：dispatchReplyWithBufferedBlockDispatcher 抛出的
+  // 非超时 rejection（resolver/runtime rejection，SDK dispatchReplyFromConfig 会
+  // rethrow，区别于走 onError 的 per-delivery deliver 错误）会在 rethrow 前先经
+  // finally——旧代码 finally 恒 finalizeStatus("ok")，把占位误 edit 成 ✅。修法：
+  // 仅在 dispatch 正常返回后置真，finally 据此决定终态（ok / fail）。
+  let dispatchSucceeded = false;
 
   // Timeout guard: see resolveDispatchTimeoutMs at top of file. Without this,
   // an upstream dispatch hang would leave the per-group queue's Promise chain
@@ -2864,6 +2922,9 @@ export async function handleInboundMessage(params: {
       }),
       dispatchTimeoutPromise,
     ]);
+    // B2：dispatch 正常返回（未 timeout、未 reject）才算成功；finally 据此 finalize
+    // 成 ✅，否则 ❌。置真必须在 race 之后、任何后续 throw 之前。
+    dispatchSucceeded = true;
   } catch (err) {
     // Timeout: dispatch never returned within dispatchTimeoutMs. Tell the
     // user, suppress any stale buffered text (so the finally-flush branch
@@ -2926,9 +2987,12 @@ export async function handleInboundMessage(params: {
     }
     clearInterval(typingInterval);
     // status 轨最终收尾（所有正常/异常路径都经 finally）：finalizeStatus 幂等——
-    // onError/timeout 分支已 finalize 成 fail 的场景这里是 no-op；正常完成则占位
-    // edit 成 ✅ 已完成。即便占位未成功(statusMessageId undefined)也 no-op。
-    finalizeStatus("ok");
+    // onError/timeout 分支已 finalize 成 fail 的场景这里是 no-op。B2：非超时
+    // dispatcher rejection 会走到这里但 dispatchSucceeded 仍为 false，据此 finalize
+    // 成 ❌（而非旧代码恒 "ok" 误标 ✅）；只有 dispatch 正常返回才 ✅ 已完成。
+    // 即便占位未就绪(statusMessageId undefined)，finalizeStatus 也会记 pending 终态
+    // 或 no-op（占位真失败）。
+    finalizeStatus(dispatchSucceeded ? "ok" : "fail");
     // Safety net: clean up pending inbound context in case the hook didn't fire
     pendingInboundContext.delete(route.sessionKey);
 
