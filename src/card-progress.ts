@@ -65,9 +65,13 @@ const dbg: (msg: string) => void = process.env.OCTO_CARD_DEBUG
   ? (msg) => console.log(`[octo:card-progress] ${msg}`)
   : () => {};
 
-/** 发送目标身份指纹。两个不同账号(或不同频道)= 不同指纹 → 视为跨身份碰撞。 */
+/**
+ * 发送目标身份指纹。含 botToken —— 它才是账号的真正区分符:两个不同的非 OBO 账号即便
+ * 同 apiUrl+同 channelId(都在同一群回复)也应视为不同身份、触发 fail-closed。仅在内存里
+ * 做等值比较,不落日志。
+ */
 function contextIdentity(ctx: CardContext): string {
-  return JSON.stringify([ctx.apiUrl, ctx.channelId, ctx.onBehalfOf ?? ""]);
+  return JSON.stringify([ctx.apiUrl, ctx.channelId, ctx.onBehalfOf ?? "", ctx.botToken]);
 }
 
 /**

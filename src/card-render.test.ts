@@ -73,6 +73,17 @@ describe("summarizeToolParams", () => {
     // 正常长英文 / 纯字母长串不误伤。
     expect(summarizeToolParams("web_search", { query: "how to configure oauth flow correctly" })).toBe("how to configure oauth flow correctly");
   });
+  it("path 只走关键词+明确前缀:常见 git/docker/缓存哈希路径不被误伤成空", () => {
+    // 通用高熵/长 hex 检测**不**套用到 path —— 否则日常路径会频繁 blank。
+    expect(summarizeToolParams("read", { path: "/repo/.git/objects/1a/2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c" })).toBe(
+      "/repo/.git/objects/1a/2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c",
+    );
+    expect(summarizeToolParams("edit", { file_path: ".cache/webpack/a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6" })).toBe(
+      ".cache/webpack/a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+    );
+    // 但明确前缀式密钥(AKIA/sk-/gh_)即使出现在路径里仍隐藏。
+    expect(summarizeToolParams("read", { path: "/tmp/AKIAIOSFODNN7EXAMPLE.pem" })).toBe("");
+  });
   it("MCP / 未知工具 → 不显示摘要(不渲染任意参数)", () => {
     expect(summarizeToolParams("mcp__github__create_issue", { title: "leak", body: "secret" })).toBe("");
     expect(summarizeToolParams("weirdtool", { foo: "bar" })).toBe("");

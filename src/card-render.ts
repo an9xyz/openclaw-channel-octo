@@ -73,36 +73,40 @@ const SECRET_RE =
   /token|api[_-]?key|secret|password|passwd|pwd|authorization|bearer|access[_-]?key|client[_-]?secret|credential/i;
 
 /**
- * 形状检测:关键词正则只认密钥**名字**,认不出密钥**形状**。这里补一组按形状匹配的
- * 已知/通用凭据模式,与 SECRET_RE 并用 —— 覆盖「query/pattern 传入裸 token」等无关键词
- * 可循的泄露(如 grep `AKIA...`、web_search 一段 40 位 hex)。
+ * 明确前缀式凭据形状(AKIA/GitHub/Slack/OpenAI/JWT)。这些格式**在任何位置都几乎不可能
+ * 是正常内容**,故对所有策略(含 path/shell)都应用 —— 关键词正则只认密钥名字,认不出这些形状。
  */
-const SECRET_SHAPE_RES: RegExp[] = [
+const SECRET_PREFIX_RES: RegExp[] = [
   /\bAKIA[0-9A-Z]{12,}\b/,                                  // AWS access key id
   /\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}/,           // GitHub token / fine-grained PAT
   /\bxox[baprs]-[A-Za-z0-9-]{10,}/,                         // Slack token
   /\bsk-[A-Za-z0-9_-]{16,}/,                                // OpenAI-style secret key
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+/, // JWT
-  /\b[0-9a-fA-F]{32,}\b/,                                   // 长 hex(md5/sha/hex 密钥)
 ];
 
+/** 长 hex(md5/sha/hex 密钥)。也命中 git object/docker digest 等常见路径,故仅用于 query/url。 */
+const LONG_HEX_RE = /\b[0-9a-fA-F]{32,}\b/;
+
 /**
- * 高熵串:32+ 位连续 base64url 段且**同时含字母与数字**(随机 token 的特征)。只按长度
- * 会误伤长路径/长英文(如 80 个 `x`),故要求字母数字混合 —— 纯字母(词/路径)、纯数字不命中。
+ * 通用高熵串:32+ 位连续 base64url 段且**同时含字母与数字**(随机 token 特征)。会误伤
+ * webpack 缓存名/UUID 目录等常见路径,故与长 hex 一样**仅用于 query/url**(裸 token 的场景),
+ * 不套用到 path/shell。只按长度会误伤长英文(如 80 个 `x`),故要求字母数字混合。
  */
-function hasHighEntropyRun(s: string): boolean {
+function hasGenericSecretShape(s: string): boolean {
+  if (LONG_HEX_RE.test(s)) return true;
   const runs = s.match(/[A-Za-z0-9_-]{32,}/g);
   return !!runs && runs.some((r) => /[0-9]/.test(r) && /[A-Za-z]/.test(r));
 }
 
-/** 是否命中任一密钥形状(已知前缀/hex/JWT + 通用高熵串)。 */
-function looksLikeSecretShape(s: string): boolean {
-  return SECRET_SHAPE_RES.some((re) => re.test(s)) || hasHighEntropyRun(s);
-}
-
-/** 是否命中关键词或形状守卫(群卡片对全员可见,任一命中即隐藏)。 */
-function isSensitive(s: string): boolean {
-  return SECRET_RE.test(s) || looksLikeSecretShape(s);
+/**
+ * 是否命中敏感串。`generic` 为 true(query/url 策略)时额外套用长 hex/高熵检测;path/shell
+ * 只走关键词 + 明确前缀,避免把 git SHA / docker digest / 缓存哈希等正常路径误伤成空。
+ * 群卡片对全员可见,任一命中即隐藏。
+ */
+function isSensitive(s: string, generic: boolean): boolean {
+  if (SECRET_RE.test(s)) return true;
+  if (SECRET_PREFIX_RES.some((re) => re.test(s))) return true;
+  return generic && hasGenericSecretShape(s);
 }
 
 /**
@@ -205,7 +209,10 @@ export function summarizeToolParams(toolName: string | undefined, params: unknow
   }
   if (!v) return "";
   const s = v.replace(/\s+/g, " ").trim();
-  if (!s || isSensitive(s)) return ""; // 关键词 + 形状守卫:任一命中即隐藏
+  // query/url 是「裸 token」易出没处 → 额外套用通用高熵/长 hex 检测;path/shell 只走关键词
+  // + 明确前缀,避免把 git SHA / docker digest / 缓存哈希等正常路径误伤成空。
+  const generic = strategy === "query" || strategy === "url";
+  if (!s || isSensitive(s, generic)) return "";
   return s.length > SUMMARY_MAX ? s.slice(0, SUMMARY_MAX) + "…" : s;
 }
 

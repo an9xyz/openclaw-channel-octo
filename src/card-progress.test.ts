@@ -340,4 +340,17 @@ describe("card-progress 状态机 + hook + 节流", () => {
     await vi.advanceTimersByTimeAsync(900);
     expect(calls.some((c) => c.url.includes("/sendMessage"))).toBe(true);
   });
+
+  it("J2: 同 apiUrl+同频道但不同 botToken(两个账号同群回复)也 fail closed", async () => {
+    const { fn, calls } = mockFetch();
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi();
+
+    const base = { apiUrl: "https://a.test", channelId: "g1", channelType: ChannelType.Group };
+    setCardContext("Z", { ...base, botToken: "tokA" });
+    setCardContext("Z", { ...base, botToken: "tokB" }); // 仅 token 不同 → 仍视为跨身份碰撞
+    handlers.before_tool_call({ toolName: "read" }, { sessionKey: "Z" });
+    await vi.advanceTimersByTimeAsync(900);
+    expect(calls.length).toBe(0); // fail closed,两边都不发
+  });
 });
