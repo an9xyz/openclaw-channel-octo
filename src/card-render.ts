@@ -222,12 +222,30 @@ export function fmtDuration(ms?: number): string {
   return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
 }
 
-/** 单步 → 一行文案:图标 + 标签 + 参数摘要 + 状态/耗时。 */
+/** 错误文本展示上限(比参数摘要略宽,但仍防多 KB 堆栈撑爆卡片)。 */
+const ERROR_MAX = 120;
+
+/**
+ * 清洗工具错误文本后再渲染 —— 错误串是与参数摘要**同等**的泄露 sink:常含 stderr、
+ * 失败命令输出、请求 URL/header、webhook 路径、token、文件片段,且长度不可控。故与摘要
+ * 用同一 fail-closed 策略:折叠空白 → 命中关键词/形状(generic)则整串隐藏 → 否则截断。
+ */
+export function sanitizeErrorText(err?: string): string {
+  if (!err) return "";
+  const s = err.replace(/\s+/g, " ").trim();
+  if (!s || isSensitive(s, true)) return ""; // 命中敏感 → 不展示错误详情
+  return s.length > ERROR_MAX ? s.slice(0, ERROR_MAX) + "…" : s;
+}
+
+/** 单步 → 一行文案:图标 + 标签 + 参数摘要 + 状态/耗时。错误详情经脱敏+截断。 */
 export function stepLine(step: CardStep): string {
   const { icon, label } = resolveToolMeta(step.tool);
   const sum = step.summary ? `：${step.summary}` : "";
   if (step.status === "running") return `⏳ ${label}${sum}`;
-  if (step.status === "error") return `❌ ${label}${sum}${step.error ? ` — ${step.error}` : ""}`;
+  if (step.status === "error") {
+    const detail = sanitizeErrorText(step.error);
+    return `❌ ${label}${sum}${detail ? ` — ${detail}` : ""}`;
+  }
   const dur = fmtDuration(step.durationMs);
   return `${icon} ${label}${sum}${dur ? ` · ${dur}` : ""}`;
 }
@@ -238,8 +256,10 @@ function headerText(state: CardProgressState): string {
       return "🤖 思考中…";
     case "tool":
       return "🤖 正在处理…";
-    case "error":
-      return `⚠️ 已中断${state.errorText ? `：${state.errorText}` : ""}`;
+    case "error": {
+      const detail = sanitizeErrorText(state.errorText);
+      return `⚠️ 已中断${detail ? `：${detail}` : ""}`;
+    }
     case "done": {
       const n = state.steps.length;
       const secs = fmtDuration(state.elapsedMs);

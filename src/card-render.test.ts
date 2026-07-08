@@ -66,8 +66,8 @@ describe("summarizeToolParams", () => {
   it("形状脱敏:query/pattern 里的裸密钥(无关键词)也隐藏", () => {
     expect(summarizeToolParams("grep", { pattern: "AKIAIOSFODNN7EXAMPLE" })).toBe(""); // AWS key id
     expect(summarizeToolParams("web_search", { query: "d41d8cd98f00b204e9800998ecf8427e" })).toBe(""); // 32 hex
-    expect(summarizeToolParams("grep", { pattern: "ghp_16C7e42F292c6912E7710c838347Ae178B4a" })).toBe(""); // GitHub token
-    expect(summarizeToolParams("web_search", { query: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123def456" })).toBe(""); // JWT
+    expect(summarizeToolParams("grep", { pattern: "ghp_16C7e42F292c6912E7710c838347Ae178B4a" })).toBe(""); // GitHub token — gitleaks:allow (fake fixture)
+    expect(summarizeToolParams("web_search", { query: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123def456" })).toBe(""); // JWT — gitleaks:allow (fake fixture)
     // 混合字母数字的 40+ 位随机串。
     expect(summarizeToolParams("grep", { pattern: "aB3dE7gH1jK4mN8pQ2rS5tU9vW6xY0zA1bC2dE3f" })).toBe("");
     // 正常长英文 / 纯字母长串不误伤。
@@ -125,6 +125,23 @@ describe("stepLine", () => {
     expect(stepLine({ tool: "bash", status: "error", summary: "rm x", error: "boom" })).toBe(
       "❌ 执行命令：rm x — boom",
     ));
+  it("error 详情脱敏:命中敏感串则只留状态、不渲染原始错误", () => {
+    // 含 token 关键词
+    expect(stepLine({ tool: "bash", status: "error", error: "auth failed: Bearer sk-live-abc" })).toBe("❌ 执行命令");
+    // curl 报错回显含密钥形状的 URL(sk- 前缀长 token)
+    expect(stepLine({ tool: "bash", status: "error", summary: "curl", error: "curl: (22) https://api.x/v1?sk-live-ABC123XYZ456def789ghi returned 401" })).toBe(
+      "❌ 执行命令：curl",
+    );
+    // AKIA 出现在错误里
+    expect(stepLine({ tool: "exec", status: "error", error: "invalid key AKIAIOSFODNN7EXAMPLE" })).toBe("❌ 执行命令");
+  });
+  it("error 详情超长截断,折叠空白", () => {
+    const long = "line1\n" + "z".repeat(200); // 非 hex、无数字 → 不算密钥,仅超长
+    const out = stepLine({ tool: "read", status: "error", error: long });
+    expect(out.startsWith("❌ 读取文件 — line1 ")).toBe(true);
+    expect(out.endsWith("…")).toBe(true);
+    expect(out.length).toBeLessThan(140); // 图标+标签 + 120 上限 + 省略号
+  });
 });
 
 describe("renderProgressCard", () => {
