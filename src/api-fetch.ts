@@ -3,7 +3,7 @@
  * These are used by inbound/outbound where the full OctoAPI class is not available.
  */
 
-import { ChannelType, MessageType, type MentionEntity, type RichTextBlock, type SendMessageResult, type TargetCandidate } from "./types.js";
+import { ChannelType, MessageType, CARD_PROFILE, CARD_VERSION, type MentionEntity, type RichTextBlock, type SendMessageResult, type TargetCandidate } from "./types.js";
 import path from "path";
 import { open } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -377,6 +377,182 @@ export async function sendRichTextMessage(params: {
     client_msg_no: params.clientMsgNo ?? generateClientMsgNo(),
     ...(params.onBehalfOf ? { on_behalf_of: params.onBehalfOf } : {}),
   }, params.signal);
+}
+
+/**
+ * 发送一条 InteractiveCard(=17) 卡片消息（octo-server PR #525 P1）。
+ *
+ * 复用现有 `/v1/bot/sendMessage`，`payload.type=17`，`card` 为标准 Adaptive Cards
+ * 1.5 JSON（`octo/v1` profile）。契约要点：
+ *   - `card` 由调用方组装为合法 AC1.5 JSON；schema 校验由服务端 `pkg/cardmsg` 权威，
+ *     本函数只组包不校验。
+ *   - `plain` 出站可附带（老客户端降级用），server 在 dispatch 出口权威重算覆盖。
+ *   - `profile`/`card_version` 固定 `octo/v1`/`1.5`（Decision 10；不匹配 server 400）。
+ *   - `onBehalfOf` 透传保证 persona-clone 身份一致（C3）；注意 OBO + type17 会被
+ *     server 在 P1 拒绝（Decision 2b），故仅用于普通 bot 发卡场景。
+ *   - 发卡前应先 `getCardProfile` feature-detect（D12）。
+ */
+export async function sendCardMessage(params: {
+  apiUrl: string;
+  botToken: string;
+  channelId: string;
+  channelType: ChannelType;
+  card: Record<string, unknown>;
+  plain?: string;
+  mentionUids?: string[];
+  mentionEntities?: MentionEntity[];
+  mentionAll?: boolean;
+  replyMsgId?: string;
+  onBehalfOf?: string;
+  clientMsgNo?: string;
+  signal?: AbortSignal;
+}): Promise<SendMessageResult | undefined> {
+  if (!params.channelId || !params.channelId.trim()) {
+    throw new Error("octo: channelId is required to send a message");
+  }
+  const payload: Record<string, unknown> = {
+    type: MessageType.InteractiveCard,
+    card: params.card,
+    profile: CARD_PROFILE,
+    card_version: CARD_VERSION,
+  };
+  if (typeof params.plain === "string") {
+    payload.plain = params.plain;
+  }
+  if (
+    (params.mentionUids && params.mentionUids.length > 0) ||
+    (params.mentionEntities && params.mentionEntities.length > 0) ||
+    params.mentionAll
+  ) {
+    const mention: Record<string, unknown> = {};
+    if (params.mentionUids && params.mentionUids.length > 0) mention.uids = params.mentionUids;
+    if (params.mentionEntities && params.mentionEntities.length > 0) mention.entities = params.mentionEntities;
+    if (params.mentionAll) mention.all = 1;
+    payload.mention = mention;
+  }
+  if (params.replyMsgId) {
+    payload.reply = { message_id: params.replyMsgId };
+  }
+  return await postJson<SendMessageResult>(params.apiUrl, params.botToken, "/v1/bot/sendMessage", {
+    channel_id: params.channelId,
+    channel_type: params.channelType,
+    payload,
+    client_msg_no: params.clientMsgNo ?? generateClientMsgNo(),
+    ...(params.onBehalfOf ? { on_behalf_of: params.onBehalfOf } : {}),
+  }, params.signal);
+}
+
+/**
+ * 就地编辑一条 InteractiveCard(=17) 消息（D6 帧 rewrite，octo-server PR#548）。
+ *
+ * `POST /v1/bot/message/edit`，`content_edit` 是**完整 type-17 信封的 JSON 字符串**
+ * （与 send 对称）。服务端 `cardmsg` 校验 + 权威重算 `plain` + `message_extra` upsert +
+ * `SendCMD(CMDSyncMessageExtra)` 扇出;仅能编辑 bot 自己发的、未撤回的卡。
+ *
+ *   - 不传 `message_seq`（canonical flow，服务端解析）。
+ *   - 不带 `card_seq`:adapter dispatch per-group 串行 = 单写者，服务端 last-write-wins;
+ *     并发多副本才需 CAS（届时 `card_seq` 需 string/BigInt 以免 JS number 精度丢失）。
+ *   - `onBehalfOf` 透传（C3 身份一致）;注意 OBO + type-17 被 P1 Decision 2b 拒，
+ *     故调用方应在 persona-clone 场景跳过卡片(见 `card-progress.ts`)。
+ */
+export async function editCardMessage(params: {
+  apiUrl: string;
+  botToken: string;
+  messageId: string;
+  channelId: string;
+  channelType: ChannelType;
+  card: Record<string, unknown>;
+  plain?: string;
+  /** 进度中间帧标 true → D10 不进修订历史(避免 cap 20 被进度噪音刷屏);终态帧不带 → 进历史。 */
+  transient?: boolean;
+  onBehalfOf?: string;
+  signal?: AbortSignal;
+}): Promise<void> {
+  if (!params.messageId) {
+    throw new Error("octo: messageId is required to edit a card");
+  }
+  if (!params.channelId || !params.channelId.trim()) {
+    throw new Error("octo: channelId is required to edit a card");
+  }
+  const envelope: Record<string, unknown> = {
+    type: MessageType.InteractiveCard,
+    card: params.card,
+    profile: CARD_PROFILE,
+    card_version: CARD_VERSION,
+  };
+  if (typeof params.plain === "string") {
+    envelope.plain = params.plain;
+  }
+  // D10:transient 帧不进修订历史侧表(进度中间帧用,避免 cap 20 被刷屏)。
+  if (params.transient) {
+    envelope.transient = true;
+  }
+  await postJson(params.apiUrl, params.botToken, "/v1/bot/message/edit", {
+    message_id: params.messageId,
+    channel_id: params.channelId,
+    channel_type: params.channelType,
+    content_edit: JSON.stringify(envelope),
+    ...(params.onBehalfOf ? { on_behalf_of: params.onBehalfOf } : {}),
+  }, params.signal);
+}
+
+/**
+ * D12 生产者能力发现 manifest（octo-server PR #525 P2 D12，additive-only）。
+ */
+export interface CardProfileManifest {
+  /**
+   * D12 manifest 端点是否**已部署并响应**（非 404）。
+   * `false` 表示端点尚未上线（PR-D 未落地）—— 调用方应回退到 adapter 侧 config
+   * 显式开关决定是否发卡,**不可**把它等同于「服务端明确关闭」。
+   */
+  available: boolean;
+  /** 卡片消息是否启用（OCTO_CARD_MESSAGE_ENABLED）。禁用时 server 仍返 200 + manifest。 */
+  enabled: boolean;
+  /** 支持的 profile 列表，如 `["octo/v1"]`（P2 增 `"octo/v2"`）。 */
+  profiles?: string[];
+  card_version?: string;
+  /** 尺寸/结构上限（node/depth/body caps 等）。 */
+  limits?: Record<string, unknown>;
+}
+
+/**
+ * GET /v1/bot/card/profile — D12 能力发现。发卡前 feature-detect，避免用发送试探
+ * （一个 400 无法区分「disabled」与「invalid」）。
+ *
+ * 返回 `available` 区分两种「不发」语义（避免 gate 死锁）:
+ *   - 端点未部署（404）→ `{ available:false }`：调用方回退 adapter config 显式开关，
+ *     **不可**当作服务端明确关闭（octo-server PR-D 上线前 R2 未落地即此情形）。
+ *   - 端点已部署但 `enabled:false` → `{ available:true, enabled:false }`：服务端明确关，不发。
+ * 传输 / 5xx 抛错，交由调用方重试节奏处理。
+ */
+export async function getCardProfile(params: {
+  apiUrl: string;
+  botToken: string;
+  signal?: AbortSignal;
+}): Promise<CardProfileManifest> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/card/profile`;
+  const resp = await fetch(url, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${params.botToken}` },
+    signal: params.signal ?? AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  // 端点尚未部署（PR-D 未落地）→ available:false，调用方回退 config 显式开关，
+  // 不可当作「服务端明确关闭」硬降级不发。
+  if (resp.status === 404) return { available: false, enabled: false };
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`Bot API GET /v1/bot/card/profile failed (${resp.status}): ${text || resp.statusText}`);
+  }
+  // 端点已部署（available:true）；manifest 内容异常时保守视作 enabled:false。
+  const raw = (await resp.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!raw || typeof raw !== "object") return { available: true, enabled: false };
+  return {
+    available: true,
+    enabled: raw.enabled === true,
+    ...(Array.isArray(raw.profiles) ? { profiles: raw.profiles as string[] } : {}),
+    ...(typeof raw.card_version === "string" ? { card_version: raw.card_version } : {}),
+    ...(raw.limits && typeof raw.limits === "object" ? { limits: raw.limits as Record<string, unknown> } : {}),
+  };
 }
 
 export async function sendTyping(params: {

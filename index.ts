@@ -27,6 +27,7 @@ import { setOctoRuntime } from "./src/runtime.js";
 import { octoPlugin } from "./src/channel.js";
 import { createOctoManagementTools } from "./src/agent-tools.js";
 import { CHANNEL_ID } from "./src/constants.js";
+import { registerCardProgress } from "./src/card-progress.js";
 
 // ---------------------------------------------------------------------------
 // Tool-availability self-diagnostic (issue #137)
@@ -236,5 +237,9 @@ export default defineBundledChannelEntry({
         ...(systemSections.length > 0 ? { prependSystemContext: systemSections.join('\n\n') } : {}),
       };
     });
+
+    // 波 B:注册卡片进度 hook(before/after_tool_call、model_call_started)。
+    // 只处理 dispatch 经 setCardContext 登记的 octo session(见 src/card-progress.ts)。
+    registerCardProgress(api);
   },
 });

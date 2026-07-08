@@ -1,0 +1,305 @@
+/**
+ * 波 B —— InteractiveCard(=17) 进度卡状态机 + hook 驱动 + 节流。
+ *
+ * 架构(见 .context 计划):
+ *   - dispatch(`inbound.ts`)在 run 开始 `setCardContext(sessionKey, ctx)` 存发送上下文
+ *     (apiUrl/botToken/channel/onBehalfOf),`finally` 里 `finalizeCard(sessionKey, success)`。
+ *   - 本模块订阅 hook(before/after_tool_call、model_call_started),用 `ctx.sessionKey`
+ *     查 Map:首个工具事件懒发占位卡 → 后续就地 `editCardMessage`,节流合帧。
+ *   - `sessionKey` 桥接 dispatch 与 hook(H1 实证一致)。Map 只含 octo dispatch 登记的
+ *     session → hook 查不到即 return,**天然过滤**非 octo run,无需 messageProvider 判断。
+ *
+ * 决策:关联键 sessionKey;单写者(dispatch per-group 串行)→ 不传 card_seq;卡仅进度/
+ * 状态(C2,答案走文本);OBO(persona-clone)场景跳过(服务端拒 type-17 OBO,Decision 2b)。
+ */
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { ChannelType } from "./types.js";
+import { sendCardMessage, editCardMessage, getCardProfile } from "./api-fetch.js";
+import { renderProgressCard, summarizeToolParams, type CardStep, type CardProgressState } from "./card-render.js";
+
+/** dispatch 侧登记的发送上下文。 */
+export interface CardContext {
+  apiUrl: string;
+  botToken: string;
+  channelId: string;
+  channelType: ChannelType;
+  /** persona-clone 身份;存在则跳过卡片(服务端拒 type-17 OBO)。 */
+  onBehalfOf?: string;
+}
+
+interface CardEntry {
+  ctx: CardContext;
+  messageId?: string;
+  phase: CardProgressState["phase"];
+  steps: CardStep[];
+  startedAt: number;
+  dirty: boolean;
+  inFlight: boolean;
+  skip: boolean;
+  flushTimer?: ReturnType<typeof setTimeout>;
+  /** 当前 in-flight flush 的 promise;finalizeCard 据此等待首帧 send/中间帧 edit 落定。 */
+  flushPromise?: Promise<void>;
+}
+
+/** key = sessionKey(H1 实证:全 hook 一致)。 */
+const cards = new Map<string, CardEntry>();
+
+/** D12 gate 结果缓存,key = apiUrl(同部署同结果),避免每 session 重复探测。 */
+const gateCache = new Map<string, boolean>();
+
+const FLUSH_DEBOUNCE_MS = 800;
+const EDIT_TIMEOUT_MS = 10_000;
+
+// 进度卡失败不影响主回复流程 —— 仅告警,不抛。
+// eslint-disable-next-line no-console -- 波 B 进度卡诊断,失败降级不阻断主流程
+const warn = (msg: string): void => console.warn(`[octo:card-progress] ${msg}`);
+// eslint-disable-next-line no-console -- env-gated 端到端联调观测(OCTO_CARD_DEBUG),默认关
+const dbg: (msg: string) => void = process.env.OCTO_CARD_DEBUG
+  ? (msg) => console.log(`[octo:card-progress] ${msg}`)
+  : () => {};
+
+/** dispatch run 开始时登记发送上下文。onBehalfOf 存在 → 标记跳过。 */
+export function setCardContext(sessionKey: string, ctx: CardContext): void {
+  if (!sessionKey) return;
+  cards.set(sessionKey, {
+    ctx,
+    phase: "thinking",
+    steps: [],
+    startedAt: Date.now(),
+    dirty: false,
+    inFlight: false,
+    skip: !!ctx.onBehalfOf,
+  });
+  dbg(`context set session=${sessionKey} channel=${ctx.channelId} obo=${!!ctx.onBehalfOf}`);
+}
+
+/**
+ * 是否允许发卡:D12 manifest 优先,端点未部署(available:false)则回退 env 开关。
+ * 返回值三态:`true`=启用,`false`=**明确禁用**(可永久 skip 本 session),
+ * `null`=**瞬时探测失败**(5xx/网络,不缓存、不 skip,下次 flush 重探)。
+ */
+async function gateEnabled(ctx: CardContext): Promise<boolean | null> {
+  const cached = gateCache.get(ctx.apiUrl);
+  if (cached !== undefined) return cached;
+  try {
+    const m = await getCardProfile({ apiUrl: ctx.apiUrl, botToken: ctx.botToken });
+    const enabled = m.available ? m.enabled : process.env.OCTO_CARD_MESSAGE_ENABLED === "1";
+    // 只缓存**确定结果**(manifest 明确 enabled/disabled,或 available:false 回退 env)。
+    gateCache.set(ctx.apiUrl, enabled);
+    return enabled;
+  } catch (err: unknown) {
+    // 瞬时失败(5xx/网络抖动)不缓存、不 skip —— 否则一次抖动会让该 apiUrl(缓存)或
+    // 该 session(skip)的卡片进度永久关闭。返回 null,下次 flush(仍在 !messageId 期间)重探。
+    warn(`card gate probe failed (not caching): ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
+function scheduleFlush(sessionKey: string, entry: CardEntry): void {
+  entry.dirty = true;
+  if (entry.flushTimer) return;
+  entry.flushTimer = setTimeout(() => {
+    entry.flushTimer = undefined;
+    void flush(sessionKey);
+  }, FLUSH_DEBOUNCE_MS);
+}
+
+async function flush(sessionKey: string): Promise<void> {
+  const entry = cards.get(sessionKey);
+  if (!entry || entry.skip) return;
+  // 已有 flush 在执行 → 直接返回。不在这里补排:执行中的那次会在 finally 里按 dirty 重排,
+  // 且**不**覆盖 entry.flushPromise(否则 finalizeCard await 到的会是这次空转、而非真实 send)。
+  if (entry.inFlight) return;
+  if (!entry.dirty) return;
+
+  // 置 inFlight 于任何 await **之前**:gate 探测/send 往返期间挡住并发 flush,否则首帧未落
+  // messageId 前的 gate await 窗口里,新定时器可穿过检查并发起第二次 send(重复发卡)。
+  entry.inFlight = true;
+  const work = runFlush(sessionKey, entry);
+  entry.flushPromise = work;
+  try {
+    await work;
+  } finally {
+    if (entry.flushPromise === work) entry.flushPromise = undefined;
+  }
+}
+
+/** 实际执行 gate + send/edit。调用方已置 inFlight=true 并接管 flushPromise。 */
+async function runFlush(sessionKey: string, entry: CardEntry): Promise<void> {
+  try {
+    // 首帧前做一次 D12 gate。明确禁用 → 永久跳过本 session;瞬时失败 → 本轮不发,
+    // 下次 flush(下个工具事件触发)重探,避免一次抖动永久关闭本 session。
+    if (!entry.messageId) {
+      const gate = await gateEnabled(entry.ctx);
+      if (gate === false) {
+        entry.skip = true;
+        return;
+      }
+      if (gate === null) return; // 瞬时探测失败,不 skip、不清 dirty,留待重探
+    }
+
+    entry.dirty = false;
+    const { card, plain } = renderProgressCard({ phase: entry.phase, steps: entry.steps });
+    const signal = AbortSignal.timeout(EDIT_TIMEOUT_MS);
+    if (!entry.messageId) {
+      const res = await sendCardMessage({
+        apiUrl: entry.ctx.apiUrl,
+        botToken: entry.ctx.botToken,
+        channelId: entry.ctx.channelId,
+        channelType: entry.ctx.channelType,
+        card,
+        plain,
+        ...(entry.ctx.onBehalfOf ? { onBehalfOf: entry.ctx.onBehalfOf } : {}),
+        signal,
+      });
+      entry.messageId = res?.message_id;
+      if (!entry.messageId) {
+        warn("placeholder card send returned no message_id; disabling for session");
+        entry.skip = true;
+        return;
+      }
+      dbg(`placeholder sent messageId=${entry.messageId} steps=${entry.steps.length}`);
+    } else {
+      await editCardMessage({
+        apiUrl: entry.ctx.apiUrl,
+        botToken: entry.ctx.botToken,
+        messageId: entry.messageId,
+        channelId: entry.ctx.channelId,
+        channelType: entry.ctx.channelType,
+        card,
+        plain,
+        transient: true, // 进度中间帧不进修订历史(D10);终态帧由 finalizeCard 不带 transient
+        ...(entry.ctx.onBehalfOf ? { onBehalfOf: entry.ctx.onBehalfOf } : {}),
+        signal,
+      });
+      dbg(`edited steps=${entry.steps.length} phase=${entry.phase}`);
+    }
+  } catch (err: unknown) {
+    warn(`flush failed: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    entry.inFlight = false;
+    // 期间有新帧 → 再刷。entry 已被 finalize/clear 删除时不再重排,避免悬挂定时器。
+    if (entry.dirty && !entry.skip && cards.get(sessionKey) === entry) scheduleFlush(sessionKey, entry);
+  }
+}
+
+/**
+ * dispatch `finally` 收尾:渲染终态帧(✅ 已完成 / ⚠️ 中断),清理 Map。
+ * 幂等:未登记或没发过占位卡则仅清理。
+ */
+export async function finalizeCard(
+  sessionKey: string,
+  opts: { success: boolean; errorText?: string } = { success: true },
+): Promise<void> {
+  const entry = cards.get(sessionKey);
+  if (!entry) return;
+  // 等待 in-flight flush 落定后再接管。否则:首帧 send 尚未 return 时 messageId 未就绪,
+  // 直接删 entry 会跳过终态帧,占位卡「正在处理…」永久冻结;若有 in-flight 中间帧
+  // (transient)edit,还可能后于终态帧落库、把「✅ 已完成」覆盖回「正在处理」。await 后
+  // messageId 必已就绪、edit 顺序也串好。flush 内部已 catch+告警,这里吞掉即可。
+  if (entry.flushPromise) {
+    try { await entry.flushPromise; } catch { /* flush 内部已告警 */ }
+  }
+  if (entry.flushTimer) clearTimeout(entry.flushTimer);
+  cards.delete(sessionKey);
+
+  // 从没发过卡(skip / 无工具调用)→ 无需收尾帧。
+  if (entry.skip || !entry.messageId) return;
+
+  const state: CardProgressState = {
+    phase: opts.success ? "done" : "error",
+    steps: entry.steps,
+    elapsedMs: Date.now() - entry.startedAt,
+    ...(opts.errorText ? { errorText: opts.errorText } : {}),
+  };
+  try {
+    const { card, plain } = renderProgressCard(state);
+    await editCardMessage({
+      apiUrl: entry.ctx.apiUrl,
+      botToken: entry.ctx.botToken,
+      messageId: entry.messageId,
+      channelId: entry.ctx.channelId,
+      channelType: entry.ctx.channelType,
+      card,
+      plain,
+      ...(entry.ctx.onBehalfOf ? { onBehalfOf: entry.ctx.onBehalfOf } : {}),
+      signal: AbortSignal.timeout(EDIT_TIMEOUT_MS),
+    });
+    dbg(`finalized session=${sessionKey} phase=${state.phase} steps=${entry.steps.length}`);
+  } catch (err: unknown) {
+    warn(`finalize failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/** 硬清理(不发收尾帧),用于异常兜底。 */
+export function clearCard(sessionKey: string): void {
+  const entry = cards.get(sessionKey);
+  if (!entry) return;
+  if (entry.flushTimer) clearTimeout(entry.flushTimer);
+  cards.delete(sessionKey);
+}
+
+/** 测试辅助:清空全部状态。 */
+export function _resetCardProgressForTests(): void {
+  for (const e of cards.values()) if (e.flushTimer) clearTimeout(e.flushTimer);
+  cards.clear();
+  gateCache.clear();
+}
+
+/**
+ * 注册 hook。经 `index.ts` registerFull 调用(仅 full mode)。
+ * hook 全局触发,但仅处理 Map 中已登记(octo dispatch)的 sessionKey。
+ */
+export function registerCardProgress(api: OpenClawPluginApi): void {
+  api.on("before_tool_call", (event: unknown, ctx: unknown) => {
+    const e = (event ?? {}) as { toolName?: string; params?: unknown; toolCallId?: string };
+    const sk = (ctx as { sessionKey?: string })?.sessionKey;
+    const entry = sk ? cards.get(sk) : undefined;
+    if (!entry || entry.skip || !e.toolName) return;
+    dbg(`before_tool_call tool=${e.toolName} session=${sk}`);
+    entry.phase = "tool";
+    entry.steps.push({
+      tool: e.toolName,
+      status: "running",
+      summary: summarizeToolParams(e.toolName, e.params),
+      ...(e.toolCallId ? { toolCallId: e.toolCallId } : {}),
+    });
+    scheduleFlush(sk!, entry);
+  });
+
+  api.on("after_tool_call", (event: unknown, ctx: unknown) => {
+    const e = (event ?? {}) as { toolName?: string; error?: string; durationMs?: number; toolCallId?: string };
+    const sk = (ctx as { sessionKey?: string })?.sessionKey;
+    const entry = sk ? cards.get(sk) : undefined;
+    if (!entry || entry.skip) return;
+    // 回填终态。优先按 toolCallId 精确匹配 running 步骤;若 toolCallId 存在但没命中
+    // running(过期/重复投递的 after 事件),直接丢弃,**不**回退按名匹配 —— 否则会把仍
+    // 在跑的并发同名步骤误标为终态。仅当 toolCallId 缺失(旧 host)才回退「最后一个同名 running」。
+    let target: CardStep | undefined;
+    if (e.toolCallId) {
+      target = entry.steps.find((s) => s.toolCallId === e.toolCallId && s.status === "running");
+    } else {
+      for (let i = entry.steps.length - 1; i >= 0; i--) {
+        const s = entry.steps[i];
+        if (s.tool === e.toolName && s.status === "running") { target = s; break; }
+      }
+    }
+    if (target) {
+      target.status = e.error ? "error" : "done";
+      if (typeof e.durationMs === "number") target.durationMs = e.durationMs;
+      if (e.error) target.error = e.error;
+    }
+    scheduleFlush(sk!, entry);
+  });
+
+  api.on("model_call_started", (_event: unknown, ctx: unknown) => {
+    const sk = (ctx as { sessionKey?: string })?.sessionKey;
+    const entry = sk ? cards.get(sk) : undefined;
+    if (!entry || entry.skip) return;
+    // 仅在还没有工具步骤时展示「思考中」,避免工具间的模型调用刷屏。
+    if (entry.steps.length === 0 && entry.phase !== "thinking") {
+      entry.phase = "thinking";
+      scheduleFlush(sk!, entry);
+    }
+  });
+}
