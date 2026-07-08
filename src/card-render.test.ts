@@ -128,10 +128,8 @@ describe("stepLine", () => {
   it("error 详情脱敏:命中敏感串则只留状态、不渲染原始错误", () => {
     // 含 token 关键词
     expect(stepLine({ tool: "bash", status: "error", error: "auth failed: Bearer sk-live-abc" })).toBe("❌ 执行命令");
-    // curl 报错回显含密钥形状的 URL(sk- 前缀长 token)
-    expect(stepLine({ tool: "bash", status: "error", summary: "curl", error: "curl: (22) https://api.x/v1?sk-live-ABC123XYZ456def789ghi returned 401" })).toBe(
-      "❌ 执行命令：curl",
-    );
+    // 裸 sk- 前缀长 token(不在 URL 里)→ 整行隐藏
+    expect(stepLine({ tool: "bash", status: "error", error: "token sk-live-ABC123XYZ456def789ghi rejected" })).toBe("❌ 执行命令");
     // AKIA 出现在错误里
     expect(stepLine({ tool: "exec", status: "error", error: "invalid key AKIAIOSFODNN7EXAMPLE" })).toBe("❌ 执行命令");
   });
@@ -141,6 +139,27 @@ describe("stepLine", () => {
     expect(out.startsWith("❌ 读取文件 — line1 ")).toBe(true);
     expect(out.endsWith("…")).toBe(true);
     expect(out.length).toBeLessThan(140); // 图标+标签 + 120 上限 + 省略号
+  });
+  it("error 内嵌 URL 降级为注册域(对称参数路径),webhook 路径/隧道主机不泄露", () => {
+    // 短、无关键词的 webhook 路径段:isSensitive 抓不到,靠 URL 降级丢掉。
+    const slack = stepLine({ tool: "bash", status: "error", error: "curl: (22) https://hooks.slack.com/services/T01ABCDEF/B02GHIJKL/Xy8zQw3rT7uVwXyZ0 returned 404" });
+    expect(slack).toContain("https://slack.com");
+    expect(slack).not.toContain("services");
+    expect(slack).not.toContain("Xy8zQw3rT7uVwXyZ0");
+    // Discord webhook。
+    const discord = stepLine({ tool: "bash", status: "error", error: "POST https://discord.com/api/webhooks/123456789012345678/aBcDeFgHiJkLmNoPqRsTuVwX failed" });
+    expect(discord).toContain("https://discord.com");
+    expect(discord).not.toContain("webhooks");
+    // 内网主机 + 短 opaque token(16 hex,<32 → 形状抓不到),靠降级丢子域+path。
+    const internal = stepLine({ tool: "exec", status: "error", error: "failed to POST https://mytenant.internal.corp:8443/webhook/9f8e7d6c5b4a3210 — 500" });
+    expect(internal).toContain("https://internal.corp");
+    expect(internal).not.toContain("mytenant");
+    expect(internal).not.toContain("9f8e7d6c5b4a3210");
+    // 预签名 URL 的签名在 query,降级后连同子域一起丢。
+    const s3 = stepLine({ tool: "bash", status: "error", error: "fetch https://mybucket.s3.amazonaws.com/f?X-Amz-Signature=deadbeefcafe returned 403" });
+    expect(s3).toContain("https://amazonaws.com");
+    expect(s3).not.toContain("mybucket");
+    expect(s3).not.toContain("Signature");
   });
 });
 

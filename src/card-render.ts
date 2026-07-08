@@ -175,20 +175,30 @@ function summarizeShell(p: Record<string, unknown>): string {
 }
 
 /**
- * url:只保留 **scheme://注册域**,丢弃 path/query/userinfo **和所有子域**。凭据既可能在
- * query,也常整段嵌在 path 里(Slack/Discord webhook `/services/T../B../XXXX`),更有隧道/
- * 预签名场景**主机名本身即密钥**(ngrok 随机子域、预签名 bucket 名)—— 这些随机串不含
- * 关键词、躲过 SECRET_RE。故只暴露注册域(eTLD+1),既够用又不泄露。
+ * URL → `scheme://注册域`。丢弃 path/query/userinfo **和所有子域**:凭据既可能在 query,
+ * 也常整段嵌在 path 里(Slack/Discord webhook `/services/T../B../XXXX`),更有隧道/预签名
+ * 场景**主机名本身即密钥**(ngrok 随机子域、预签名 bucket 名)—— 这些随机串不含关键词、躲过
+ * SECRET_RE。故只暴露注册域(eTLD+1)。解析失败返回 null(原串可能含 token,调用方丢弃)。
  */
+function originDomain(rawUrl: string): string | null {
+  try {
+    const u = new URL(rawUrl);
+    return `${u.protocol}//${registrableDomain(u.hostname)}`;
+  } catch {
+    return null;
+  }
+}
+
+/** 把文本里内嵌的 http(s) URL 就地降级为 scheme://注册域(解析失败则整段抹除)。 */
+function reduceUrlsInText(s: string): string {
+  return s.replace(/\bhttps?:\/\/[^\s]+/gi, (m) => originDomain(m) ?? "");
+}
+
+/** url 策略:取 url 参数并降级为注册域。 */
 function summarizeUrl(p: Record<string, unknown>): string {
   const raw = firstString(p, ["url"]);
   if (!raw) return "";
-  try {
-    const u = new URL(raw);
-    return `${u.protocol}//${registrableDomain(u.hostname)}`;
-  } catch {
-    return ""; // 解析失败 → 不显示(原串可能含 token)
-  }
+  return originDomain(raw) ?? "";
 }
 
 /**
@@ -227,12 +237,18 @@ const ERROR_MAX = 120;
 
 /**
  * 清洗工具错误文本后再渲染 —— 错误串是与参数摘要**同等**的泄露 sink:常含 stderr、
- * 失败命令输出、请求 URL/header、webhook 路径、token、文件片段,且长度不可控。故与摘要
- * 用同一 fail-closed 策略:折叠空白 → 命中关键词/形状(generic)则整串隐藏 → 否则截断。
+ * 失败命令输出、请求 URL/header、webhook 路径、token、文件片段,且长度不可控。清洗顺序:
+ *   1. 折叠空白;
+ *   2. **内嵌 URL 降级为 scheme://注册域**(与参数路径 summarizeUrl 对称)—— 否则 webhook
+ *      路径/隧道主机等短、无关键词的密钥会绕过下面的 isSensitive 直接泄露;
+ *   3. 关键词/形状(generic)命中则整串隐藏;
+ *   4. 截断到 ERROR_MAX。
  */
 export function sanitizeErrorText(err?: string): string {
   if (!err) return "";
-  const s = err.replace(/\s+/g, " ").trim();
+  let s = err.replace(/\s+/g, " ").trim();
+  if (!s) return "";
+  s = reduceUrlsInText(s).replace(/\s+/g, " ").trim(); // URL 降级可能留下空隙
   if (!s || isSensitive(s, true)) return ""; // 命中敏感 → 不展示错误详情
   return s.length > ERROR_MAX ? s.slice(0, ERROR_MAX) + "…" : s;
 }

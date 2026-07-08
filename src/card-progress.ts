@@ -14,7 +14,7 @@
  */
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { ChannelType, CARD_PROFILE, CARD_VERSION } from "./types.js";
-import { sendCardMessage, editCardMessage, getCardProfile } from "./api-fetch.js";
+import { sendCardMessage, editCardMessage, getCardProfile, httpStatusFromApiFetchError } from "./api-fetch.js";
 import { renderProgressCard, summarizeToolParams, type CardStep, type CardProgressState } from "./card-render.js";
 
 /** dispatch 侧登记的发送上下文。 */
@@ -223,6 +223,12 @@ async function runFlush(sessionKey: string, entry: CardEntry): Promise<void> {
     }
   } catch (err: unknown) {
     warn(`flush failed: ${err instanceof Error ? err.message : String(err)}`);
+    // 确定性拒绝(4xx,除可重试的 429)→ fail-closed,别对着必然失败的 server 逐事件重试。
+    // 5xx / 网络 / 429 保持可重试(与 gate 的瞬时失败处理一致)。
+    const status = httpStatusFromApiFetchError(err);
+    if (status !== undefined && status >= 400 && status < 500 && status !== 429) {
+      entry.skip = true;
+    }
   } finally {
     entry.inFlight = false;
     // 期间有新帧 → 再刷。entry 已被 finalize/clear 删除时不再重排,避免悬挂定时器。

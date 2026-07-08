@@ -353,4 +353,50 @@ describe("card-progress 状态机 + hook + 节流", () => {
     await vi.advanceTimersByTimeAsync(900);
     expect(calls.length).toBe(0); // fail closed,两边都不发
   });
+
+  it("影响项#2: 首帧 send 持续 4xx → fail-closed,不再重试", async () => {
+    const calls: string[] = [];
+    const fn = vi.fn().mockImplementation(async (url: string) => {
+      calls.push(String(url));
+      if (String(url).includes("/card/profile")) return { ok: true, status: 200, json: async () => ({ enabled: true }) };
+      if (String(url).includes("/sendMessage")) return { ok: false, status: 403, text: async () => "forbidden" };
+      return { ok: true, status: 200, text: async () => "" };
+    });
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi();
+
+    setCardContext("e4", { apiUrl: "https://e4.test", botToken: "bf", channelId: "g1", channelType: ChannelType.Group });
+    handlers.before_tool_call({ toolName: "read" }, { sessionKey: "e4" });
+    await vi.advanceTimersByTimeAsync(900); // 首帧 send → 403 抛错
+    const sends1 = calls.filter((c) => c.includes("/sendMessage")).length;
+    handlers.after_tool_call({ toolName: "read", durationMs: 5 }, { sessionKey: "e4" });
+    await vi.advanceTimersByTimeAsync(900); // 未 skip 则会再试一次
+    const sends2 = calls.filter((c) => c.includes("/sendMessage")).length;
+    expect(sends1).toBe(1);
+    expect(sends2).toBe(1); // 4xx → skip,没有第二次 send
+  });
+
+  it("影响项#2: 首帧 send 429/5xx 仍可重试(不 fail-closed)", async () => {
+    const calls: string[] = [];
+    let sendN = 0;
+    const fn = vi.fn().mockImplementation(async (url: string) => {
+      calls.push(String(url));
+      if (String(url).includes("/card/profile")) return { ok: true, status: 200, json: async () => ({ enabled: true }) };
+      if (String(url).includes("/sendMessage")) {
+        sendN++;
+        if (sendN === 1) return { ok: false, status: 429, text: async () => "rate limited" };
+        return { ok: true, status: 200, text: async () => JSON.stringify({ message_id: "card1" }) };
+      }
+      return { ok: true, status: 200, text: async () => "" };
+    });
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi();
+
+    setCardContext("e5", { apiUrl: "https://e5.test", botToken: "bf", channelId: "g1", channelType: ChannelType.Group });
+    handlers.before_tool_call({ toolName: "read" }, { sessionKey: "e5" });
+    await vi.advanceTimersByTimeAsync(900); // 首帧 429 抛错 → 不 skip
+    handlers.after_tool_call({ toolName: "read", durationMs: 5 }, { sessionKey: "e5" });
+    await vi.advanceTimersByTimeAsync(900); // 重试成功
+    expect(calls.filter((c) => c.includes("/sendMessage")).length).toBe(2);
+  });
 });
