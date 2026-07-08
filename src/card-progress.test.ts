@@ -276,4 +276,68 @@ describe("card-progress 状态机 + hook + 节流", () => {
     expect(texts[1]).toBe("⌨️ 执行命令：sleep · 50ms"); // A done(只被标一次)
     expect(texts[2]).toBe("⏳ 执行命令：sleep");          // B 仍 running,未被重复事件误标
   });
+
+  it("J1: finalize await 期间下一 run setCardContext,不误删新 run 的 entry", async () => {
+    const calls: Array<{ url: string; body: Record<string, unknown> | undefined }> = [];
+    const sendGate = makeDeferred();
+    const sendReached = makeDeferred();
+    let sendId = 0;
+    const fn = vi.fn().mockImplementation(async (url: string, init?: { body?: string }) => {
+      calls.push({ url: String(url), body: init?.body ? JSON.parse(init.body) : undefined });
+      if (String(url).includes("/card/profile")) {
+        return { ok: true, status: 200, json: async () => ({ enabled: true }) };
+      }
+      if (String(url).includes("/sendMessage")) {
+        sendId++;
+        if (sendId === 1) { sendReached.resolve(); await sendGate.promise; } // run1 首帧悬住
+        return { ok: true, status: 200, text: async () => JSON.stringify({ message_id: `card${sendId}` }) };
+      }
+      return { ok: true, status: 200, text: async () => "" };
+    });
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi();
+    const ctx = { apiUrl: "https://j1.test", botToken: "bf", channelId: "g1", channelType: ChannelType.Group };
+
+    setCardContext("S", ctx);
+    handlers.before_tool_call({ toolName: "read" }, { sessionKey: "S" });
+    await vi.advanceTimersByTimeAsync(900); // run1 flush 首帧 send 悬在 sendGate
+    await sendReached.promise;
+
+    const finalizing = finalizeCard("S", { success: true }); // 捕获 entry1,await 其 flushPromise
+    setCardContext("S", ctx);                                // 队列推进:同身份 run2 覆盖 Map
+    sendGate.resolve();                                       // 放行 run1 首帧完成 → finalize 恢复
+    await finalizing;
+
+    // run2 entry 未被误删:它的 before_tool_call 能发出自己的卡(否则无 entry → no-op)。
+    handlers.before_tool_call({ toolName: "read" }, { sessionKey: "S" });
+    await vi.advanceTimersByTimeAsync(900);
+    const sends = calls.filter((c) => c.url.includes("/sendMessage"));
+    expect(sends.length).toBe(2); // run1 card1 + run2 card2;若误删则仅 1
+  });
+
+  it("J2: 同 sessionKey 不同身份并发 → fail closed,两边都不发", async () => {
+    const { fn, calls } = mockFetch();
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi();
+
+    // 两个不同账号(不同频道)共享同一 sessionKey —— hook 侧无法区分。
+    setCardContext("X", { apiUrl: "https://a.test", botToken: "tA", channelId: "chA", channelType: ChannelType.Group });
+    setCardContext("X", { apiUrl: "https://a.test", botToken: "tB", channelId: "chB", channelType: ChannelType.Group });
+    handlers.before_tool_call({ toolName: "read" }, { sessionKey: "X" });
+    await vi.advanceTimersByTimeAsync(900);
+    expect(calls.length).toBe(0); // 碰撞 → 两边 skip,绝不发到任一频道
+  });
+
+  it("J2: 同 sessionKey 同身份(同账号下一 run)不算碰撞,正常发卡", async () => {
+    const { fn, calls } = mockFetch();
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi();
+    const ctx = { apiUrl: "https://same.test", botToken: "bf", channelId: "g1", channelType: ChannelType.Group };
+
+    setCardContext("Y", ctx);
+    setCardContext("Y", ctx); // 同身份重登记(如上一 run 尚未 finalize)→ 不 fail closed
+    handlers.before_tool_call({ toolName: "read" }, { sessionKey: "Y" });
+    await vi.advanceTimersByTimeAsync(900);
+    expect(calls.some((c) => c.url.includes("/sendMessage"))).toBe(true);
+  });
 });

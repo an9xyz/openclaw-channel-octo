@@ -73,6 +73,63 @@ const SECRET_RE =
   /token|api[_-]?key|secret|password|passwd|pwd|authorization|bearer|access[_-]?key|client[_-]?secret|credential/i;
 
 /**
+ * 形状检测:关键词正则只认密钥**名字**,认不出密钥**形状**。这里补一组按形状匹配的
+ * 已知/通用凭据模式,与 SECRET_RE 并用 —— 覆盖「query/pattern 传入裸 token」等无关键词
+ * 可循的泄露(如 grep `AKIA...`、web_search 一段 40 位 hex)。
+ */
+const SECRET_SHAPE_RES: RegExp[] = [
+  /\bAKIA[0-9A-Z]{12,}\b/,                                  // AWS access key id
+  /\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}/,           // GitHub token / fine-grained PAT
+  /\bxox[baprs]-[A-Za-z0-9-]{10,}/,                         // Slack token
+  /\bsk-[A-Za-z0-9_-]{16,}/,                                // OpenAI-style secret key
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+/, // JWT
+  /\b[0-9a-fA-F]{32,}\b/,                                   // 长 hex(md5/sha/hex 密钥)
+];
+
+/**
+ * 高熵串:32+ 位连续 base64url 段且**同时含字母与数字**(随机 token 的特征)。只按长度
+ * 会误伤长路径/长英文(如 80 个 `x`),故要求字母数字混合 —— 纯字母(词/路径)、纯数字不命中。
+ */
+function hasHighEntropyRun(s: string): boolean {
+  const runs = s.match(/[A-Za-z0-9_-]{32,}/g);
+  return !!runs && runs.some((r) => /[0-9]/.test(r) && /[A-Za-z]/.test(r));
+}
+
+/** 是否命中任一密钥形状(已知前缀/hex/JWT + 通用高熵串)。 */
+function looksLikeSecretShape(s: string): boolean {
+  return SECRET_SHAPE_RES.some((re) => re.test(s)) || hasHighEntropyRun(s);
+}
+
+/** 是否命中关键词或形状守卫(群卡片对全员可见,任一命中即隐藏)。 */
+function isSensitive(s: string): boolean {
+  return SECRET_RE.test(s) || looksLikeSecretShape(s);
+}
+
+/**
+ * 常见多段有效后缀(eTLD),用于计算注册域时多保留一段。非穷举,只覆盖高频场景;
+ * 未命中的按「末两段」处理即可(始终丢掉子域 → 不会泄露子域里的密钥)。
+ */
+const MULTI_PART_TLDS = new Set([
+  "co.uk", "org.uk", "gov.uk", "ac.uk",
+  "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn",
+  "com.au", "com.br", "com.hk", "com.tw", "com.sg", "co.jp", "co.kr",
+]);
+
+/**
+ * 取注册域(丢掉所有子域):隧道/预签名场景**主机名本身就是密钥**(如 ngrok 随机子域、
+ * 预签名 bucket 名),故只保留 eTLD+1。多段后缀(com.cn/co.uk 等)多保留一段。
+ * 纯 IPv4 原样返回。
+ */
+function registrableDomain(host: string): string {
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return host; // IPv4 原样
+  const labels = host.split(".");
+  if (labels.length <= 2) return host;
+  const last2 = labels.slice(-2).join(".");
+  const keep = MULTI_PART_TLDS.has(last2) ? 3 : 2;
+  return labels.slice(-keep).join(".");
+}
+
+/**
  * 工具 → 摘要提取策略(allowlist)。未列出的工具(含 MCP、未知工具)一律**不显示摘要**,
  * 杜绝把任意参数直渲到群卡片的泄露面。
  */
@@ -114,16 +171,17 @@ function summarizeShell(p: Record<string, unknown>): string {
 }
 
 /**
- * url:**只保留 scheme://host**,丢弃 path/query/userinfo。凭据既可能在 query,也常整段
- * 嵌在 path 里(Slack/Discord incoming webhook `/services/T../B../XXXX`),且随机 token
- * 不含关键词、躲过 SECRET_RE —— 故 path 一并不展示,只暴露主机名。
+ * url:只保留 **scheme://注册域**,丢弃 path/query/userinfo **和所有子域**。凭据既可能在
+ * query,也常整段嵌在 path 里(Slack/Discord webhook `/services/T../B../XXXX`),更有隧道/
+ * 预签名场景**主机名本身即密钥**(ngrok 随机子域、预签名 bucket 名)—— 这些随机串不含
+ * 关键词、躲过 SECRET_RE。故只暴露注册域(eTLD+1),既够用又不泄露。
  */
 function summarizeUrl(p: Record<string, unknown>): string {
   const raw = firstString(p, ["url"]);
   if (!raw) return "";
   try {
     const u = new URL(raw);
-    return `${u.protocol}//${u.host}`;
+    return `${u.protocol}//${registrableDomain(u.hostname)}`;
   } catch {
     return ""; // 解析失败 → 不显示(原串可能含 token)
   }
@@ -147,7 +205,7 @@ export function summarizeToolParams(toolName: string | undefined, params: unknow
   }
   if (!v) return "";
   const s = v.replace(/\s+/g, " ").trim();
-  if (!s || SECRET_RE.test(s)) return ""; // 敏感串守卫:命中即隐藏
+  if (!s || isSensitive(s)) return ""; // 关键词 + 形状守卫:任一命中即隐藏
   return s.length > SUMMARY_MAX ? s.slice(0, SUMMARY_MAX) + "…" : s;
 }
 

@@ -43,19 +43,35 @@ describe("summarizeToolParams", () => {
     // 合法程序名/路径不受影响。
     expect(summarizeToolParams("exec", { command: "/usr/bin/python3 x.py" })).toBe("/usr/bin/python3");
   });
-  it("url 类只保留 scheme://host,丢弃 path/query/userinfo(含 path 内嵌密钥)", () => {
+  it("url 类只保留 scheme://注册域,丢弃 path/query/userinfo 与所有子域", () => {
     expect(summarizeToolParams("fetch", { url: "https://u:p@host.com/a/b?token=sk-secret&x=1" })).toBe(
       "https://host.com",
     );
-    // Slack webhook 密钥整段在 path 里 —— 必须连 path 一起丢弃。
+    // Slack webhook 密钥整段在 path 里 —— 连 path 与子域一起丢。
     expect(summarizeToolParams("fetch", { url: "https://hooks.slack.com/services/T000/B000/XXXXXXXXXXXX" })).toBe(
-      "https://hooks.slack.com",
+      "https://slack.com",
     );
+    // 隧道/预签名:主机名本身即密钥(随机子域)→ 只留注册域,子域丢弃。
+    expect(summarizeToolParams("fetch", { url: "https://s3cr3ttok.abc1234.ngrok.io/hook" })).toBe(
+      "https://ngrok.io",
+    );
+    // 多段有效后缀多保留一段。
+    expect(summarizeToolParams("fetch", { url: "https://x.example.com.cn/p" })).toBe("https://example.com.cn");
     expect(summarizeToolParams("fetch", { url: "not a url" })).toBe("");
   });
   it("检索类取 query/pattern", () => {
     expect(summarizeToolParams("grep", { pattern: "TODO", path: "/x" })).toBe("TODO");
     expect(summarizeToolParams("web_search", { query: "how to" })).toBe("how to");
+  });
+  it("形状脱敏:query/pattern 里的裸密钥(无关键词)也隐藏", () => {
+    expect(summarizeToolParams("grep", { pattern: "AKIAIOSFODNN7EXAMPLE" })).toBe(""); // AWS key id
+    expect(summarizeToolParams("web_search", { query: "d41d8cd98f00b204e9800998ecf8427e" })).toBe(""); // 32 hex
+    expect(summarizeToolParams("grep", { pattern: "ghp_16C7e42F292c6912E7710c838347Ae178B4a" })).toBe(""); // GitHub token
+    expect(summarizeToolParams("web_search", { query: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123def456" })).toBe(""); // JWT
+    // 混合字母数字的 40+ 位随机串。
+    expect(summarizeToolParams("grep", { pattern: "aB3dE7gH1jK4mN8pQ2rS5tU9vW6xY0zA1bC2dE3f" })).toBe("");
+    // 正常长英文 / 纯字母长串不误伤。
+    expect(summarizeToolParams("web_search", { query: "how to configure oauth flow correctly" })).toBe("how to configure oauth flow correctly");
   });
   it("MCP / 未知工具 → 不显示摘要(不渲染任意参数)", () => {
     expect(summarizeToolParams("mcp__github__create_issue", { title: "leak", body: "secret" })).toBe("");

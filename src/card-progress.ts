@@ -13,7 +13,7 @@
  * 状态(C2,答案走文本);OBO(persona-clone)场景跳过(服务端拒 type-17 OBO,Decision 2b)。
  */
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { ChannelType } from "./types.js";
+import { ChannelType, CARD_PROFILE, CARD_VERSION } from "./types.js";
 import { sendCardMessage, editCardMessage, getCardProfile } from "./api-fetch.js";
 import { renderProgressCard, summarizeToolParams, type CardStep, type CardProgressState } from "./card-render.js";
 
@@ -29,6 +29,13 @@ export interface CardContext {
 
 interface CardEntry {
   ctx: CardContext;
+  /**
+   * 发送目标身份指纹 = `apiUrl\0channelId\0onBehalfOf`。hook ctx 只带 sessionKey、
+   * 不带 accountId,无法区分账号;仓库已文档化两个 bot 账号可能共享同一 sessionKey
+   * (见 inbound.ts 的 sessionAccountMap 复合键)。setCardContext 用它检测跨身份碰撞,
+   * 命中则 fail closed,避免把进度卡发到错误频道。
+   */
+  identity: string;
   messageId?: string;
   phase: CardProgressState["phase"];
   steps: CardStep[];
@@ -41,7 +48,7 @@ interface CardEntry {
   flushPromise?: Promise<void>;
 }
 
-/** key = sessionKey(H1 实证:全 hook 一致)。 */
+/** key = sessionKey(H1 实证:全 hook 一致)。跨账号碰撞由 entry.identity + fail-closed 兜底。 */
 const cards = new Map<string, CardEntry>();
 
 /** D12 gate 结果缓存,key = apiUrl(同部署同结果),避免每 session 重复探测。 */
@@ -58,19 +65,43 @@ const dbg: (msg: string) => void = process.env.OCTO_CARD_DEBUG
   ? (msg) => console.log(`[octo:card-progress] ${msg}`)
   : () => {};
 
-/** dispatch run 开始时登记发送上下文。onBehalfOf 存在 → 标记跳过。 */
+/** 发送目标身份指纹。两个不同账号(或不同频道)= 不同指纹 → 视为跨身份碰撞。 */
+function contextIdentity(ctx: CardContext): string {
+  return JSON.stringify([ctx.apiUrl, ctx.channelId, ctx.onBehalfOf ?? ""]);
+}
+
+/**
+ * dispatch run 开始时登记发送上下文。onBehalfOf 存在 → 标记跳过。
+ *
+ * 跨账号 fail-closed:若同 sessionKey 上已有**不同身份**的活跃 entry(两个 bot 账号
+ * 共享了 sessionKey),hook 侧无法凭 sessionKey 区分账号,两边都置 skip —— 宁可都不发,
+ * 也绝不把进度卡 send/edit 到错误频道。persona-clone/OBO 本就 skip,此处再兜住
+ * non-OBO 跨账号碰撞,以及「OBO 克隆覆盖冻结同 key 上普通 bot 卡」的情形。
+ */
 export function setCardContext(sessionKey: string, ctx: CardContext): void {
   if (!sessionKey) return;
+  const identity = contextIdentity(ctx);
+  const existing = cards.get(sessionKey);
+  const collision = !!existing && existing.identity !== identity;
+  if (collision) {
+    existing!.skip = true; // 冻结旧 run 的卡:后续 flush/finalize 不再发送
+    if (existing!.flushTimer) {
+      clearTimeout(existing!.flushTimer);
+      existing!.flushTimer = undefined;
+    }
+    warn(`sessionKey collision across identities; failing closed for session=${sessionKey}`);
+  }
   cards.set(sessionKey, {
     ctx,
+    identity,
     phase: "thinking",
     steps: [],
     startedAt: Date.now(),
     dirty: false,
     inFlight: false,
-    skip: !!ctx.onBehalfOf,
+    skip: collision || !!ctx.onBehalfOf,
   });
-  dbg(`context set session=${sessionKey} channel=${ctx.channelId} obo=${!!ctx.onBehalfOf}`);
+  dbg(`context set session=${sessionKey} channel=${ctx.channelId} obo=${!!ctx.onBehalfOf} collision=${collision}`);
 }
 
 /**
@@ -83,8 +114,20 @@ async function gateEnabled(ctx: CardContext): Promise<boolean | null> {
   if (cached !== undefined) return cached;
   try {
     const m = await getCardProfile({ apiUrl: ctx.apiUrl, botToken: ctx.botToken });
-    const enabled = m.available ? m.enabled : process.env.OCTO_CARD_MESSAGE_ENABLED === "1";
-    // 只缓存**确定结果**(manifest 明确 enabled/disabled,或 available:false 回退 env)。
+    let enabled = m.available ? m.enabled : process.env.OCTO_CARD_MESSAGE_ENABLED === "1";
+    // 版本协商:manifest **明确 advertise** 了 profiles/card_version 却不含我们出站发送的
+    // octo/v1 + 1.5 时,判定不兼容 → 关闭,避免协议演进后 send/edit 撞 400(字段缺省则不设限,
+    // 与当前 server 行为一致)。
+    if (enabled && m.available) {
+      if (Array.isArray(m.profiles) && m.profiles.length > 0 && !m.profiles.includes(CARD_PROFILE)) {
+        dbg(`gate: profile ${CARD_PROFILE} not advertised (${m.profiles.join(",")}) → disabled`);
+        enabled = false;
+      } else if (typeof m.card_version === "string" && m.card_version !== CARD_VERSION) {
+        dbg(`gate: card_version ${m.card_version} != ${CARD_VERSION} → disabled`);
+        enabled = false;
+      }
+    }
+    // 只缓存**确定结果**(manifest 明确 enabled/disabled/不兼容,或 available:false 回退 env)。
     gateCache.set(ctx.apiUrl, enabled);
     return enabled;
   } catch (err: unknown) {
@@ -201,7 +244,10 @@ export async function finalizeCard(
     try { await entry.flushPromise; } catch { /* flush 内部已告警 */ }
   }
   if (entry.flushTimer) clearTimeout(entry.flushTimer);
-  cards.delete(sessionKey);
+  // 只在 entry 仍是当前登记项时删除。finalize 是 fire-and-forget 且上面 await 了 in-flight
+  // flush;await 期间 per-group 队列可能推进,同 sessionKey 的下一 run setCardContext 已把
+  // Map 换成新 entry —— 那时删 key 会误删新 run 的状态,使其全程无卡。终态帧仍发本 run。
+  if (cards.get(sessionKey) === entry) cards.delete(sessionKey);
 
   // 从没发过卡(skip / 无工具调用)→ 无需收尾帧。
   if (entry.skip || !entry.messageId) return;
