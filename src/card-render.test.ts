@@ -56,6 +56,17 @@ describe("summarizeToolParams", () => {
     // 常规 query 不受影响。
     expect(summarizeToolParams("grep", { pattern: "TODO fix later" })).toBe("TODO fix later");
   });
+  it("非 http scheme 的凭据 URI 也降级(postgres/mysql/redis/ssh…),明文密码不泄露", () => {
+    // query 里的 DB DSN:密码短、无关键词 → isSensitive 抓不到,靠 URL 降级丢掉 userinfo。
+    expect(summarizeToolParams("web_search", { query: "postgres://admin:s3cr3t@db.internal:5432/app" })).toBe("postgres://db.internal");
+    // shell:DSN 作为程序名(argv[0])。
+    expect(summarizeToolParams("bash", { command: "mysql://root:hunter2@10.0.0.5:3306/prod" })).toBe("mysql://10.0.0.5");
+    // 其它 scheme。
+    expect(summarizeToolParams("grep", { pattern: "redis://:pw@cache.internal:6379/0" })).toBe("redis://cache.internal");
+    expect(summarizeToolParams("grep", { pattern: "ssh://deploy:key@bastion.example.com" })).toBe("ssh://example.com");
+    // 不误伤 Windows 盘符路径(无 ://)。
+    expect(summarizeToolParams("read", { path: "C:/Users/me/app.ts" })).toBe("C:/Users/me/app.ts");
+  });
   it("url 类只保留 scheme://注册域,丢弃 path/query/userinfo 与所有子域", () => {
     expect(summarizeToolParams("fetch", { url: "https://u:p@host.com/a/b?token=sk-secret&x=1" })).toBe(
       "https://host.com",
@@ -161,6 +172,15 @@ describe("stepLine", () => {
     // 但明确关键词/前缀仍拦。
     expect(stepLine({ tool: "read", status: "error", error: "AKIAIOSFODNN7EXAMPLE rejected" })).toBe("❌ 读取文件");
   });
+  it("P2-1: 工具名 label 过长截断 / 敏感形状回退通用标签", () => {
+    // 超长 MCP 工具名 → 截断,防卡片被 label 撑爆。
+    const longName = "mcp__" + "z".repeat(60) + "__tool"; // 非 hex、无数字 → 只超长,不算密钥形状
+    const out = stepLine({ tool: longName, status: "running" });
+    expect(out.length).toBeLessThan(60);
+    expect(out.endsWith("…")).toBe(true);
+    // 未知工具名命中敏感关键词 → 回退通用「工具」(不把疑似密钥的标识符渲进群卡片)。
+    expect(stepLine({ tool: "fetch_api_key_helper", status: "running" })).toBe("⏳ 工具");
+  });
   it("error 内嵌 URL 降级为注册域(对称参数路径),webhook 路径/隧道主机不泄露", () => {
     // 短、无关键词的 webhook 路径段:isSensitive 抓不到,靠 URL 降级丢掉。
     const slack = stepLine({ tool: "bash", status: "error", error: "curl: (22) https://hooks.slack.com/services/T01ABCDEF/B02GHIJKL/Xy8zQw3rT7uVwXyZ0 returned 404" });
@@ -181,6 +201,11 @@ describe("stepLine", () => {
     expect(s3).toContain("https://amazonaws.com");
     expect(s3).not.toContain("mybucket");
     expect(s3).not.toContain("Signature");
+    // 最可达:DB 驱动连接错误回显完整 DSN(非 http scheme)→ 明文密码不泄露。
+    const dsn = stepLine({ tool: "exec", status: "error", error: "connect ECONNREFUSED postgres://svc:Hunter2Pw@10.0.0.5:5432/prod" });
+    expect(dsn).toContain("postgres://10.0.0.5");
+    expect(dsn).not.toContain("Hunter2Pw");
+    expect(dsn).not.toContain("svc:");
   });
 });
 

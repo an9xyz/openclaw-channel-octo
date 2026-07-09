@@ -189,9 +189,11 @@ function originDomain(rawUrl: string): string | null {
   }
 }
 
-/** 把文本里内嵌的 http(s) URL 就地降级为 scheme://注册域(解析失败则整段抹除)。 */
+/** 把文本里内嵌的 URI 就地降级为 scheme://注册域(解析失败则整段抹除)。 */
 function reduceUrlsInText(s: string): string {
-  return s.replace(/\bhttps?:\/\/[^\s]+/gi, (m) => originDomain(m) ?? "");
+  // 任意 `scheme://…`,不止 http(s):DB/AMQP/ssh DSN(postgres://user:pass@host 等)也常
+  // 出现在 query/shell/错误文本里,userinfo 即明文密码。要求 `://` 故不误伤 Windows 盘符(C:/)。
+  return s.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s]+/gi, (m) => originDomain(m) ?? "");
 }
 
 /** url 策略:取 url 参数并降级为注册域。 */
@@ -257,9 +259,22 @@ export function sanitizeErrorText(err?: string): string {
   return s.length > ERROR_MAX ? s.slice(0, ERROR_MAX) + "…" : s;
 }
 
-/** 单步 → 一行文案:图标 + 标签 + 参数摘要 + 状态/耗时。错误详情经脱敏+截断。 */
+/** 工具名 label 展示上限。MCP 工具名可能很长,防其撑爆卡片。 */
+const LABEL_MAX = 40;
+
+/**
+ * 工具名 label 也是群可见 sink(与 params/error 一致):tool 名来自 registry/MCP 配置,长名会
+ * 撑卡片,疑似密钥形状的标识符不应渲出。命中敏感 → 回退通用「工具」,否则截断。
+ */
+function safeLabel(label: string): string {
+  if (isSensitive(label, true)) return "工具";
+  return label.length > LABEL_MAX ? label.slice(0, LABEL_MAX) + "…" : label;
+}
+
+/** 单步 → 一行文案:图标 + 标签 + 参数摘要 + 状态/耗时。错误详情经脱敏+截断,label 经脱敏+截断。 */
 export function stepLine(step: CardStep): string {
-  const { icon, label } = resolveToolMeta(step.tool);
+  const { icon, label: rawLabel } = resolveToolMeta(step.tool);
+  const label = safeLabel(rawLabel);
   const sum = step.summary ? `：${step.summary}` : "";
   if (step.status === "running") return `⏳ ${label}${sum}`;
   if (step.status === "error") {
