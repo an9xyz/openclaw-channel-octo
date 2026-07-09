@@ -419,4 +419,36 @@ describe("card-progress 状态机 + hook + 节流", () => {
     expect(p1).toBe(1);
     expect(p2).toBe(1); // 不再自动重探,等下个工具事件
   });
+
+  it("波C: manifest advertise ColumnSet+Column → 进度卡按列渲染(缺省则 TextBlock)", async () => {
+    const calls: Array<{ url: string; body: Record<string, unknown> | undefined }> = [];
+    const fn = vi.fn().mockImplementation(async (url: string, init?: { body?: string }) => {
+      calls.push({ url: String(url), body: init?.body ? JSON.parse(init.body) : undefined });
+      if (String(url).includes("/card/profile")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            enabled: true,
+            profiles: ["octo/v1"],
+            elements: ["TextBlock", "ColumnSet", "Column"],
+            limits: { max_nodes: 200 },
+          }),
+        };
+      }
+      if (String(url).includes("/sendMessage")) return { ok: true, status: 200, text: async () => JSON.stringify({ message_id: "card1" }) };
+      return { ok: true, status: 200, text: async () => "" };
+    });
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi();
+
+    setCardContext("wc", { apiUrl: "https://wc.test", botToken: "bf", channelId: "g1", channelType: ChannelType.Group });
+    handlers.before_tool_call({ toolName: "exec", params: { command: "ls" } }, { sessionKey: "wc" });
+    await vi.advanceTimersByTimeAsync(900);
+
+    const send = calls.find((c) => c.url.includes("/sendMessage"));
+    expect(send).toBeTruthy();
+    const card = (send!.body!.payload as { card: { body: Array<{ type: string }> } }).card;
+    expect(card.body[1].type).toBe("ColumnSet"); // manifest advertise → 列渲染
+  });
 });

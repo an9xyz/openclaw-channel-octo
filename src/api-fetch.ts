@@ -511,6 +511,13 @@ export interface CardProfileManifest {
   /** 支持的 profile 列表，如 `["octo/v1"]`（P2 增 `"octo/v2"`）。 */
   profiles?: string[];
   card_version?: string;
+  /**
+   * 服务端 advertise 的元素/输入白名单（源自 pkg/cardmsg 权威，additive）。producer 据此按
+   * 元素/输入粒度协商 —— 即便 card_version 停在 1.5，也能探测该部署到底吃不吃某元素/输入。
+   * 旧部署不返这两字段（undefined）→ 消费方回退保守基线。
+   */
+  elements?: string[];
+  inputs?: string[];
   /** 尺寸/结构上限（node/depth/body caps 等）。 */
   limits?: Record<string, unknown>;
 }
@@ -551,6 +558,8 @@ export async function getCardProfile(params: {
     enabled: raw.enabled === true,
     ...(Array.isArray(raw.profiles) ? { profiles: raw.profiles as string[] } : {}),
     ...(typeof raw.card_version === "string" ? { card_version: raw.card_version } : {}),
+    ...(Array.isArray(raw.elements) ? { elements: (raw.elements as unknown[]).filter((e): e is string => typeof e === "string") } : {}),
+    ...(Array.isArray(raw.inputs) ? { inputs: (raw.inputs as unknown[]).filter((e): e is string => typeof e === "string") } : {}),
     ...(raw.limits && typeof raw.limits === "object" ? { limits: raw.limits as Record<string, unknown> } : {}),
   };
 }

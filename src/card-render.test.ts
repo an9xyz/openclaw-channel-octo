@@ -5,6 +5,7 @@ import {
   summarizeToolParams,
   fmtDuration,
   stepLine,
+  cardSupports,
 } from "./card-render.js";
 
 describe("resolveToolMeta", () => {
@@ -268,5 +269,48 @@ describe("renderProgressCard", () => {
     const steps = Array.from({ length: 20 }, () => ({ tool: "read", status: "done" as const }));
     const { card } = renderProgressCard({ phase: "done", steps, elapsedMs: 1000 });
     expect((card.body as Array<{ text: string }>)[0].text).toBe("✅ 已完成 · 20 步 · 1.0s");
+  });
+});
+
+describe("cardSupports / CardCaps 渲染协商(波 C)", () => {
+  it("cardSupports:明确 advertise 以其为准,否则用基线", () => {
+    expect(cardSupports({ elements: new Set(["TextBlock"]) }, "TextBlock")).toBe(true);
+    expect(cardSupports({ elements: new Set(["TextBlock"]) }, "ColumnSet")).toBe(false);
+    expect(cardSupports(undefined, "ColumnSet")).toBe(true); // 基线含
+    expect(cardSupports(undefined, "Input.Text")).toBe(false); // 基线不含输入
+  });
+
+  it("无 caps → 默认 TextBlock 平铺(零回归)", () => {
+    const { card } = renderProgressCard({
+      phase: "tool",
+      steps: [{ tool: "read", status: "done", summary: "/a", durationMs: 200 }],
+    });
+    expect((card.body as Array<{ type: string }>)[1].type).toBe("TextBlock");
+  });
+
+  it("advertise ColumnSet(Column 是其固有子元素,不单独 advertise)→ 步骤渲成 ColumnSet 行,plain 不变", () => {
+    const caps = { elements: new Set(["TextBlock", "ColumnSet"]) }; // 实测服务端不单列 Column
+    const { card, plain } = renderProgressCard(
+      { phase: "tool", steps: [{ tool: "exec", status: "done", summary: "ls", durationMs: 200 }] },
+      caps,
+    );
+    const row = (card.body as Array<Record<string, unknown>>)[1];
+    expect(row.type).toBe("ColumnSet");
+    const cols = row.columns as Array<{ items: Array<{ text: string }> }>;
+    expect(cols[0].items[0].text).toBe("⌨️");
+    expect(cols[1].items[0].text).toBe("执行命令：ls · 200ms");
+    expect(plain).toContain("⌨️ 执行命令：ls · 200ms"); // plain 与布局无关
+  });
+
+  it("advertise 了 elements 但不含 ColumnSet → 仍 TextBlock(降级)", () => {
+    const caps = { elements: new Set(["TextBlock", "FactSet"]) };
+    const { card } = renderProgressCard({ phase: "tool", steps: [{ tool: "read", status: "done" }] }, caps);
+    expect((card.body as Array<{ type: string }>)[1].type).toBe("TextBlock");
+  });
+
+  it("caps.maxNodes 权威收紧可见步数(比本地上限更严)", () => {
+    const steps = Array.from({ length: 20 }, () => ({ tool: "read", status: "done" as const }));
+    const { card } = renderProgressCard({ phase: "tool", steps }, { maxNodes: 6 }); // TextBlock:reserve2 → 4 步
+    expect((card.body as unknown[]).length).toBe(6); // header + 折叠 + 4 步
   });
 });

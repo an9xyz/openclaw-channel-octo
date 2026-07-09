@@ -306,28 +306,84 @@ function headerText(state: CardProgressState): string {
   }
 }
 
+/** octo/v1 1.5 已验证可安全渲染的展示元素基线(manifest 未 advertise elements 时用)。 */
+const BASELINE_ELEMENTS: ReadonlySet<string> = new Set([
+  "TextBlock", "Container", "ColumnSet", "Column", "FactSet", "Image",
+]);
+
 /**
- * 展示步骤上限。长任务工具调用不断累积,若全量渲染成 TextBlock,卡片体积会持续膨胀,
- * 最终可能超服务端结构上限导致 edit 400、进度冻结。这里用确定性本地上限裁剪(与服务端
- * limits 无关,不依赖其未定义的 key schema):超出只渲染最近 N 步 + 顶部一行省略计数。
+ * 服务端能力(D12 manifest 派生),供渲染按元素/结构上限裁剪。全可选,缺省即保守默认:
+ * 未 advertise elements → 用 BASELINE_ELEMENTS;未给 maxNodes → 用本地 MAX_VISIBLE_STEPS。
+ */
+export interface CardCaps {
+  /** 服务端 advertise 的元素白名单(pkg/cardmsg 权威)。 */
+  elements?: ReadonlySet<string>;
+  /** 递归节点数上限(limits.max_nodes)。 */
+  maxNodes?: number;
+}
+
+/** 元素是否可安全渲染:manifest 明确 advertise 则以其为准,否则用基线。 */
+export function cardSupports(caps: CardCaps | undefined, element: string): boolean {
+  return (caps?.elements ?? BASELINE_ELEMENTS).has(element);
+}
+
+/**
+ * 展示步骤上限。长任务工具调用不断累积,全量渲染会撑爆卡片、超服务端结构上限致 edit 400。
+ * 优先用服务端权威 max_nodes 推导上限(每步节点数依布局而定),缺省退回本地保守值。
  */
 const MAX_VISIBLE_STEPS = 12;
+const NODES_PER_TEXT_STEP = 1; // 1 个 TextBlock
+const NODES_PER_COLUMN_STEP = 5; // ColumnSet + 2 Column + 2 TextBlock
+
+function maxVisibleSteps(caps: CardCaps | undefined, useColumns: boolean): number {
+  if (!caps?.maxNodes) return MAX_VISIBLE_STEPS;
+  const perStep = useColumns ? NODES_PER_COLUMN_STEP : NODES_PER_TEXT_STEP;
+  const reserve = 2; // header + 折叠计数行
+  const byNodes = Math.max(1, Math.floor((caps.maxNodes - reserve) / perStep));
+  return Math.min(MAX_VISIBLE_STEPS, byNodes);
+}
+
+/** 单步 → ColumnSet 行:[状态/图标列 auto | 文本列 stretch]。仅在服务端 advertise ColumnSet 时用。 */
+function stepColumnRow(step: CardStep): Record<string, unknown> {
+  const line = stepLine(step);
+  const sp = line.indexOf(" ");
+  const glyph = sp >= 0 ? line.slice(0, sp) : line;
+  const bodyText = sp >= 0 ? line.slice(sp + 1) : "";
+  return {
+    type: "ColumnSet",
+    spacing: "Small",
+    columns: [
+      { type: "Column", width: "auto", items: [{ type: "TextBlock", text: glyph, wrap: false }] },
+      { type: "Column", width: "stretch", items: [{ type: "TextBlock", text: bodyText, wrap: true }] },
+    ],
+  };
+}
 
 /**
  * 渲染进度卡。返回 `{ card, plain }`:
- *   - `card` = Adaptive Cards 1.5 JSON(header + 每步一行,octo/v1 白名单内;不用 color/
- *     markdown 链接,规避白名单/scheme 校验)。
- *   - `plain` = 纯文本兜底(服务端 Finalize 会权威重算,此处保证 never empty)。
+ *   - `card` = Adaptive Cards 1.5 JSON。默认 header + 每步一行 TextBlock;当 D12 manifest **明确
+ *     advertise** ColumnSet+Column 时,步骤升级为对齐的 ColumnSet 行(否则降级 TextBlock,零回归)。
+ *     可见步数受服务端 max_nodes 权威约束(缺省用本地上限)。
+ *   - `plain` = 纯文本兜底(始终为 stepLine 文本,与布局无关;服务端 Finalize 会权威重算)。
  */
-export function renderProgressCard(state: CardProgressState): {
+export function renderProgressCard(
+  state: CardProgressState,
+  caps?: CardCaps,
+): {
   card: Record<string, unknown>;
   plain: string;
 } {
+  // 仅当服务端**明确 advertise** ColumnSet 才升级(未 advertise → 保持 TextBlock,零回归)。
+  // 只查 ColumnSet:Column 是 ColumnSet 的固有子元素,服务端 cardmsg 白名单不单独 advertise
+  // Column(实测 elements 含 ColumnSet 但无 Column)——接受 ColumnSet 即接受其 Column 子节点。
+  const useColumns = !!caps?.elements && cardSupports(caps, "ColumnSet");
+  const cap = maxVisibleSteps(caps, useColumns);
+
   const header = headerText(state);
   const total = state.steps.length;
-  // 只展示最近 MAX_VISIBLE_STEPS 步;更早的折叠成一行计数,避免卡片无界膨胀。
-  const hidden = Math.max(0, total - MAX_VISIBLE_STEPS);
-  const visibleSteps = hidden > 0 ? state.steps.slice(-MAX_VISIBLE_STEPS) : state.steps;
+  // 只展示最近 cap 步;更早的折叠成一行计数,避免卡片无界膨胀。
+  const hidden = Math.max(0, total - cap);
+  const visibleSteps = hidden > 0 ? state.steps.slice(-cap) : state.steps;
   const lines: string[] = [];
   if (hidden > 0) lines.push(`… 省略前 ${hidden} 步`);
   for (const s of visibleSteps) lines.push(stepLine(s));
@@ -335,8 +391,11 @@ export function renderProgressCard(state: CardProgressState): {
   const body: Record<string, unknown>[] = [
     { type: "TextBlock", text: header, weight: "Bolder", size: "Medium", wrap: true },
   ];
-  for (const line of lines) {
-    body.push({ type: "TextBlock", text: line, wrap: true, spacing: "Small" });
+  if (hidden > 0) {
+    body.push({ type: "TextBlock", text: `… 省略前 ${hidden} 步`, wrap: true, spacing: "Small" });
+  }
+  for (const s of visibleSteps) {
+    body.push(useColumns ? stepColumnRow(s) : { type: "TextBlock", text: stepLine(s), wrap: true, spacing: "Small" });
   }
 
   const card: Record<string, unknown> = {

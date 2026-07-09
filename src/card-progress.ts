@@ -14,8 +14,8 @@
  */
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { ChannelType, CARD_PROFILE, CARD_VERSION } from "./types.js";
-import { sendCardMessage, editCardMessage, getCardProfile, httpStatusFromApiFetchError } from "./api-fetch.js";
-import { renderProgressCard, summarizeToolParams, type CardStep, type CardProgressState } from "./card-render.js";
+import { sendCardMessage, editCardMessage, getCardProfile, httpStatusFromApiFetchError, type CardProfileManifest } from "./api-fetch.js";
+import { renderProgressCard, summarizeToolParams, type CardStep, type CardProgressState, type CardCaps } from "./card-render.js";
 
 /** dispatch 侧登记的发送上下文。 */
 export interface CardContext {
@@ -53,6 +53,22 @@ const cards = new Map<string, CardEntry>();
 
 /** D12 gate 结果缓存,key = apiUrl(同部署同结果),避免每 session 重复探测。 */
 const gateCache = new Map<string, boolean>();
+
+/**
+ * D12 能力(elements/limits 派生的渲染 caps)缓存,key = apiUrl(部署级,同 gate)。gateEnabled
+ * 探测 manifest 时一并填充;渲染时按此按元素/节点上限裁剪。旧部署无这些字段 → caps 为空 → 渲染
+ * 走保守默认(等同今天行为)。
+ */
+const capsCache = new Map<string, CardCaps>();
+
+/** manifest → 渲染 caps。只取当前渲染用得上的:元素白名单 + max_nodes(其余 limits 结构浅、天然满足)。 */
+function deriveCaps(m: CardProfileManifest): CardCaps {
+  const caps: CardCaps = {};
+  if (Array.isArray(m.elements) && m.elements.length > 0) caps.elements = new Set(m.elements);
+  const maxNodes = m.limits?.max_nodes;
+  if (typeof maxNodes === "number" && maxNodes > 0) caps.maxNodes = maxNodes;
+  return caps;
+}
 
 const FLUSH_DEBOUNCE_MS = 800;
 const EDIT_TIMEOUT_MS = 10_000;
@@ -118,6 +134,8 @@ async function gateEnabled(ctx: CardContext): Promise<boolean | null> {
   if (cached !== undefined) return cached;
   try {
     const m = await getCardProfile({ apiUrl: ctx.apiUrl, botToken: ctx.botToken });
+    // 能力清单是部署级事实(与 enabled 无关),探到就缓存供渲染裁剪。
+    capsCache.set(ctx.apiUrl, deriveCaps(m));
     let enabled = m.available ? m.enabled : process.env.OCTO_CARD_MESSAGE_ENABLED === "1";
     // 版本协商:manifest **明确 advertise** 了 profiles/card_version 却不含我们出站发送的
     // octo/v1 + 1.5 时,判定不兼容 → 关闭,避免协议演进后 send/edit 撞 400(字段缺省则不设限,
@@ -191,7 +209,7 @@ async function runFlush(sessionKey: string, entry: CardEntry): Promise<void> {
     }
 
     entry.dirty = false;
-    const { card, plain } = renderProgressCard({ phase: entry.phase, steps: entry.steps });
+    const { card, plain } = renderProgressCard({ phase: entry.phase, steps: entry.steps }, capsCache.get(entry.ctx.apiUrl));
     const signal = AbortSignal.timeout(EDIT_TIMEOUT_MS);
     if (!entry.messageId) {
       const res = await sendCardMessage({
@@ -274,7 +292,7 @@ export async function finalizeCard(
     ...(opts.errorText ? { errorText: opts.errorText } : {}),
   };
   try {
-    const { card, plain } = renderProgressCard(state);
+    const { card, plain } = renderProgressCard(state, capsCache.get(entry.ctx.apiUrl));
     await editCardMessage({
       apiUrl: entry.ctx.apiUrl,
       botToken: entry.ctx.botToken,
@@ -305,6 +323,7 @@ export function _resetCardProgressForTests(): void {
   for (const e of cards.values()) if (e.flushTimer) clearTimeout(e.flushTimer);
   cards.clear();
   gateCache.clear();
+  capsCache.clear();
 }
 
 /**
