@@ -218,7 +218,10 @@ export function summarizeToolParams(toolName: string | undefined, params: unknow
     case "query": v = firstString(p, ["query", "pattern"]); break;
   }
   if (!v) return "";
-  const s = v.replace(/\s+/g, " ").trim();
+  let s = v.replace(/\s+/g, " ").trim();
+  // 单一 choke point:所有策略统一把内嵌 URL 降级为 scheme://注册域。避免逐 sink 加降级时
+  // 漏掉某个策略(query 的 pattern、shell 的 URL-as-program 都会原样渲染 webhook/userinfo/内网主机)。
+  s = reduceUrlsInText(s).replace(/\s+/g, " ").trim();
   // query/url 是「裸 token」易出没处 → 额外套用通用高熵/长 hex 检测;path/shell 只走关键词
   // + 明确前缀,避免把 git SHA / docker digest / 缓存哈希等正常路径误伤成空。
   const generic = strategy === "query" || strategy === "url";
@@ -241,7 +244,8 @@ const ERROR_MAX = 120;
  *   1. 折叠空白;
  *   2. **内嵌 URL 降级为 scheme://注册域**(与参数路径 summarizeUrl 对称)—— 否则 webhook
  *      路径/隧道主机等短、无关键词的密钥会绕过下面的 isSensitive 直接泄露;
- *   3. 关键词/形状(generic)命中则整串隐藏;
+ *   3. 关键词/明确前缀命中则整串隐藏(generic=false:**不**套用长 hex/高熵,否则会把含 git SHA/
+ *      docker digest/UUID 的普通运维错误整条吞掉 —— webhook 类已由步骤 2 兜住);
  *   4. 截断到 ERROR_MAX。
  */
 export function sanitizeErrorText(err?: string): string {
@@ -249,7 +253,7 @@ export function sanitizeErrorText(err?: string): string {
   let s = err.replace(/\s+/g, " ").trim();
   if (!s) return "";
   s = reduceUrlsInText(s).replace(/\s+/g, " ").trim(); // URL 降级可能留下空隙
-  if (!s || isSensitive(s, true)) return ""; // 命中敏感 → 不展示错误详情
+  if (!s || isSensitive(s, false)) return ""; // 关键词/明确前缀命中 → 不展示错误详情
   return s.length > ERROR_MAX ? s.slice(0, ERROR_MAX) + "…" : s;
 }
 

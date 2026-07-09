@@ -43,6 +43,19 @@ describe("summarizeToolParams", () => {
     // 合法程序名/路径不受影响。
     expect(summarizeToolParams("exec", { command: "/usr/bin/python3 x.py" })).toBe("/usr/bin/python3");
   });
+  it("query/shell 策略也降级内嵌 URL(与 url/error 路径对称,单一 choke point)", () => {
+    // query 里的 webhook URL:路径段短、无关键词 → isSensitive 抓不到,靠 URL 降级。
+    expect(summarizeToolParams("web_search", { query: "https://hooks.slack.com/services/T00/B00/abcdEFGH1234abcdEFGH1234" })).toBe(
+      "https://slack.com",
+    );
+    // query 里的 userinfo / PII query / 内网主机 —— 非密钥形状,但仍不该原样泄露。
+    expect(summarizeToolParams("grep", { pattern: "https://user:pw@example.com/x" })).toBe("https://example.com");
+    expect(summarizeToolParams("grep", { pattern: "https://example.com/reset?email=ceo@corp.com" })).toBe("https://example.com");
+    // shell:URL 作为程序名(argv[0])→ 降级为注册域,不原样渲染。
+    expect(summarizeToolParams("exec", { command: "https://hooks.slack.com/services/T1/B2/tok arg" })).toBe("https://slack.com");
+    // 常规 query 不受影响。
+    expect(summarizeToolParams("grep", { pattern: "TODO fix later" })).toBe("TODO fix later");
+  });
   it("url 类只保留 scheme://注册域,丢弃 path/query/userinfo 与所有子域", () => {
     expect(summarizeToolParams("fetch", { url: "https://u:p@host.com/a/b?token=sk-secret&x=1" })).toBe(
       "https://host.com",
@@ -139,6 +152,14 @@ describe("stepLine", () => {
     expect(out.startsWith("❌ 读取文件 — line1 ")).toBe(true);
     expect(out.endsWith("…")).toBe(true);
     expect(out.length).toBeLessThan(140); // 图标+标签 + 120 上限 + 省略号
+  });
+  it("error 含 git SHA / digest / UUID 不被整段吞掉(不套用长 hex/高熵)", () => {
+    // webhook 由 URL 降级兜住,故错误文本不套用长 hex/高熵形状 → 普通运维错误不被 blank。
+    expect(stepLine({ tool: "read", status: "error", error: "build failed at commit 5f2a1c9d8e7b6a5f4c3d2e1f0a9b8c7d6e5f4a3b" })).toBe(
+      "❌ 读取文件 — build failed at commit 5f2a1c9d8e7b6a5f4c3d2e1f0a9b8c7d6e5f4a3b",
+    );
+    // 但明确关键词/前缀仍拦。
+    expect(stepLine({ tool: "read", status: "error", error: "AKIAIOSFODNN7EXAMPLE rejected" })).toBe("❌ 读取文件");
   });
   it("error 内嵌 URL 降级为注册域(对称参数路径),webhook 路径/隧道主机不泄露", () => {
     // 短、无关键词的 webhook 路径段:isSensitive 抓不到,靠 URL 降级丢掉。

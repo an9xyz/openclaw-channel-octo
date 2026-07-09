@@ -182,7 +182,12 @@ async function runFlush(sessionKey: string, entry: CardEntry): Promise<void> {
         entry.skip = true;
         return;
       }
-      if (gate === null) return; // 瞬时探测失败,不 skip、不清 dirty,留待重探
+      if (gate === null) {
+        // 瞬时探测失败:清 dirty 且不自动重排,避免端点故障期每 ~800ms 一次探测风暴。
+        // 累积的 steps 仍在 entry 上,下个工具事件会重新 scheduleFlush 并重探。
+        entry.dirty = false;
+        return;
+      }
     }
 
     entry.dirty = false;

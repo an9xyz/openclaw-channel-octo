@@ -399,4 +399,24 @@ describe("card-progress 状态机 + hook + 节流", () => {
     await vi.advanceTimersByTimeAsync(900); // 重试成功
     expect(calls.filter((c) => c.includes("/sendMessage")).length).toBe(2);
   });
+
+  it("影响项#P2-4: gate 瞬时失败后无新事件不再每 tick 重探", async () => {
+    const calls: string[] = [];
+    const fn = vi.fn().mockImplementation(async (url: string) => {
+      calls.push(String(url));
+      if (String(url).includes("/card/profile")) return { ok: false, status: 503, text: async () => "down" };
+      return { ok: true, status: 200, text: async () => "" };
+    });
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi();
+
+    setCardContext("g0", { apiUrl: "https://g0.test", botToken: "bf", channelId: "g1", channelType: ChannelType.Group });
+    handlers.before_tool_call({ toolName: "read" }, { sessionKey: "g0" });
+    await vi.advanceTimersByTimeAsync(900); // 首次 probe → 503 → null
+    const p1 = calls.filter((c) => c.includes("/card/profile")).length;
+    await vi.advanceTimersByTimeAsync(4000); // 无新事件,推进多个 debounce 周期
+    const p2 = calls.filter((c) => c.includes("/card/profile")).length;
+    expect(p1).toBe(1);
+    expect(p2).toBe(1); // 不再自动重探,等下个工具事件
+  });
 });
