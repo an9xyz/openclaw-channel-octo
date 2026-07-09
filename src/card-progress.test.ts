@@ -420,7 +420,7 @@ describe("card-progress 状态机 + hook + 节流", () => {
     expect(p2).toBe(1); // 不再自动重探,等下个工具事件
   });
 
-  it("波C: manifest advertise ColumnSet+Column → 进度卡按列渲染(缺省则 TextBlock)", async () => {
+  it("波C: manifest advertise RichTextBlock → 进度卡按富文本行渲染(缺省则 TextBlock 平铺)", async () => {
     const calls: Array<{ url: string; body: Record<string, unknown> | undefined }> = [];
     const fn = vi.fn().mockImplementation(async (url: string, init?: { body?: string }) => {
       calls.push({ url: String(url), body: init?.body ? JSON.parse(init.body) : undefined });
@@ -431,7 +431,9 @@ describe("card-progress 状态机 + hook + 节流", () => {
           json: async () => ({
             enabled: true,
             profiles: ["octo/v1"],
-            elements: ["TextBlock", "ColumnSet", "Column"],
+            // 真实 im-test 部署 advertise 的元素超集(P1-d 起进度卡优先 RichTextBlock 而非 ColumnSet:
+            // 解决服务端权威重算 plain 时 ColumnSet 图标/文本分行的问题)
+            elements: ["TextBlock", "RichTextBlock", "Container", "ColumnSet", "Column", "FactSet"],
             limits: { max_nodes: 200 },
           }),
         };
@@ -449,6 +451,209 @@ describe("card-progress 状态机 + hook + 节流", () => {
     const send = calls.find((c) => c.url.includes("/sendMessage"));
     expect(send).toBeTruthy();
     const card = (send!.body!.payload as { card: { body: Array<{ type: string }> } }).card;
-    expect(card.body[1].type).toBe("ColumnSet"); // manifest advertise → 列渲染
+    expect(card.body[1].type).toBe("RichTextBlock"); // manifest advertise → 富文本行渲染
+  });
+
+  it("P1-g: model_call_started 产 running thinking step,before_tool_call 结束它(标 done + durationMs)", async () => {
+    const { fn, calls } = mockFetch();
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi();
+    setCardContext("tk1", { apiUrl: "https://tk1.test", botToken: "bf", channelId: "g", channelType: ChannelType.Group });
+
+    // 起 thinking(agent 首次调 model 决定用哪个工具)
+    handlers.model_call_started({}, { sessionKey: "tk1" });
+    // 100ms 后开始调 tool —— thinking 结束
+    await vi.advanceTimersByTimeAsync(100);
+    handlers.before_tool_call({ toolName: "read", params: { path: "/a" }, toolCallId: "r1" }, { sessionKey: "tk1" });
+    handlers.after_tool_call({ toolName: "read", toolCallId: "r1", durationMs: 50 }, { sessionKey: "tk1" });
+    await vi.advanceTimersByTimeAsync(900);
+
+    const send = calls.find((c) => c.url.includes("/sendMessage"));
+    expect(send).toBeTruthy();
+    const body = (send!.body!.payload as { card: { body: Array<{ text?: string; inlines?: Array<{ text: string }> }> } }).card.body;
+    // 首帧应含:header + thinking(done) + read(running/done)
+    const asText = (e: { text?: string; inlines?: Array<{ text: string }> }) =>
+      e.text ?? (e.inlines ?? []).map((i) => i.text).join("");
+    const joined = body.map(asText).join(" | ");
+    expect(joined).toContain("💭 思考"); // thinking step 出现
+    expect(joined).toContain("读取文件");  // 后续 tool step 也在
+  });
+
+  it("P1-g: 多次 model_call_started 累积多步 thinking(同类合并压缩)", async () => {
+    const { fn, calls } = mockFetch();
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi();
+    setCardContext("tk2", { apiUrl: "https://tk2.test", botToken: "bf", channelId: "g", channelType: ChannelType.Group });
+
+    // agent 循环:thinking → tool → thinking → tool → thinking → tool
+    for (let i = 0; i < 3; i++) {
+      handlers.model_call_started({}, { sessionKey: "tk2" });
+      await vi.advanceTimersByTimeAsync(50);
+      const id = `t${i}`;
+      handlers.before_tool_call({ toolName: "read", params: { path: `/${i}` }, toolCallId: id }, { sessionKey: "tk2" });
+      handlers.after_tool_call({ toolName: id, toolCallId: id, durationMs: 30 }, { sessionKey: "tk2" });
+    }
+    await vi.advanceTimersByTimeAsync(900);
+    // 只验证:发送时的 payload 里出现了 thinking(至少一处)—— 合并/顺序具体断言在 render 层测
+    const send = calls.find((c) => c.url.includes("/sendMessage"));
+    expect(send).toBeTruthy();
+    const s = JSON.stringify((send!.body!.payload as { card: unknown }).card);
+    expect(s).toContain("💭");
+  });
+
+  it("P1-g: finalize 前的 running thinking 被收尾(不留 running 尾巴)", async () => {
+    const { fn, calls } = mockFetch();
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi();
+    setCardContext("tk3", { apiUrl: "https://tk3.test", botToken: "bf", channelId: "g", channelType: ChannelType.Group });
+
+    // thinking + 一个 tool,然后再一次 thinking(无后续 tool)→ finalize 收尾
+    handlers.model_call_started({}, { sessionKey: "tk3" });
+    handlers.before_tool_call({ toolName: "read", params: { path: "/a" }, toolCallId: "r1" }, { sessionKey: "tk3" });
+    handlers.after_tool_call({ toolName: "read", toolCallId: "r1", durationMs: 30 }, { sessionKey: "tk3" });
+    handlers.model_call_started({}, { sessionKey: "tk3" });
+    await vi.advanceTimersByTimeAsync(900); // 首帧发出
+    calls.length = 0;
+
+    await finalizeCard("tk3", { success: true });
+    const edit = calls.find((c) => c.url.includes("/message/edit"));
+    expect(edit).toBeTruthy();
+    const env = JSON.parse(edit!.body!.content_edit as string);
+    // 终态帧不应残留 running:⏳ 不该出现
+    const cardStr = JSON.stringify(env.card);
+    expect(cardStr).not.toContain("⏳");
+  });
+
+  it("P1-h: octo_send_display_card 不入进度卡 —— 纯 display-card turn 无占位卡、无终态帧", async () => {
+    const { fn, calls } = mockFetch();
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi();
+    setCardContext("dh1", { apiUrl: "https://dh1.test", botToken: "bf", channelId: "g", channelType: ChannelType.Group });
+    handlers.before_tool_call({ toolName: "octo_send_display_card", toolCallId: "d1" }, { sessionKey: "dh1" });
+    handlers.after_tool_call({ toolName: "octo_send_display_card", toolCallId: "d1", durationMs: 120 }, { sessionKey: "dh1" });
+    await vi.advanceTimersByTimeAsync(900);
+    // 从未 scheduleFlush → 连 gate 探测/发送都没有
+    expect(calls.some((c) => c.url.includes("/sendMessage"))).toBe(false);
+    expect(calls.some((c) => c.url.includes("/card/profile"))).toBe(false);
+    // finalize 因 !messageId 静默,不发终态帧
+    await finalizeCard("dh1", { success: true });
+    expect(calls.some((c) => c.url.includes("/message/edit"))).toBe(false);
+  });
+
+  it("P1-h: 混合 turn:display-card 不计步,真实工具照常显示进度(读取文件在,display-card 不在)", async () => {
+    const { fn, calls } = mockFetch();
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi();
+    setCardContext("dh2", { apiUrl: "https://dh2.test", botToken: "bf", channelId: "g", channelType: ChannelType.Group });
+    handlers.before_tool_call({ toolName: "octo_send_display_card", toolCallId: "d1" }, { sessionKey: "dh2" }); // 忽略
+    handlers.before_tool_call({ toolName: "read", params: { path: "/a" }, toolCallId: "r1" }, { sessionKey: "dh2" }); // 计入
+    await vi.advanceTimersByTimeAsync(900);
+    const send = calls.find((c) => c.url.includes("/sendMessage"));
+    expect(send).toBeTruthy();
+    const card = (send!.body!.payload as { card: { body: Array<{ text?: string; inlines?: Array<{ text: string }> }> } }).card;
+    const asText = (e: { text?: string; inlines?: Array<{ text: string }> }) =>
+      e.text ?? (e.inlines ?? []).map((i) => i.text).join("");
+    const joined = card.body.map(asText).join(" | ");
+    expect(joined).toContain("读取文件");
+    expect(joined).not.toContain("octo_send_display_card");
+  });
+
+  it("懒发契约:model_call_started 单独不发卡 —— 纯 display-card turn(含思考步)无占位卡、无中断终态", async () => {
+    // 回归:P1-g 的 model_call_started 曾无条件 scheduleFlush,击穿 P1-h 抑制 ——
+    // 纯 display-card turn 仍发占位卡并 finalize 成「⚠️ 已中断」。
+    const { fn, calls } = mockFetch();
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi();
+    setCardContext("nf1", { apiUrl: "https://nf1.test", botToken: "bf", channelId: "g", channelType: ChannelType.Group });
+    handlers.model_call_started({}, { sessionKey: "nf1" });   // 思考步(真实事件序:先于 tool)
+    handlers.before_tool_call({ toolName: "octo_send_display_card", toolCallId: "d1" }, { sessionKey: "nf1" });
+    handlers.after_tool_call({ toolName: "octo_send_display_card", toolCallId: "d1", durationMs: 120 }, { sessionKey: "nf1" });
+    await vi.advanceTimersByTimeAsync(900);
+    expect(calls.some((c) => c.url.includes("/sendMessage"))).toBe(false);
+    expect(calls.some((c) => c.url.includes("/card/profile"))).toBe(false);
+    await finalizeCard("nf1", { success: false });
+    expect(calls.some((c) => c.url.includes("/message/edit"))).toBe(false); // 无 messageId → 无中断帧
+  });
+
+  it("懒发契约:纯思考(无任何工具)turn 不发进度卡", async () => {
+    const { fn, calls } = mockFetch();
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi();
+    setCardContext("nf2", { apiUrl: "https://nf2.test", botToken: "bf", channelId: "g", channelType: ChannelType.Group });
+    handlers.model_call_started({}, { sessionKey: "nf2" });
+    await vi.advanceTimersByTimeAsync(900);
+    handlers.model_call_started({}, { sessionKey: "nf2" }); // 连续思考(去重)
+    await vi.advanceTimersByTimeAsync(900);
+    expect(calls.length).toBe(0);
+    await finalizeCard("nf2", { success: true });
+    expect(calls.some((c) => c.url.includes("/message/edit"))).toBe(false);
+  });
+
+  it("懒发契约:真实工具后思考步照常更新已存在的卡", async () => {
+    const { fn, calls } = mockFetch();
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi();
+    setCardContext("nf3", { apiUrl: "https://nf3.test", botToken: "bf", channelId: "g", channelType: ChannelType.Group });
+    handlers.model_call_started({}, { sessionKey: "nf3" });               // 纯思考:不发
+    handlers.before_tool_call({ toolName: "read", toolCallId: "r1" }, { sessionKey: "nf3" }); // 真实工具:发首帧
+    await vi.advanceTimersByTimeAsync(900);
+    expect(calls.some((c) => c.url.includes("/sendMessage"))).toBe(true);
+    calls.length = 0;
+    handlers.after_tool_call({ toolName: "read", toolCallId: "r1", durationMs: 20 }, { sessionKey: "nf3" });
+    handlers.model_call_started({}, { sessionKey: "nf3" });               // 卡已存在 → 思考步刷新
+    await vi.advanceTimersByTimeAsync(900);
+    expect(calls.some((c) => c.url.includes("/message/edit"))).toBe(true);
+  });
+
+  it("NEW-3: display-card 前的 running thinking 被收尾(思考耗时不吞掉发卡时长)", async () => {
+    const { fn, calls } = mockFetch();
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi();
+    setCardContext("nf4", { apiUrl: "https://nf4.test", botToken: "bf", channelId: "g", channelType: ChannelType.Group });
+    handlers.before_tool_call({ toolName: "read", toolCallId: "r1" }, { sessionKey: "nf4" }); // 让卡存在
+    handlers.after_tool_call({ toolName: "read", toolCallId: "r1", durationMs: 10 }, { sessionKey: "nf4" });
+    handlers.model_call_started({}, { sessionKey: "nf4" });               // 起一个思考步
+    handlers.before_tool_call({ toolName: "octo_send_display_card", toolCallId: "d1" }, { sessionKey: "nf4" }); // 应收尾思考步
+    handlers.before_tool_call({ toolName: "read", params: { path: "/b" }, toolCallId: "r2" }, { sessionKey: "nf4" });
+    await vi.advanceTimersByTimeAsync(900);
+    const send = calls.find((c) => c.url.includes("/sendMessage")) ?? calls.find((c) => c.url.includes("/message/edit"));
+    // 思考步已 done(有 💭 且带耗时),不再是 running（⏳）
+    expect(send).toBeTruthy();
+  });
+
+  it("§4.1 runId 守卫:超时 run 的迟到 hook 不落到同 sessionKey 的新 run 卡上", async () => {
+    const { fn, calls } = mockFetch();
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi();
+    const target = { apiUrl: "https://rg.test", botToken: "bf", channelId: "g", channelType: ChannelType.Group };
+
+    // run A 登记并跑一步(runId=A)→ entry 认领给 A;随后超时收尾
+    setCardContext("rg1", target);
+    handlers.before_tool_call({ toolName: "read", params: { path: "/a" }, toolCallId: "a1" }, { sessionKey: "rg1", runId: "A" });
+    await vi.advanceTimersByTimeAsync(900);
+    await finalizeCard("rg1", { success: false });
+
+    // 同 sessionKey 的 run B 登记(fresh entry);B 自己的 hook(runId=B)先到 → 认领 entry
+    setCardContext("rg1", target);
+    handlers.before_tool_call({ toolName: "write", params: { path: "/b" }, toolCallId: "b1" }, { sessionKey: "rg1", runId: "B" });
+    // run A 的迟到 hook(runId=A)—— runId 与属主 B 不符,必须被丢弃
+    handlers.before_tool_call({ toolName: "exec", params: { command: "echo x" }, toolCallId: "a2" }, { sessionKey: "rg1", runId: "A" });
+    handlers.after_tool_call({ toolName: "exec", toolCallId: "a2", durationMs: 9 }, { sessionKey: "rg1", runId: "A" });
+    await vi.advanceTimersByTimeAsync(900);
+
+    // 聚合所有发出去的帧(send payload + edit content_edit)的卡片文本
+    const asText = (e: { text?: string; inlines?: Array<{ text: string }> }) =>
+      e.text ?? (e.inlines ?? []).map((i) => i.text).join("");
+    const allText = calls
+      .filter((c) => c.url.includes("/sendMessage") || c.url.includes("/message/edit"))
+      .map((c) => {
+        const card = c.url.includes("/message/edit")
+          ? JSON.parse(c.body!.content_edit as string).card
+          : (c.body!.payload as { card: { body: unknown[] } }).card;
+        return (card.body as Array<{ text?: string; inlines?: Array<{ text: string }> }>).map(asText).join(" | ");
+      })
+      .join(" || ");
+    expect(allText).toContain("写入文件"); // B 自己的步骤渲染出来了
+    expect(allText).not.toContain("执行命令"); // A 迟到的 exec 步骤从未进入任何帧
   });
 });

@@ -26,7 +26,8 @@ import { resolvePersonaHintForSession } from "./src/persona-prompt.js";
 import { setOctoRuntime } from "./src/runtime.js";
 import { octoPlugin } from "./src/channel.js";
 import { createOctoManagementTools } from "./src/agent-tools.js";
-import { CHANNEL_ID } from "./src/constants.js";
+import { createDisplayCardTool } from "./src/card-display-tool.js";
+import { CHANNEL_ID, DISPLAY_CARD_TOOL_NAME } from "./src/constants.js";
 import { registerCardProgress } from "./src/card-progress.js";
 
 // ---------------------------------------------------------------------------
@@ -141,6 +142,21 @@ export default defineBundledChannelEntry({
         });
       },
       { names: ['octo_management'] },
+    );
+
+    // P1-e:agent 展示卡工具(顶层无 actions、不回流,发展示型 InteractiveCard 17)。
+    // 与 octo_management 一样,tool-discovery 阶段就注册,便于 profile 过滤评估。
+    api.registerTool(
+      (ctx: OpenClawPluginToolContext) => {
+        const cfg = ctx.getRuntimeConfig?.() ?? ctx.runtimeConfig ?? ctx.config;
+        if (!cfg) return null;
+        return createDisplayCardTool({
+          cfg,
+          agentAccountId: ctx.agentAccountId,
+          agentId: ctx.agentId,
+        });
+      },
+      { names: [DISPLAY_CARD_TOOL_NAME] },
     );
 
     // Manual setOctoRuntime + registerChannel — kept as a defensive call even

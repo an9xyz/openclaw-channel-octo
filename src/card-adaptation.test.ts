@@ -95,18 +95,58 @@ describe("getCardProfile (D12 feature-detect)", () => {
     vi.restoreAllMocks();
   });
 
-  it("200 → 解析 manifest", async () => {
+  it("200 → 解析 manifest(完整能力清单:elements/inputs/actions/limits;真实服务端形状)", async () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: vi.fn().mockResolvedValue({ enabled: true, profiles: ["octo/v1"], card_version: "1.5" }),
+      json: vi.fn().mockResolvedValue({
+        enabled: true,
+        card_version: "1.5",
+        profiles: ["octo/v1", "octo/v2"],
+        elements: [
+          "TextBlock", "RichTextBlock", "Image", "ImageSet",
+          "Container", "ColumnSet", "Column", "FactSet",
+          "Table", "ActionSet",
+        ],
+        inputs: [
+          "Input.Text", "Input.Toggle", "Input.ChoiceSet",
+          "Input.Number", "Input.Date", "Input.Time",
+        ],
+        // Action 白名单目前 server 未 advertise(附加式提议),消费方按 undefined 保守处理。
+        // 显式给一份用于验证解析器路径(P1-a 打通,forward-compat)。
+        actions: ["Action.Submit", "Action.ToggleVisibility", "Action.OpenUrl"],
+        limits: {
+          max_payload_bytes: 524288,
+          max_nodes: 200,
+          max_depth: 16,
+          max_input_text_bytes: 4096,
+          max_inputs_bytes: 16384,
+        },
+      }),
     }) as unknown as typeof fetch;
 
     const m = await getCardProfile({ apiUrl: "https://api.test", botToken: "bf_x" });
     expect(m.available).toBe(true);
     expect(m.enabled).toBe(true);
-    expect(m.profiles).toEqual(["octo/v1"]);
     expect(m.card_version).toBe("1.5");
+    expect(m.profiles).toEqual(["octo/v1", "octo/v2"]);
+    expect(m.elements).toEqual([
+      "TextBlock", "RichTextBlock", "Image", "ImageSet",
+      "Container", "ColumnSet", "Column", "FactSet",
+      "Table", "ActionSet",
+    ]);
+    expect(m.inputs).toEqual([
+      "Input.Text", "Input.Toggle", "Input.ChoiceSet",
+      "Input.Number", "Input.Date", "Input.Time",
+    ]);
+    expect(m.actions).toEqual(["Action.Submit", "Action.ToggleVisibility", "Action.OpenUrl"]);
+    expect(m.limits).toEqual({
+      max_payload_bytes: 524288,
+      max_nodes: 200,
+      max_depth: 16,
+      max_input_text_bytes: 4096,
+      max_inputs_bytes: 16384,
+    });
   });
 
   it("404(端点未部署)→ available:false(调用方回退 config)", async () => {
@@ -130,6 +170,24 @@ describe("getCardProfile (D12 feature-detect)", () => {
     const m = await getCardProfile({ apiUrl: "https://api.test", botToken: "bf_x" });
     expect(m.available).toBe(true);
     expect(m.enabled).toBe(false);
+  });
+
+  it("F5: enabled 序列化为 1/0 也兼容(与仓库 flag 惯例一致)", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockResolvedValue({ enabled: 1, profiles: ["octo/v1"] }),
+    }) as unknown as typeof fetch;
+    const m = await getCardProfile({ apiUrl: "https://api.test", botToken: "bf_x" });
+    expect(m.enabled).toBe(true);
+
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockResolvedValue({ enabled: 0 }),
+    }) as unknown as typeof fetch;
+    const m0 = await getCardProfile({ apiUrl: "https://api.test", botToken: "bf_x" });
+    expect(m0.enabled).toBe(false);
   });
 
   it("5xx → 抛错(交给调用方重试节奏)", async () => {

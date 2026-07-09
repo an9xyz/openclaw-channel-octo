@@ -335,6 +335,29 @@ describe("inbound mention-gate 免@ relaxation (human-only)", () => {
     expect(sends.length).toBeGreaterThan(0);
   });
 
+  it("§4.2: 最终答复引用用户触发消息(Q→A)—— payload.reply.message_id === 触发消息 id", async () => {
+    installRuntimeStub();
+    const { sends } = installFetchStub();
+    const msg = makeTextMessage(HUMAN_UID, "@SelfBot please answer");
+    (msg.payload as any).mention = { uids: [BOT_UID] };
+
+    await handleInboundMessage({
+      account: makeAccount(),
+      message: msg,
+      botUid: BOT_UID,
+      groupHistories: new Map(),
+      lastBotReplySeqMap: new Map(),
+      memberMap: new Map(),
+      uidToNameMap: new Map(),
+      groupCacheTimestamps: new Map(),
+    });
+
+    // 发出去的最终答复(content="hi there")必须 reply 到触发消息 m1
+    const reply = sends.find((s: any) => s?.payload?.content === "hi there");
+    expect(reply).toBeTruthy();
+    expect(reply.payload.reply).toEqual({ message_id: "m1" });
+  });
+
   it("does NOT reply to a CROSS-PROCESS bot (robot:true in member list, NOT registerKnownBot'd)", async () => {
     // Regression: the loop guard must use the
     // server-authoritative GroupMember.robot signal, not just the local

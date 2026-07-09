@@ -518,6 +518,11 @@ export interface CardProfileManifest {
    */
   elements?: string[];
   inputs?: string[];
+  /**
+   * 动作白名单(pkg/cardmsg 权威;server 目前未 advertise,消费方保守视为 undefined)。
+   * 覆盖不回流展示交互(`Action.ToggleVisibility`/`ShowCard`/`OpenUrl`)与回流 `Action.Submit`。
+   */
+  actions?: string[];
   /** 尺寸/结构上限（node/depth/body caps 等）。 */
   limits?: Record<string, unknown>;
 }
@@ -555,11 +560,13 @@ export async function getCardProfile(params: {
   if (!raw || typeof raw !== "object") return { available: true, enabled: false };
   return {
     available: true,
-    enabled: raw.enabled === true,
-    ...(Array.isArray(raw.profiles) ? { profiles: raw.profiles as string[] } : {}),
+    // 兼容布尔与 1/0 序列化(与本仓 GroupMember.robot / getMentionPref 的 flag 惯例一致)。
+    enabled: raw.enabled === true || raw.enabled === 1,
+    ...(Array.isArray(raw.profiles) ? { profiles: (raw.profiles as unknown[]).filter((e): e is string => typeof e === "string") } : {}),
     ...(typeof raw.card_version === "string" ? { card_version: raw.card_version } : {}),
     ...(Array.isArray(raw.elements) ? { elements: (raw.elements as unknown[]).filter((e): e is string => typeof e === "string") } : {}),
     ...(Array.isArray(raw.inputs) ? { inputs: (raw.inputs as unknown[]).filter((e): e is string => typeof e === "string") } : {}),
+    ...(Array.isArray(raw.actions) ? { actions: (raw.actions as unknown[]).filter((e): e is string => typeof e === "string") } : {}),
     ...(raw.limits && typeof raw.limits === "object" ? { limits: raw.limits as Record<string, unknown> } : {}),
   };
 }

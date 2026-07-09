@@ -973,6 +973,14 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
       // Detect @all/@所有人 in content
       const hasAtAll = /(?:^|(?<=\s))@(?:all|所有人)(?=\s|[^\w]|$)/i.test(finalContent);
 
+      // Outbound reply attribution: only honor an explicit `ctx.replyToId` from core
+      // (user/reply-mode driven). The dispatch's own final answer threads to the user's
+      // triggering message in inbound.ts (Q→A quoting, standard IM shape); this
+      // channel-level send path (proactive / message-tool) does not fabricate a reply target.
+      const replyMsgId = typeof ctx.replyToId === "string" && ctx.replyToId.trim()
+        ? ctx.replyToId.trim()
+        : undefined;
+
       const sendResult = await sendMessage({
         apiUrl: account.config.apiUrl,
         botToken: account.config.botToken,
@@ -982,6 +990,7 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
         ...(mentionUids.length > 0 ? { mentionUids } : {}),
         ...(mentionEntities.length > 0 ? { mentionEntities } : {}),
         mentionAll: hasAtAll || undefined,
+        ...(replyMsgId ? { replyMsgId } : {}),
       });
 
       return toDeliveryResult(ctx.to, sendResult);

@@ -8,6 +8,7 @@
  * 视觉属性仅用端到端验证过的(weight/spacing/size/wrap),不用未验证的 color 以规避白名单。
  */
 import { CARD_PLACEHOLDER } from "./types.js";
+import { buildDisplayCard, type DisplayBlock, type RichSegment } from "./card-blocks.js";
 
 /** 单个工具步骤的状态。 */
 export interface CardStep {
@@ -23,6 +24,12 @@ export interface CardStep {
    * 避免把 duration/error 标到错误行。缺失(旧 host)时回退按 toolName 匹配。
    */
   toolCallId?: string;
+  /**
+   * hook 侧记录的开始时间(ms epoch)。目前只对 P1-g 的 __thinking__ 步骤有意义:
+   * SDK 无 `model_call_ended` hook,thinking 结束时机由外部信号(before_tool_call / finalize)
+   * 决定,duration = now - startedAt。渲染层只看 durationMs,该字段仅 hook 侧内部使用。
+   */
+  startedAt?: number;
 }
 
 /** 进度卡的渲染状态。 */
@@ -47,7 +54,8 @@ const TOOL_META: Record<string, { icon: string; label: string }> = {
   process: { icon: "⚙️", label: "运行进程" },
   search: { icon: "🔍", label: "搜索" },
   grep: { icon: "🔍", label: "搜索内容" },
-  glob: { icon: "🔍", label: "查找文件" },
+  find: { icon: "🔍", label: "查找文件" },
+  glob: { icon: "🔍", label: "查找文件" }, // 别名兜底;host 内建工具名是 find(见 SDK ToolName)
   ls: { icon: "📂", label: "浏览目录" },
   fetch: { icon: "🌐", label: "抓取网页" },
   web_search: { icon: "🌐", label: "联网搜索" },
@@ -56,6 +64,8 @@ const TOOL_META: Record<string, { icon: string; label: string }> = {
 
 /** 工具名 → 图标 + 标签。MCP 工具(`mcp__server__tool`)解析 server/tool。 */
 export function resolveToolMeta(tool: string): { icon: string; label: string } {
+  // 特殊内部 tool 名:agent 一轮 model_call = 一步"思考"(P1-g)。以 __ 前缀,agent 侧无冲突可能。
+  if (tool === "__thinking__") return { icon: "💭", label: "思考" };
   if (tool.startsWith(MCP_TOOL_PREFIX)) {
     const rest = tool.slice(MCP_TOOL_PREFIX.length).replace(/__/g, " / ");
     return { icon: "🔌", label: `MCP ${rest}` };
@@ -76,12 +86,23 @@ const SECRET_RE =
  * 明确前缀式凭据形状(AKIA/GitHub/Slack/OpenAI/JWT)。这些格式**在任何位置都几乎不可能
  * 是正常内容**,故对所有策略(含 path/shell)都应用 —— 关键词正则只认密钥名字,认不出这些形状。
  */
+// 关键:这些前缀模式**不加前导 `\b`/`(?<!\w)` 词界锚点**。词界锚点会被"前面粘一个词字符"
+// (`xAKIA…`、`KeyAKIA…`)绕过 —— 短前缀(AKIA=20 / sk-≈19 / Slack / JWT)又都短于 32 位,
+// 逃过高熵兜底 → 明文密钥渲进群卡片(yujiawei 复现的 P1)。故按**无锚点子串**匹配;`{16,}`/`{20,}`
+// 长度下限仍能把连字符英文(`risk-averse`/`task-force`)挡在外面。宁可过度隐藏,绝不泄露。
 const SECRET_PREFIX_RES: RegExp[] = [
-  /\bAKIA[0-9A-Z]{12,}\b/,                                  // AWS access key id
-  /\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}/,           // GitHub token / fine-grained PAT
-  /\bxox[baprs]-[A-Za-z0-9-]{10,}/,                         // Slack token
-  /\bsk-[A-Za-z0-9_-]{16,}/,                                // OpenAI-style secret key
-  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+/, // JWT
+  /AKIA[0-9A-Z]{12,}/,                                  // AWS access key id
+  /(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}/,         // GitHub token / fine-grained PAT
+  /xox[baprs]-[A-Za-z0-9-]{10,}/,                       // Slack bot/user token
+  /xapp-[0-9]-[A-Za-z0-9-]{10,}/,                       // Slack app-level token
+  /sk-[A-Za-z0-9_-]{16,}/,                              // OpenAI-style secret key
+  /[srp]k_(?:live|test)_[A-Za-z0-9]{10,}/,             // Stripe secret/restricted/publishable
+  /glpat-[A-Za-z0-9_-]{16,}/,                           // GitLab personal access token
+  /AIza[0-9A-Za-z_-]{30,}/,                             // Google API key
+  /npm_[A-Za-z0-9]{30,}/,                               // npm automation token
+  /shpat_[A-Fa-f0-9]{32,}/,                             // Shopify access token
+  /dop_v1_[A-Fa-f0-9]{32,}/,                            // DigitalOcean PAT
+  /eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+/, // JWT
 ];
 
 /** 长 hex(md5/sha/hex 密钥)。也命中 git object/docker digest 等常见路径,故仅用于 query/url。 */
@@ -103,7 +124,7 @@ function hasGenericSecretShape(s: string): boolean {
  * 只走关键词 + 明确前缀,避免把 git SHA / docker digest / 缓存哈希等正常路径误伤成空。
  * 群卡片对全员可见,任一命中即隐藏。
  */
-function isSensitive(s: string, generic: boolean): boolean {
+export function isSensitive(s: string, generic: boolean): boolean {
   if (SECRET_RE.test(s)) return true;
   if (SECRET_PREFIX_RES.some((re) => re.test(s))) return true;
   return generic && hasGenericSecretShape(s);
@@ -139,11 +160,31 @@ function registrableDomain(host: string): string {
  */
 type SummaryStrategy = "path" | "shell" | "url" | "query";
 const SUMMARY_STRATEGY: Record<string, SummaryStrategy> = {
-  read: "path", write: "path", edit: "path", apply_patch: "path", ls: "path", glob: "path",
+  read: "path", write: "path", edit: "path", apply_patch: "path", ls: "path", find: "path", glob: "path",
   exec: "shell", bash: "shell", shell: "shell", process: "shell",
   fetch: "url",
   web_search: "query", search: "query", grep: "query",
 };
+
+/**
+ * 深路径智能压缩 —— 保留末 2 段(倒数第二段 + 文件名),前缀省略号。
+ * 段数 ≤ 3 时原样返回(信息量不大,压缩反而丢上下文);
+ * 末段(文件名/最深目录)永远完整,防止只见 `.../SKILL.md` 分不出是哪个 skill。
+ *
+ * 例:
+ *   /root/.openclaw/workspace/octo-server/modules/bot_api/send.go → …/bot_api/send.go
+ *   /work/README.md                                                → /work/README.md (未压缩)
+ *   docs/card-protocol.md                                          → docs/card-protocol.md (未压缩)
+ *
+ * 家目录/绝对根不做特殊 `~` 标记,保持规则简单一致。空路径原样返回。
+ */
+function shortenPath(p: string): string {
+  if (!p) return p;
+  // 用 posix 分隔符做主判定;Windows `\` 若出现也能处理,但 shell/工具场景以 posix 为主。
+  const segs = p.split("/").filter((s) => s.length > 0);
+  if (segs.length <= 3) return p;
+  return `…/${segs[segs.length - 2]}/${segs[segs.length - 1]}`;
+}
 
 /** 取 keys 中首个非空字符串值。 */
 function firstString(p: Record<string, unknown>, keys: string[]): string {
@@ -189,11 +230,36 @@ function originDomain(rawUrl: string): string | null {
   }
 }
 
+/** 已知 webhook 主机 + 路径形态(密钥整段嵌在 path 里,无 scheme 也要降级)。 */
+const SCHEMELESS_WEBHOOK_RE =
+  /\b(?:hooks\.slack\.com\/services|discord(?:app)?\.com\/api\/webhooks|[a-z0-9.-]+\.webhook\.office\.com|outlook\.office\.com\/webhook)\/[^\s]+/gi;
+/** 协议相对 URL(`//host/path`):按 https 处理。 */
+const PROTOCOL_RELATIVE_RE = /(^|[\s(])\/\/[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?::\d+)?\/[^\s]*/g;
+/** 无 scheme 的 userinfo DSN(`user:pass@host[:port][/path]`):userinfo 即明文口令。要求主机含 TLD 以免误伤 `a:b@c`。 */
+const SCHEMELESS_USERINFO_RE =
+  /\b[A-Za-z0-9._%+-]+:[^\s:@/]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::\d+)?(?:\/[^\s]*)?/g;
+
 /** 把文本里内嵌的 URI 就地降级为 scheme://注册域(解析失败则整段抹除)。 */
-function reduceUrlsInText(s: string): string {
-  // 任意 `scheme://…`,不止 http(s):DB/AMQP/ssh DSN(postgres://user:pass@host 等)也常
-  // 出现在 query/shell/错误文本里,userinfo 即明文密码。要求 `://` 故不误伤 Windows 盘符(C:/)。
-  return s.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s]+/gi, (m) => originDomain(m) ?? "");
+export function reduceUrlsInText(s: string): string {
+  // 1. 任意 `scheme://…`,不止 http(s):DB/AMQP/ssh DSN(postgres://user:pass@host 等)也常
+  //    出现在 query/shell/错误文本里,userinfo 即明文密码。要求 `://` 故不误伤 Windows 盘符(C:/)。
+  let out = s.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s]+/gi, (m) => originDomain(m) ?? "");
+  // 2. 协议相对 `//host/path`:补 https 后降级(secret 可能在 path)。
+  out = out.replace(PROTOCOL_RELATIVE_RE, (_m, p1: string) => {
+    const url = _m.slice(p1.length); // 去掉前导分隔符
+    return p1 + (originDomain(`https:${url}`) ?? "");
+  });
+  // 3. 无 scheme 的已知 webhook 主机+路径(Slack/Discord/Teams):主机保留、path 抹掉。
+  out = out.replace(SCHEMELESS_WEBHOOK_RE, (m) => {
+    const host = m.split("/")[0];
+    return originDomain(`https://${host}`) ?? "";
+  });
+  // 4. 无 scheme 的 userinfo DSN(`user:pass@host…`):只留注册域,丢 userinfo/path。
+  out = out.replace(SCHEMELESS_USERINFO_RE, (m) => {
+    const host = m.slice(m.indexOf("@") + 1).split(/[/:]/)[0];
+    return originDomain(`https://${host}`) ?? "";
+  });
+  return out;
 }
 
 /** url 策略:取 url 参数并降级为注册域。 */
@@ -214,7 +280,7 @@ export function summarizeToolParams(toolName: string | undefined, params: unknow
   const p = params as Record<string, unknown>;
   let v: string;
   switch (strategy) {
-    case "path": v = firstString(p, ["path", "file_path", "file"]); break;
+    case "path": v = shortenPath(firstString(p, ["path", "file_path", "file"])); break;
     case "shell": v = summarizeShell(p); break;
     case "url": v = summarizeUrl(p); break;
     case "query": v = firstString(p, ["query", "pattern"]); break;
@@ -264,11 +330,14 @@ const LABEL_MAX = 40;
 
 /**
  * 工具名 label 也是群可见 sink(与 params/error 一致):tool 名来自 registry/MCP 配置,长名会
- * 撑卡片,疑似密钥形状的标识符不应渲出。命中敏感 → 回退通用「工具」,否则截断。
+ * 撑卡片,疑似密钥形状的标识符不应渲出。清洗与其它 sink 对齐:先 URL 降级(注册域),再命中
+ * 敏感 → 回退通用「工具」,否则截断。(label 通常无 URL,reduceUrlsInText 为 no-op;统一以防
+ * MCP/动态工具名里嵌了 webhook/DSN 形状。)
  */
 function safeLabel(label: string): string {
-  if (isSensitive(label, true)) return "工具";
-  return label.length > LABEL_MAX ? label.slice(0, LABEL_MAX) + "…" : label;
+  const s = reduceUrlsInText(label);
+  if (isSensitive(s, true)) return "工具";
+  return s.length > LABEL_MAX ? s.slice(0, LABEL_MAX) + "…" : s;
 }
 
 /** 单步 → 一行文案:图标 + 标签 + 参数摘要 + 状态/耗时。错误详情经脱敏+截断,label 经脱敏+截断。 */
@@ -312,59 +381,143 @@ const BASELINE_ELEMENTS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * 输入/动作**没有安全基线** —— server 未 advertise 时消费方**保守视为不支持**(fail-closed),
+ * 避免 producer 乐观发出旧部署不认的 Input.Number/Action.ToggleVisibility 等致 400。
+ */
+const BASELINE_INPUTS: ReadonlySet<string> = new Set();
+const BASELINE_ACTIONS: ReadonlySet<string> = new Set();
+
+/**
  * 服务端能力(D12 manifest 派生),供渲染按元素/结构上限裁剪。全可选,缺省即保守默认:
- * 未 advertise elements → 用 BASELINE_ELEMENTS;未给 maxNodes → 用本地 MAX_VISIBLE_STEPS。
+ * 未 advertise elements → 用 BASELINE_ELEMENTS;未 advertise inputs/actions → 空集(fail-closed);
+ * 未给 maxNodes → 用本地 MAX_VISIBLE_STEPS。
  */
 export interface CardCaps {
   /** 服务端 advertise 的元素白名单(pkg/cardmsg 权威)。 */
   elements?: ReadonlySet<string>;
+  /** 服务端 advertise 的输入白名单(Input.Text/Toggle/ChoiceSet/Number/Date/Time)。 */
+  inputs?: ReadonlySet<string>;
+  /** 服务端 advertise 的动作白名单(Submit/ToggleVisibility/ShowCard/OpenUrl 等)。 */
+  actions?: ReadonlySet<string>;
   /** 递归节点数上限(limits.max_nodes)。 */
   maxNodes?: number;
 }
 
-/** 元素是否可安全渲染:manifest 明确 advertise 则以其为准,否则用基线。 */
-export function cardSupports(caps: CardCaps | undefined, element: string): boolean {
-  return (caps?.elements ?? BASELINE_ELEMENTS).has(element);
+/**
+ * 元素/输入/动作是否可安全渲染 —— 按前缀分派到对应 caps 桶。
+ * - `Input.*` → `caps.inputs`(不给则 fail-closed)
+ * - `Action.*` → `caps.actions`(不给则 fail-closed)
+ * - 其它 → `caps.elements`(不给则用保守基线,与旧行为兼容)
+ * 一个函数覆盖三类,调用方无需分派;新增类别只需在此扩前缀即可。
+ */
+export function cardSupports(caps: CardCaps | undefined, kind: string): boolean {
+  if (kind.startsWith("Input.")) return (caps?.inputs ?? BASELINE_INPUTS).has(kind);
+  if (kind.startsWith("Action.")) return (caps?.actions ?? BASELINE_ACTIONS).has(kind);
+  return (caps?.elements ?? BASELINE_ELEMENTS).has(kind);
 }
 
 /**
  * 展示步骤上限。长任务工具调用不断累积,全量渲染会撑爆卡片、超服务端结构上限致 edit 400。
- * 优先用服务端权威 max_nodes 推导上限(每步节点数依布局而定),缺省退回本地保守值。
+ * 优先用服务端权威 max_nodes 推导上限(每步 1 节点),缺省退回本地保守值。
  */
 const MAX_VISIBLE_STEPS = 12;
-const NODES_PER_TEXT_STEP = 1; // 1 个 TextBlock
-const NODES_PER_COLUMN_STEP = 5; // ColumnSet + 2 Column + 2 TextBlock
 
-function maxVisibleSteps(caps: CardCaps | undefined, useColumns: boolean): number {
+function maxVisibleSteps(caps: CardCaps | undefined): number {
   if (!caps?.maxNodes) return MAX_VISIBLE_STEPS;
-  const perStep = useColumns ? NODES_PER_COLUMN_STEP : NODES_PER_TEXT_STEP;
   const reserve = 2; // header + 折叠计数行
-  const byNodes = Math.max(1, Math.floor((caps.maxNodes - reserve) / perStep));
+  const byNodes = Math.max(1, caps.maxNodes - reserve); // 每步 = 1 元素(rich 或 TextBlock,同为 1)
   return Math.min(MAX_VISIBLE_STEPS, byNodes);
 }
 
-/** 单步 → ColumnSet 行:[状态/图标列 auto | 文本列 stretch]。仅在服务端 advertise ColumnSet 时用。 */
-function stepColumnRow(step: CardStep): Record<string, unknown> {
-  const line = stepLine(step);
-  const sp = line.indexOf(" ");
-  const glyph = sp >= 0 ? line.slice(0, sp) : line;
-  const bodyText = sp >= 0 ? line.slice(sp + 1) : "";
-  return {
-    type: "ColumnSet",
-    spacing: "Small",
-    columns: [
-      { type: "Column", width: "auto", items: [{ type: "TextBlock", text: glyph, wrap: false }] },
-      { type: "Column", width: "stretch", items: [{ type: "TextBlock", text: bodyText, wrap: true }] },
-    ],
-  };
+/**
+ * 单步 → RichTextBlock 的多段 inlines(供 buildDisplayCard 的 rich block 使用):
+ *   状态图标 | label(Bolder) | :摘要 | · 耗时/— 错误详情(good/attention 着色)
+ * 段拼接后与 `stepLine(step)` 输出完全一致 —— 保证 plain 兜底不变,且降级到 TextBlock 时视觉等价。
+ */
+function stepSegments(step: CardStep): RichSegment[] {
+  const { icon, label: rawLabel } = resolveToolMeta(step.tool);
+  const label = safeLabel(rawLabel);
+  const sum = step.summary ? `：${step.summary}` : "";
+  if (step.status === "running") {
+    return [{ text: "⏳ " }, { text: label, bold: true }, { text: sum }];
+  }
+  if (step.status === "error") {
+    const detail = sanitizeErrorText(step.error);
+    const segs: RichSegment[] = [
+      { text: "❌ " },
+      { text: label, bold: true },
+      { text: sum },
+    ];
+    if (detail) segs.push({ text: ` — ${detail}`, color: "attention" });
+    return segs;
+  }
+  const dur = fmtDuration(step.durationMs);
+  const segs: RichSegment[] = [
+    { text: `${icon} ` },
+    { text: label, bold: true },
+    { text: sum },
+  ];
+  if (dur) segs.push({ text: ` · ${dur}`, color: "good" });
+  return segs;
 }
 
 /**
- * 渲染进度卡。返回 `{ card, plain }`:
- *   - `card` = Adaptive Cards 1.5 JSON。默认 header + 每步一行 TextBlock;当 D12 manifest **明确
- *     advertise** ColumnSet+Column 时,步骤升级为对齐的 ColumnSet 行(否则降级 TextBlock,零回归)。
- *     可见步数受服务端 max_nodes 权威约束(缺省用本地上限)。
- *   - `plain` = 纯文本兜底(始终为 stepLine 文本,与布局无关;服务端 Finalize 会权威重算)。
+ * 同类合并的一"组":≥2 个连续同 tool 且全 done 的步骤压成一行,大幅缩视觉噪音。
+ * 显示:`<icon> <label> × N · 共 <总耗时> — 最近: <最后一个 summary>`
+ * running/error 步骤不参与合并(单独调 stepSegments),避免糊掉当前重点。
+ */
+function groupSegments(group: CardStep[]): RichSegment[] {
+  const first = group[0];
+  const { icon, label: rawLabel } = resolveToolMeta(first.tool);
+  const label = safeLabel(rawLabel);
+  // 仅在至少一步有耗时时才展示总耗时,否则不显示(避免全 undefined 渲成误导性的「共 0ms」)。
+  const anyDuration = group.some((s) => typeof s.durationMs === "number");
+  const total = group.reduce((acc, s) => acc + (s.durationMs ?? 0), 0);
+  const dur = anyDuration ? fmtDuration(total) : "";
+  const last = group[group.length - 1];
+  const lastSum = last.summary ? last.summary : "";
+  const segs: RichSegment[] = [
+    { text: `${icon} ` },
+    { text: label, bold: true },
+    { text: ` × ${group.length}` },
+  ];
+  if (dur) segs.push({ text: ` · 共 ${dur}`, color: "good" });
+  if (lastSum) segs.push({ text: ` — 最近: ${lastSum}` });
+  return segs;
+}
+
+/**
+ * 把可见步骤按"相邻同 tool 且全 done"分组:连续 ≥2 个 done → 合并组;单个 done / running / error
+ * → 各自一组(即"单元素组")。返回二维数组,每个内数组是一段。
+ *
+ * 分组只在 done 之间做:running 与 error 不合并 —— 当前重点(还在跑/失败了)必须显眼。
+ */
+function groupSteps(steps: CardStep[]): CardStep[][] {
+  const out: CardStep[][] = [];
+  let i = 0;
+  while (i < steps.length) {
+    const cur = steps[i];
+    if (cur.status !== "done") {
+      out.push([cur]);
+      i++;
+      continue;
+    }
+    let j = i + 1;
+    while (j < steps.length && steps[j].tool === cur.tool && steps[j].status === "done") j++;
+    out.push(steps.slice(i, j));
+    i = j;
+  }
+  return out;
+}
+
+/**
+ * 渲染进度卡 —— **走 buildDisplayCard 底座**(吃自己狗粮):header 用 heading(medium)block、
+ * 每步用 rich block(advertise RichTextBlock 时是 RichTextBlock 富行、否则 TextBlock 平铺 —— 一行完整,
+ * 不像 ColumnSet 会被服务端权威 plain 重算成图标/文本两行)。
+ * 可见步数受服务端 max_nodes 权威约束(缺省用本地上限)。
+ *
+ * 返回 `{ card, plain }`:card = AC 1.5 JSON;plain = 纯文本兜底(与布局无关;服务端 Finalize 会
+ * 权威重算)。plain 空则回退 CARD_PLACEHOLDER。
  */
 export function renderProgressCard(
   state: CardProgressState,
@@ -373,38 +526,26 @@ export function renderProgressCard(
   card: Record<string, unknown>;
   plain: string;
 } {
-  // 仅当服务端**明确 advertise** ColumnSet 才升级(未 advertise → 保持 TextBlock,零回归)。
-  // 只查 ColumnSet:Column 是 ColumnSet 的固有子元素,服务端 cardmsg 白名单不单独 advertise
-  // Column(实测 elements 含 ColumnSet 但无 Column)——接受 ColumnSet 即接受其 Column 子节点。
-  const useColumns = !!caps?.elements && cardSupports(caps, "ColumnSet");
-  const cap = maxVisibleSteps(caps, useColumns);
-
   const header = headerText(state);
+  const cap = maxVisibleSteps(caps);
   const total = state.steps.length;
   // 只展示最近 cap 步;更早的折叠成一行计数,避免卡片无界膨胀。
   const hidden = Math.max(0, total - cap);
   const visibleSteps = hidden > 0 ? state.steps.slice(-cap) : state.steps;
-  const lines: string[] = [];
-  if (hidden > 0) lines.push(`… 省略前 ${hidden} 步`);
-  for (const s of visibleSteps) lines.push(stepLine(s));
 
-  const body: Record<string, unknown>[] = [
-    { type: "TextBlock", text: header, weight: "Bolder", size: "Medium", wrap: true },
+  const blocks: DisplayBlock[] = [
+    { type: "heading", text: header, size: "medium" },
   ];
-  if (hidden > 0) {
-    body.push({ type: "TextBlock", text: `… 省略前 ${hidden} 步`, wrap: true, spacing: "Small" });
-  }
-  for (const s of visibleSteps) {
-    body.push(useColumns ? stepColumnRow(s) : { type: "TextBlock", text: stepLine(s), wrap: true, spacing: "Small" });
+  if (hidden > 0) blocks.push({ type: "text", text: `… 省略前 ${hidden} 步` });
+  // 同类合并:连续 ≥2 个同 tool 全 done 的段压成一行(用户看到的行数远少于原始步数);
+  // running/error 保留单独行,当前重点不糊掉。header 的"N 步"计数仍用原始 steps.length。
+  for (const g of groupSteps(visibleSteps)) {
+    blocks.push({ type: "rich", segments: g.length > 1 ? groupSegments(g) : stepSegments(g[0]) });
   }
 
-  const card: Record<string, unknown> = {
-    type: "AdaptiveCard",
-    version: "1.5",
-    $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
-    body,
-  };
-
-  const plainText = [header, ...lines].join("\n").trim();
-  return { card, plain: plainText || CARD_PLACEHOLDER };
+  // trusted:进度卡的每行文案已在上游逐 sink 脱敏(summarizeToolParams/sanitizeErrorText/safeLabel:
+  // URL 已降级、path/shell 按 generic=false 保留 git SHA/digest)。buildDisplayCard 默认 generic=true
+  // 会二次套用长 hex/高熵检测,误删含哈希的正常行、甚至把错误终态帧整卡清空 —— 故此路径关掉严格 generic。
+  const { card, plain } = buildDisplayCard({ blocks, caps, trusted: true });
+  return { card, plain: plain || CARD_PLACEHOLDER };
 }

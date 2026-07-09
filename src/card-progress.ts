@@ -16,6 +16,7 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { ChannelType, CARD_PROFILE, CARD_VERSION } from "./types.js";
 import { sendCardMessage, editCardMessage, getCardProfile, httpStatusFromApiFetchError, type CardProfileManifest } from "./api-fetch.js";
 import { renderProgressCard, summarizeToolParams, type CardStep, type CardProgressState, type CardCaps } from "./card-render.js";
+import { DISPLAY_CARD_TOOL_NAME } from "./constants.js";
 
 /** dispatch 侧登记的发送上下文。 */
 export interface CardContext {
@@ -36,6 +37,12 @@ interface CardEntry {
    * 命中则 fail closed,避免把进度卡发到错误频道。
    */
   identity: string;
+  /**
+   * 属主 run 的 SDK runId(hook ctx 权威提供)。首个带 runId 的 hook 认领本 entry;之后 runId
+   * 不符的迟到/外来 hook 一律丢弃 —— 闭合"同 sessionKey 上超时 run A 的迟到 hook 落到新 run B 的卡"
+   * 竞态(setCardContext 侧拿不到 runId,故由首个 hook 绑定)。
+   */
+  runId?: string;
   messageId?: string;
   phase: CardProgressState["phase"];
   steps: CardStep[];
@@ -87,7 +94,7 @@ const dbg: (msg: string) => void = process.env.OCTO_CARD_DEBUG
  * 做等值比较,不落日志。
  */
 function contextIdentity(ctx: CardContext): string {
-  return JSON.stringify([ctx.apiUrl, ctx.channelId, ctx.onBehalfOf ?? "", ctx.botToken]);
+  return JSON.stringify([ctx.apiUrl, ctx.channelId, ctx.channelType, ctx.onBehalfOf ?? "", ctx.botToken]);
 }
 
 /**
@@ -277,6 +284,9 @@ export async function finalizeCard(
     try { await entry.flushPromise; } catch { /* flush 内部已告警 */ }
   }
   if (entry.flushTimer) clearTimeout(entry.flushTimer);
+  // P1-g:若仍有 running thinking(agent 收尾时最后一次 model_call 之后未再调工具),
+  // 用当前时间把它标 done + 算 duration —— 终态帧不留 ⏳。
+  endRunningThinking(entry, Date.now());
   // 只在 entry 仍是当前登记项时删除。finalize 是 fire-and-forget 且上面 await 了 in-flight
   // flush;await 期间 per-group 队列可能推进,同 sessionKey 的下一 run setCardContext 已把
   // Map 换成新 entry —— 那时删 key 会误删新 run 的状态,使其全程无卡。终态帧仍发本 run。
@@ -330,13 +340,46 @@ export function _resetCardProgressForTests(): void {
  * 注册 hook。经 `index.ts` registerFull 调用(仅 full mode)。
  * hook 全局触发,但仅处理 Map 中已登记(octo dispatch)的 sessionKey。
  */
+/**
+ * 关闭最后一步 running 的 thinking(若存在),用 now 算 durationMs。P1-g:SDK 无
+ * model_call_ended,thinking 结束时机由外部信号(before_tool_call / finalize)驱动。
+ */
+function endRunningThinking(entry: CardEntry, now: number): void {
+  const last = entry.steps[entry.steps.length - 1];
+  if (!last || last.tool !== "__thinking__" || last.status !== "running") return;
+  last.status = "done";
+  if (typeof last.startedAt === "number") last.durationMs = Math.max(0, now - last.startedAt);
+}
+
+/**
+ * runId 归属守卫。首个带 runId 的 hook 认领本 entry;之后返回该 hook 是否属于同一 run:
+ *   - true → 属主 run(或旧 host 无 runId)→ 照常处理;
+ *   - false → runId 不符的迟到/外来 hook(超时 run A 的尾随事件落到新 run B 的 entry)→ 调用方丢弃。
+ * hook ctx 的 runId 由 SDK 权威提供(PluginHookToolContext / PluginHookAgentContext 均带)。
+ */
+function claimRun(entry: CardEntry, ctx: unknown): boolean {
+  const rid = (ctx as { runId?: string })?.runId;
+  if (!rid) return true; // 旧 host 不带 runId → 退回今天的 sessionKey-only 行为,不阻拦
+  if (entry.runId === undefined) { entry.runId = rid; return true; }
+  return entry.runId === rid;
+}
+
 export function registerCardProgress(api: OpenClawPluginApi): void {
   api.on("before_tool_call", (event: unknown, ctx: unknown) => {
     const e = (event ?? {}) as { toolName?: string; params?: unknown; toolCallId?: string };
     const sk = (ctx as { sessionKey?: string })?.sessionKey;
     const entry = sk ? cards.get(sk) : undefined;
     if (!entry || entry.skip || !e.toolName) return;
+    if (!claimRun(entry, ctx)) return; // 超时 run 的迟到 hook 落到新 run 的卡 → 丢弃
+    // P1-h:agent 展示卡工具的产出**就是那张卡本身**,不该再有旁边的"正在处理/已中断"进度卡噪音。
+    // 该工具不计入进度、不触发发卡。混合 turn 里其它真实工具照常显示,仅不含这步。
+    if (e.toolName === DISPLAY_CARD_TOOL_NAME) {
+      // 仍要收尾上一轮 running thinking —— 否则思考步 duration 会把 display-card 的执行时长吞进去。
+      endRunningThinking(entry, Date.now());
+      return;
+    }
     dbg(`before_tool_call tool=${e.toolName} session=${sk}`);
+    endRunningThinking(entry, Date.now()); // P1-g:上一轮 thinking 收尾
     entry.phase = "tool";
     entry.steps.push({
       tool: e.toolName,
@@ -352,6 +395,9 @@ export function registerCardProgress(api: OpenClawPluginApi): void {
     const sk = (ctx as { sessionKey?: string })?.sessionKey;
     const entry = sk ? cards.get(sk) : undefined;
     if (!entry || entry.skip) return;
+    if (!claimRun(entry, ctx)) return; // 同 §before_tool_call:外来 run 的迟到 after 事件 → 丢弃
+    // P1-h:与 before_tool_call 对称,避免 display-card 触发 scheduleFlush 而误发进度卡。
+    if (e.toolName === DISPLAY_CARD_TOOL_NAME) return;
     // 回填终态。优先按 toolCallId 精确匹配 running 步骤;若 toolCallId 存在但没命中
     // running(过期/重复投递的 after 事件),直接丢弃,**不**回退按名匹配 —— 否则会把仍
     // 在跑的并发同名步骤误标为终态。仅当 toolCallId 缺失(旧 host)才回退「最后一个同名 running」。
@@ -376,10 +422,18 @@ export function registerCardProgress(api: OpenClawPluginApi): void {
     const sk = (ctx as { sessionKey?: string })?.sessionKey;
     const entry = sk ? cards.get(sk) : undefined;
     if (!entry || entry.skip) return;
-    // 仅在还没有工具步骤时展示「思考中」,避免工具间的模型调用刷屏。
-    if (entry.steps.length === 0 && entry.phase !== "thinking") {
-      entry.phase = "thinking";
-      scheduleFlush(sk!, entry);
-    }
+    if (!claimRun(entry, ctx)) return; // 外来 run 的迟到 model_call → 丢弃
+    // P1-g:每次 model_call 产一步"思考"。若上一步就是 running thinking(model_call_started
+    // 被连续投递),忽略(去重)。
+    const last = entry.steps[entry.steps.length - 1];
+    if (last && last.tool === "__thinking__" && last.status === "running") return;
+    // 首段思考(尚无真实工具步)→ header 显示"🤖 思考中…";真实工具跑过后保持"正在处理…"。
+    const hadRealStep = entry.steps.some((s) => s.tool !== "__thinking__");
+    if (!hadRealStep) entry.phase = "thinking";
+    entry.steps.push({ tool: "__thinking__", status: "running", startedAt: Date.now() });
+    // 懒发契约(模块头:"首个工具事件懒发占位卡"):**纯思考不发首帧卡**。仅当卡已存在(messageId)
+    // 或已有真实工具步时才刷新 —— 否则纯文本 / 纯 display-card turn 的思考步会误发一张占位卡,
+    // 并在收尾时 finalize 成误导性的"⚠️ 已中断",正是 P1-h 想消除的噪音。
+    if (entry.messageId || hadRealStep) scheduleFlush(sk!, entry);
   });
 }

@@ -153,6 +153,122 @@ curl -X POST <apiUrl>/v1/bot/sendMessage \
 
 When replying, always use the `channel_id` and `channel_type` from the received event. Do not modify or split the channel_id.
 
+### Sending Cards (Interactive Card, payload.type=17)
+
+**When to use cards vs plain text**
+
+- Plain text (`payload.type=1`) — conversational replies, short answers, follow-ups.
+- **Display card** (`payload.type=17`, `profile="octo/v1"`) — rich, structured, **NON-INTERACTIVE** output: status reports, structured answers, key-value summaries, images, collapsible detail sections. The card **has no clickable buttons and does not trigger any callback event**. Use for anything a plain paragraph cannot express cleanly.
+- Interactive card with Submit buttons (`profile="octo/v2"`) — user clicks a button, server pushes a `card_action` event, your bot processes it and continues. Only use when you actually need a click-back. Requires the bot to poll `/v1/bot/events` for the callback.
+
+**Discover what the deployment supports (feature detection)**
+
+```bash
+curl <apiUrl>/v1/bot/card/profile -H "Authorization: Bearer $TOKEN"
+```
+
+Response (fields your bot should read):
+```jsonc
+{
+  "enabled": true,                             // deployment-level rollout switch
+  "card_version": "1.5",
+  "profiles": ["octo/v1", "octo/v2"],
+  "elements": ["TextBlock","RichTextBlock","Container","ColumnSet","Column",
+               "FactSet","Image","ImageSet","Table","ActionSet"],
+  "inputs":   ["Input.Text","Input.Toggle","Input.ChoiceSet",
+               "Input.Number","Input.Date","Input.Time"],
+  "limits": { "max_payload_bytes": 524288, "max_nodes": 200, "max_depth": 16,
+              "max_input_text_bytes": 4096, "max_inputs_bytes": 16384 }
+}
+```
+
+- If `available` is false (404) or `enabled` is false → **do not send cards**; fall back to text.
+- `elements`/`inputs` are the authoritative whitelists — send only what the server advertises. Element not in the list → server responds 400.
+- Old deployments may omit `elements`/`inputs` — fall back to the conservative baseline: `TextBlock`/`Container`/`ColumnSet`/`Column`/`FactSet`/`Image`.
+- Respect `limits.max_nodes` / `max_depth` — cards over the cap are rejected.
+
+**Payload shape for a display card**
+
+```jsonc
+POST /v1/bot/sendMessage
+{
+  "channel_id": "<groupId or uid>",
+  "channel_type": 2,
+  "payload": {
+    "type": 17,
+    "profile": "octo/v1",       // display; use octo/v2 only for Submit-interactive
+    "card_version": "1.5",
+    "card": {
+      "type": "AdaptiveCard",
+      "version": "1.5",
+      "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+      "body": [
+        { "type": "TextBlock", "text": "报告", "weight": "Bolder", "size": "Medium", "wrap": true },
+        { "type": "FactSet", "facts": [
+            { "title": "状态", "value": "已完成" },
+            { "title": "耗时", "value": "30ms" }
+        ]}
+      ]
+    },
+    "plain": "报告 · 状态:已完成 · 耗时:30ms"    // fallback text for non-card clients
+  }
+}
+```
+
+**Recommended DisplayBlock building blocks** (this plugin's `buildDisplayCard` translates these to AC JSON, negotiates degradation, and sanitizes content — same behavior you should implement in a hand-written bot):
+
+| Block | Renders to | Purpose | Degrades to when server does not advertise |
+|---|---|---|---|
+| `heading` (text, size?) | Bolder TextBlock (optional Medium/Large) | Section title | (always available) |
+| `text` (text) | TextBlock | Body paragraph | (always available) |
+| `rich` (segments[]) | RichTextBlock + TextRun inlines (bold / color) | One-line multi-style | TextBlock, segments joined |
+| `facts` (items[]) | FactSet | Key-value pairs | Rows of TextBlock `label:value` |
+| `group` (blocks[], style?) | Container with `style: good/warning/attention` | Grouped/tinted section | Flattened (color lost, content kept) |
+| `collapsible` (summary, blocks[]) | Container `isVisible:false` + ActionSet `Action.ToggleVisibility` | Fold long details behind a click | Summary as heading + inner blocks expanded below |
+
+The `collapsible` upgrade requires **three** capability flags together: `elements` contains `Container` AND `ActionSet`, AND `actions` (once the server advertises it) contains `Action.ToggleVisibility`. Any one missing → falls back to the expanded form; the content is never lost.
+
+**Security & safety**
+
+- **Cards are visible to every member of the group.** Never render tokens, API keys, webhook URLs, or `Authorization` values into any card field, even inside a "hidden" collapsible — the raw JSON is stored server-side and can be pulled back by `/v1/message/get`. `buildDisplayCard` in this plugin auto-degrades embedded URLs to `scheme://<registrable-domain>` (including scheme-less and protocol-relative webhook URLs) and drops blocks that match secret shapes (`AKIA…`, `gh[pous]_…`, `xox[bap]-…`/`xapp-…`, `sk-…`, Stripe `sk_live_…`, `glpat-…`, Google `AIza…`, `npm_…`, `shpat_…`, `dop_v1_…`, JWTs, 32+ hex/base64 blobs), but hand-rolled clients must implement the same guardrails.
+- The `plain` field is what non-card clients (and history search) see — keep it a truthful summary. Do not put anything in `plain` that isn't already visible in `card`.
+
+**Editing a card (progress frames, live status)**
+
+```bash
+POST /v1/bot/message/edit
+{ "message_id":"<original>", "channel_id":"…",
+  "content_edit": "<JSON.stringify({ type:17, card:…, profile, card_version, transient:true })>" }
+```
+
+`transient` lives **inside** the stringified `content_edit` envelope (a sibling of `type`/`card`/`card_seq`), **not** as a top-level field of the edit body — the server reads it from the parsed `content_edit`, so a top-level `transient` would be silently ignored. Set `transient: true` for intermediate progress frames so they don't clutter the message audit trail (revision history); omit it (or set to false) for the terminal frame that should persist.
+
+**Visual styling recipes (rich look — use freely, the deployment supports it)**
+
+The im-test deployment renders Adaptive Cards 1.5 rich styling end-to-end: `Container.style` tinted backgrounds, `TextRun` colors and weights, `heading.size`, `RichTextBlock` multi-inline layouts. Use them to reduce cognitive load, not for decoration. Rules of thumb:
+
+1. **Layer status with `group.style`.** Wrap sections in a `group` block with `style: "good"` (success/completed), `"warning"` (待办/degraded), or `"attention"` (error/风险). The tinted background lets users spot the important zone at a glance. Example — a status summary:
+   ```jsonc
+   { "type": "group", "style": "good",       "blocks": [ /* heading + facts of what worked */ ] }
+   { "type": "group", "style": "warning",    "blocks": [ /* heading + facts of what's pending */ ] }
+   { "type": "group", "style": "attention",  "blocks": [ /* heading + facts of risks */ ] }
+   ```
+2. **Emphasize key tokens with `rich` segment colors.** Don't recolor a whole line — just the critical span. Example — a totals line:
+   ```jsonc
+   { "type": "rich", "segments": [
+       { "text": "总计: " },
+       { "text": "5 项已完成", "bold": true, "color": "good" },
+       { "text": " · 1 项待联调 · 1 项风险" }
+   ]}
+   ```
+   Available colors: `default | good | warning | attention | accent`. Applied to a `TextRun`, not to a whole block.
+3. **Use `heading.size` for cross-section hierarchy.** The card's outer title uses `size: "large"` or `"medium"`; section-level headings inside groups leave `size` unset (default bold is enough — resist the urge to size every heading).
+4. **Prefer `facts` for stable key→value.** `facts` renders as a two-column table (label ⇢ value). Great for "status" / "耗时" / "总计" panels. Do NOT use it for rich text — use `text` or `rich` instead.
+5. **Keep a lid on it.** One `heading` + 1-2 tinted `group`s + one closing `rich` line is usually enough. Three tinted groups is the ceiling; more starts to feel like a Christmas tree.
+6. **Automatic degradation is free.** `buildDisplayCard` negotiates against the server's advertised elements: a deployment that doesn't advertise `RichTextBlock` will silently render your `rich` segments as a joined `TextBlock`, `FactSet` degrades to text rows, `Container.style` flattens to plain items. **You don't need to check compatibility — just describe the intent and the builder degrades gracefully.**
+
+Anti-pattern: rendering a "success ✅ / warning ⚠️ / error ❌" prefix in every row instead of grouping them by tint — the icons carry the signal but rows still bleed into each other. Group them; the tint does the layout work for you.
+
 ## Real-time Features
 
 ### Typing Indicator
