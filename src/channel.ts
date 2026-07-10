@@ -30,6 +30,10 @@ function getAgentVersion(): string {
 }
 import { WKSocket } from "./socket.js";
 import { handleInboundMessage, type OctoStatusSink, sanitizeFilename } from "./inbound.js";
+import { runWithSessionInitRetry } from "./session-retry.js";
+
+/** 会话初始化冲突(core CAS)兜底重试参数:同群紧挨两条消息时 turn N 收尾写与 turn N+1 init 竞态。 */
+const SESSION_INIT_RETRY = { retries: 2, backoffMs: 800 } as const;
 import { ChannelType, MessageType, type BotMessage, type MessagePayload, type SendMessageResult } from "./types.js";
 import { buildEntitiesFromFallback, parseStructuredMentions, convertStructuredMentions, sanitizeOutboundMentions, MENTION_FORMAT_HINT } from "./mention-utils.js";
 import type { MentionEntity } from "./types.js";
@@ -1502,21 +1506,25 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
           enqueueInbound(
             inboundQueueKey,
             () =>
-              handleInboundMessage({
-                account,
-                message: msg,
-                botUid: credentials.robot_id,
-                groupHistories,
-                lastBotReplySeqMap,
-                memberMap,
-                uidToNameMap,
-                groupCacheTimestamps,
-                memberRobotMap,
-                currentGroupMembersMap,
-                groupMdCache,
-                log,
-                statusSink,
-              }),
+              runWithSessionInitRetry(
+                () =>
+                  handleInboundMessage({
+                    account,
+                    message: msg,
+                    botUid: credentials.robot_id,
+                    groupHistories,
+                    lastBotReplySeqMap,
+                    memberMap,
+                    uidToNameMap,
+                    groupCacheTimestamps,
+                    memberRobotMap,
+                    currentGroupMembersMap,
+                    groupMdCache,
+                    log,
+                    statusSink,
+                  }),
+                { ...SESSION_INIT_RETRY, log },
+              ),
             log,
           );
         },
