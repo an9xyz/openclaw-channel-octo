@@ -7,8 +7,29 @@
  * 帧内容:工具名友好化 + 参数摘要 + 耗时,让用户看清 agent 在做什么。
  * 视觉属性仅用端到端验证过的(weight/spacing/size/wrap),不用未验证的 color 以规避白名单。
  */
-import { CARD_PLACEHOLDER } from "./types.js";
+import { CARD_PLACEHOLDER, CARD_VERSION } from "./types.js";
 import { buildDisplayCard, type DisplayBlock, type RichSegment } from "./card-blocks.js";
+
+export const OCTO_CARD_LAYOUTS = {
+  agentProgressV1: "agent_progress_v1",
+} as const;
+
+const AGENT_PROGRESS_DETAIL_ID = "timeline_detail";
+const AGENT_PROGRESS_COLLAPSE_ID = "btn_collapse";
+const AGENT_PROGRESS_EXPAND_ID = "btn_expand";
+
+export type OctoCardLayout = (typeof OCTO_CARD_LAYOUTS)[keyof typeof OCTO_CARD_LAYOUTS];
+
+const KNOWN_OCTO_CARD_LAYOUTS = new Set<string>(Object.values(OCTO_CARD_LAYOUTS));
+
+export function detectOctoCardLayout(card: Record<string, unknown>): OctoCardLayout | undefined {
+  const metadata = card.metadata;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return undefined;
+  const layout = (metadata as { octo_layout?: unknown }).octo_layout;
+  return typeof layout === "string" && KNOWN_OCTO_CARD_LAYOUTS.has(layout)
+    ? (layout as OctoCardLayout)
+    : undefined;
+}
 
 /** 单个工具步骤的状态。 */
 export interface CardStep {
@@ -437,16 +458,20 @@ function maxVisibleSteps(caps: CardCaps | undefined): number {
 function stepSegments(step: CardStep): RichSegment[] {
   const { icon, label: rawLabel } = resolveToolMeta(step.tool);
   const label = safeLabel(rawLabel);
-  const sum = step.summary ? `：${step.summary}` : "";
+  const sum = step.summary ? step.summary : "";
   if (step.status === "running") {
-    return [{ text: "⏳ " }, { text: label, bold: true }, { text: sum }];
+    return [
+      { text: "⏳ " },
+      { text: label, bold: true },
+      ...(sum ? [{ text: "：" }, { text: sum, fontType: "Monospace" as const }] : []),
+    ];
   }
   if (step.status === "error") {
     const detail = sanitizeErrorText(step.error);
     const segs: RichSegment[] = [
       { text: "❌ " },
       { text: label, bold: true },
-      { text: sum },
+      ...(sum ? [{ text: "：" }, { text: sum, fontType: "Monospace" as const }] : []),
     ];
     if (detail) segs.push({ text: ` — ${detail}`, color: "attention" });
     return segs;
@@ -455,7 +480,7 @@ function stepSegments(step: CardStep): RichSegment[] {
   const segs: RichSegment[] = [
     { text: `${icon} ` },
     { text: label, bold: true },
-    { text: sum },
+    ...(sum ? [{ text: "：" }, { text: sum, fontType: "Monospace" as const }] : []),
   ];
   if (dur) segs.push({ text: ` · ${dur}`, color: "good" });
   return segs;
@@ -482,7 +507,7 @@ function groupSegments(group: CardStep[]): RichSegment[] {
     { text: ` × ${group.length}` },
   ];
   if (dur) segs.push({ text: ` · 共 ${dur}`, color: "good" });
-  if (lastSum) segs.push({ text: ` — 最近: ${lastSum}` });
+  if (lastSum) segs.push({ text: " — 最近: " }, { text: lastSum, fontType: "Monospace" });
   return segs;
 }
 
@@ -560,6 +585,7 @@ function renderProgressDetailBlocks(steps: CardStep[], caps: CardCaps | undefine
 function supportsTerminalCollapse(caps: CardCaps | undefined): boolean {
   return (
     cardSupports(caps, "Container") &&
+    cardSupports(caps, "ColumnSet") &&
     cardSupports(caps, "ActionSet") &&
     cardSupports(caps, "Action.ToggleVisibility")
   );
@@ -608,8 +634,102 @@ function progressSummarySegments(steps: CardStep[], total: number, visible: stri
   ];
 }
 
+function richTextBlock(segments: RichSegment[]): Record<string, unknown> {
+  return {
+    type: "RichTextBlock",
+    inlines: segments.map((s) => ({
+      type: "TextRun",
+      text: s.text,
+      ...(s.bold ? { weight: "Bolder" } : {}),
+      ...(s.subtle ? { isSubtle: true } : {}),
+      ...(s.fontType ? { fontType: s.fontType } : {}),
+      ...(s.color && s.color !== "default" ? { color: s.color } : {}),
+    })),
+  };
+}
+
+function textBlock(text: string, opts?: { bold?: boolean; subtle?: boolean; size?: "Medium" }): Record<string, unknown> {
+  return {
+    type: "TextBlock",
+    text,
+    wrap: true,
+    ...(opts?.bold ? { weight: "Bolder" } : {}),
+    ...(opts?.subtle ? { isSubtle: true } : {}),
+    ...(opts?.size ? { size: opts.size } : {}),
+  };
+}
+
+function progressHeaderSegments(state: CardProgressState, fallbackHeader: string): RichSegment[] {
+  return terminalHeaderSegments(state) ?? [{ text: fallbackHeader, bold: true }];
+}
+
+function progressSummaryText(steps: CardStep[], total: number, visible: string): string {
+  return `${progressSummary(steps, total)} · ${visible} 步`;
+}
+
+function progressHeaderItems(
+  state: CardProgressState,
+  header: string,
+  steps: CardStep[],
+  total: number,
+  visible: string,
+  canRichText: boolean,
+): Record<string, unknown>[] {
+  const items: Record<string, unknown>[] = [];
+  if (canRichText) {
+    items.push(richTextBlock(progressHeaderSegments(state, header)));
+    if (total > 0) items.push(richTextBlock(progressSummarySegments(steps, total, visible)));
+    return items;
+  }
+  items.push(textBlock(header, { bold: true, size: "Medium" }));
+  if (total > 0) items.push(textBlock(progressSummaryText(steps, total, visible), { subtle: true }));
+  return items;
+}
+
+function progressToggleColumn(startVisible: boolean): Record<string, unknown> | null {
+  return {
+    type: "Column",
+    width: "auto",
+    items: [
+      {
+        type: "ActionSet",
+        id: AGENT_PROGRESS_COLLAPSE_ID,
+        isVisible: startVisible,
+        actions: [
+          {
+            type: "Action.ToggleVisibility",
+            title: "收起推理",
+            targetElements: [
+              { elementId: AGENT_PROGRESS_DETAIL_ID, isVisible: false },
+              { elementId: AGENT_PROGRESS_COLLAPSE_ID, isVisible: false },
+              { elementId: AGENT_PROGRESS_EXPAND_ID, isVisible: true },
+            ],
+          },
+        ],
+      },
+      {
+        type: "ActionSet",
+        id: AGENT_PROGRESS_EXPAND_ID,
+        isVisible: !startVisible,
+        actions: [
+          {
+            type: "Action.ToggleVisibility",
+            title: "展开推理",
+            targetElements: [
+              { elementId: AGENT_PROGRESS_DETAIL_ID, isVisible: true },
+              { elementId: AGENT_PROGRESS_COLLAPSE_ID, isVisible: true },
+              { elementId: AGENT_PROGRESS_EXPAND_ID, isVisible: false },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
+
 /**
- * 渲染进度卡 —— **走 buildDisplayCard 底座**(吃自己狗粮):header 用 heading(medium)block、
+ * 渲染进度卡 —— header/toggle 使用 agent_progress_v1 专用根结构;步骤明细仍走
+ * buildDisplayCard 底座(吃自己狗粮),复用协商降级与脱敏。
  * 每步用 rich block(advertise RichTextBlock 时是 RichTextBlock 富行、否则 TextBlock 平铺 —— 一行完整,
  * 不像 ColumnSet 会被服务端权威 plain 重算成图标/文本两行)。
  * 可见步数受服务端 max_nodes 权威约束(缺省用本地上限)。
@@ -631,36 +751,51 @@ export function renderProgressCard(
   const hidden = Math.max(0, total - cap);
   const visibleSteps = hidden > 0 ? state.steps.slice(-cap) : state.steps;
   const canRichText = cardSupports(caps, "RichTextBlock");
-  const headerSegments = canRichText ? terminalHeaderSegments(state) : null;
-
-  const blocks: DisplayBlock[] = [
-    headerSegments
-      ? { type: "rich", segments: headerSegments }
-      : { type: "heading", text: header, size: "medium" },
-  ];
+  const visible = hidden > 0 ? `${visibleSteps.length}/${total}` : `${total}`;
 
   const detailBlocks: DisplayBlock[] = [];
   if (hidden > 0) detailBlocks.push({ type: "text", text: `… 省略前 ${hidden} 步` });
   detailBlocks.push(...renderProgressDetailBlocks(visibleSteps, caps));
 
-  // 运行中保持展开;终态仅在服务端明确 advertise ToggleVisibility 时折叠历史推理/工具调用。
-  // 未声明动作能力的旧部署保持原展开结构,避免多出 summary 行造成视觉/测试回归。
-  if ((state.phase === "done" || state.phase === "error") && detailBlocks.length > 0 && supportsTerminalCollapse(caps)) {
-    const visible = hidden > 0 ? `${visibleSteps.length}/${total}` : `${total}`;
-    const summary = `${progressSummary(state.steps, total)} · ${visible} 步`;
-    blocks.push({
-      type: "collapsible",
-      summary,
-      ...(canRichText ? { summarySegments: progressSummarySegments(state.steps, total, visible) } : {}),
-      blocks: detailBlocks,
-    });
-  } else {
-    blocks.push(...detailBlocks);
-  }
-
   // trusted:进度卡的每行文案已在上游逐 sink 脱敏(summarizeToolParams/sanitizeErrorText/safeLabel:
   // URL 已降级、path/shell 按 generic=false 保留 git SHA/digest)。buildDisplayCard 默认 generic=true
   // 会二次套用长 hex/高熵检测,误删含哈希的正常行、甚至把错误终态帧整卡清空 —— 故此路径关掉严格 generic。
-  const { card, plain } = buildDisplayCard({ blocks, caps, trusted: true });
+  const detail = buildDisplayCard({ blocks: detailBlocks, caps, trusted: true });
+  const headerItems = progressHeaderItems(state, header, state.steps, total, visible, canRichText);
+  const canToggle = supportsTerminalCollapse(caps);
+  const isTerminal = state.phase === "done" || state.phase === "error";
+  const detailVisible = !(canToggle && isTerminal);
+  const columns: Record<string, unknown>[] = [
+    {
+      type: "Column",
+      width: "stretch",
+      items: headerItems,
+    },
+  ];
+  if (canToggle) {
+    const toggleColumn = progressToggleColumn(detailVisible);
+    if (toggleColumn) columns.push(toggleColumn);
+  }
+
+  const card: Record<string, unknown> = {
+    type: "AdaptiveCard",
+    version: CARD_VERSION,
+    $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
+    body: [
+      {
+        type: "ColumnSet",
+        columns,
+      },
+      {
+        type: "Container",
+        id: AGENT_PROGRESS_DETAIL_ID,
+        isVisible: detailVisible,
+        items: (detail.card.body as unknown[]) ?? [],
+      },
+    ],
+  };
+  card.metadata = { octo_layout: OCTO_CARD_LAYOUTS.agentProgressV1 };
+  const summaryPlain = total > 0 ? progressSummaryText(state.steps, total, visible) : "";
+  const plain = [header, summaryPlain, detail.plain].filter(Boolean).join("\n");
   return { card, plain: plain || CARD_PLACEHOLDER };
 }

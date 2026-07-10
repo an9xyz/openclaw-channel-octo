@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ChannelType } from "./types.js";
+import { OCTO_CARD_LAYOUTS } from "./card-render.js";
 import {
   setCardContext,
   finalizeCard,
@@ -29,6 +30,31 @@ function mockFetch(opts: { enabled?: boolean; sendId?: string } = {}) {
     return { ok: true, status: 200, text: async () => "" }; // message/edit
   });
   return { fn, calls };
+}
+
+function elementText(e: Record<string, unknown>): string {
+  if (typeof e.text === "string") return e.text;
+  if (Array.isArray(e.inlines)) return e.inlines.map((i) => (i as { text?: string }).text ?? "").join("");
+  if (Array.isArray(e.items)) return e.items.map((item) => elementText(item as Record<string, unknown>)).join("\n");
+  if (Array.isArray(e.columns)) {
+    return e.columns
+      .flatMap((c) => ((c as { items?: unknown[] }).items ?? []) as Record<string, unknown>[])
+      .map(elementText)
+      .join("\n");
+  }
+  return "";
+}
+
+function progressHeaderText(card: { body: Array<Record<string, unknown>> }): string {
+  return elementText(card.body[0]);
+}
+
+function progressDetailItems(card: { body: Array<Record<string, unknown>> }): Array<Record<string, unknown>> {
+  return ((card.body[1] as { items?: Array<Record<string, unknown>> })?.items ?? []);
+}
+
+function progressCardText(card: { body: Array<Record<string, unknown>> }): string {
+  return card.body.map(elementText).join("\n");
 }
 
 /** 可控 promise:用于把某个请求悬在 in-flight 状态。 */
@@ -115,7 +141,7 @@ describe("card-progress 状态机 + hook + 节流", () => {
     const edit = calls.find((c) => c.url.includes("/message/edit"));
     expect(edit).toBeTruthy();
     const env = JSON.parse(edit!.body!.content_edit as string);
-    expect((env.card.body as Array<{ text: string }>)[0].text).toContain("✅ 已完成");
+    expect(progressHeaderText(env.card)).toContain("✅ 已完成");
     expect(env.transient).toBeUndefined(); // 终态帧进修订历史(不带 transient)
   });
 
@@ -160,7 +186,7 @@ describe("card-progress 状态机 + hook + 节流", () => {
     const edit = calls.find((c) => c.url.includes("/message/edit"));
     expect(edit).toBeTruthy();
     const env = JSON.parse(edit!.body!.content_edit as string);
-    expect((env.card.body as Array<{ text: string }>)[0].text).toContain("✅ 已完成");
+    expect(progressHeaderText(env.card)).toContain("✅ 已完成");
     expect(env.transient).toBeUndefined(); // 终态帧进修订历史
   });
 
@@ -202,7 +228,7 @@ describe("card-progress 状态机 + hook + 节流", () => {
     const edit = calls.find((c) => c.url.includes("/message/edit"));
     expect(edit).toBeTruthy(); // 终态帧未丢
     const env = JSON.parse(edit!.body!.content_edit as string);
-    expect((env.card.body as Array<{ text: string }>)[0].text).toContain("✅ 已完成");
+    expect(progressHeaderText(env.card)).toContain("✅ 已完成");
   });
 
   it("P2-a: gate 5xx 不缓存,下次 flush 重探成功仍能发卡", async () => {
@@ -251,9 +277,9 @@ describe("card-progress 状态机 + hook + 节流", () => {
     const edit = calls.filter((c) => c.url.includes("/message/edit")).pop();
     expect(edit).toBeTruthy();
     const env = JSON.parse(edit!.body!.content_edit as string);
-    const texts = (env.card.body as Array<{ text: string }>).map((b) => b.text);
-    expect(texts[1]).toBe("⌨️ 执行命令：sleep · 50ms"); // A 已完成
-    expect(texts[2]).toBe("⏳ 执行命令：sleep");          // B 仍 running
+    const texts = progressDetailItems(env.card).map(elementText);
+    expect(texts[0]).toBe("⌨️ 执行命令：sleep · 50ms"); // A 已完成
+    expect(texts[1]).toBe("⏳ 执行命令：sleep");          // B 仍 running
   });
 
   it("P2-b(重复投递): toolCallId 命中失败不回退按名匹配,不误标并发步骤", async () => {
@@ -272,9 +298,9 @@ describe("card-progress 状态机 + hook + 节流", () => {
 
     const edit = calls.filter((c) => c.url.includes("/message/edit")).pop();
     const env = JSON.parse(edit!.body!.content_edit as string);
-    const texts = (env.card.body as Array<{ text: string }>).map((b) => b.text);
-    expect(texts[1]).toBe("⌨️ 执行命令：sleep · 50ms"); // A done(只被标一次)
-    expect(texts[2]).toBe("⏳ 执行命令：sleep");          // B 仍 running,未被重复事件误标
+    const texts = progressDetailItems(env.card).map(elementText);
+    expect(texts[0]).toBe("⌨️ 执行命令：sleep · 50ms"); // A done(只被标一次)
+    expect(texts[1]).toBe("⏳ 执行命令：sleep");          // B 仍 running,未被重复事件误标
   });
 
   it("J1: finalize await 期间下一 run setCardContext,不误删新 run 的 entry", async () => {
@@ -453,8 +479,10 @@ describe("card-progress 状态机 + hook + 节流", () => {
     const card = (send!.body!.payload as {
       card: { body: Array<{ type: string; items?: Array<{ type: string }> }> };
     }).card;
-    expect(card.body[1].type).toBe("Container"); // manifest advertise → timeline 分组容器
-    expect(card.body[1].items?.[0]?.type).toBe("RichTextBlock"); // 容器内仍是富文本行
+    expect(card.body[0].type).toBe("ColumnSet");
+    expect(card.body[1].type).toBe("Container"); // timeline_detail
+    expect(card.body[1].items?.[0]?.type).toBe("Container"); // timeline 步骤组
+    expect((card.body[1].items?.[0] as { items?: Array<{ type: string }> }).items?.[0]?.type).toBe("RichTextBlock"); // 组内仍是富文本行
   });
 
   it("波C: manifest advertise Action.ToggleVisibility → 终态 edit 折叠 thinking/tool 明细", async () => {
@@ -468,7 +496,7 @@ describe("card-progress 状态机 + hook + 节流", () => {
           json: async () => ({
             enabled: true,
             profiles: ["octo/v1"],
-            elements: ["TextBlock", "RichTextBlock", "Container", "ActionSet"],
+            elements: ["TextBlock", "RichTextBlock", "Container", "ColumnSet", "ActionSet"],
             actions: ["Action.ToggleVisibility"],
             limits: { max_nodes: 200 },
           }),
@@ -491,19 +519,31 @@ describe("card-progress 状态机 + hook + 节流", () => {
     const edit = calls.filter((c) => c.url.includes("/message/edit")).pop();
     expect(edit).toBeTruthy();
     const env = JSON.parse(edit!.body!.content_edit as string);
+    expect(env.card.metadata).toEqual({ octo_layout: OCTO_CARD_LAYOUTS.agentProgressV1 });
     const body = env.card.body as Array<Record<string, unknown>>;
-    expect(body[1].type).toBe("RichTextBlock");
-    const summaryInlines = body[1].inlines as Array<Record<string, unknown>>;
-    expect(summaryInlines[0]).toMatchObject({ text: "推理与工具调用", weight: "Bolder" });
-    expect(summaryInlines[1]).toMatchObject({ isSubtle: true });
-    expect((body[2] as { type: string }).type).toBe("ActionSet");
-    const action = (body[2] as { actions: Array<Record<string, unknown>> }).actions[0];
-    expect(action).toMatchObject({ type: "Action.ToggleVisibility", title: "展开/收起" });
-    expect(action.title).not.toBe("推理与工具调用");
-    expect((body[3] as { type: string; isVisible: boolean }).type).toBe("Container");
-    expect((body[3] as { isVisible: boolean }).isVisible).toBe(false);
-    expect(action.targetElements).toEqual([(body[3] as { id: string }).id]);
-    expect(JSON.stringify(body[3])).toContain("执行命令");
+    expect(body[0].type).toBe("ColumnSet");
+    const summaryHeader = body[0] as { columns: Array<{ width: string; items: Array<Record<string, unknown>> }> };
+    const headerBlock = summaryHeader.columns[0].items[0] as { type: string; inlines: Array<Record<string, unknown>> };
+    expect(headerBlock.type).toBe("RichTextBlock");
+    expect(headerBlock.inlines[0]).toMatchObject({ text: "✅ 已完成", weight: "Bolder" });
+    const summaryBlock = summaryHeader.columns[0].items[1] as { type: string; inlines: Array<Record<string, unknown>> };
+    expect(summaryBlock.inlines[0]).toMatchObject({ text: "推理与工具调用", weight: "Bolder" });
+    expect(summaryBlock.inlines[1]).toMatchObject({ isSubtle: true });
+    const collapseBtn = summaryHeader.columns[1].items[0] as { id: string; isVisible: boolean; actions: Array<Record<string, unknown>> };
+    const expandBtn = summaryHeader.columns[1].items[1] as { id: string; isVisible: boolean; actions: Array<Record<string, unknown>> };
+    expect(collapseBtn.isVisible).toBe(false);
+    expect(expandBtn.isVisible).toBe(true);
+    expect(collapseBtn.actions[0]).toMatchObject({ type: "Action.ToggleVisibility", title: "收起推理" });
+    expect(expandBtn.actions[0]).toMatchObject({ type: "Action.ToggleVisibility", title: "展开推理" });
+    expect((body[1] as { type: string; id: string; isVisible: boolean }).type).toBe("Container");
+    expect((body[1] as { id: string }).id).toBe("timeline_detail");
+    expect((body[1] as { isVisible: boolean }).isVisible).toBe(false);
+    expect(collapseBtn.actions[0].targetElements).toEqual([
+      { elementId: (body[1] as { id: string }).id, isVisible: false },
+      { elementId: collapseBtn.id, isVisible: false },
+      { elementId: expandBtn.id, isVisible: true },
+    ]);
+    expect(JSON.stringify(body[1])).toContain("执行命令");
   });
 
   it("P1-g: model_call_started 产 running thinking step,before_tool_call 结束它(标 done + durationMs)", async () => {
@@ -522,11 +562,9 @@ describe("card-progress 状态机 + hook + 节流", () => {
 
     const send = calls.find((c) => c.url.includes("/sendMessage"));
     expect(send).toBeTruthy();
-    const body = (send!.body!.payload as { card: { body: Array<{ text?: string; inlines?: Array<{ text: string }> }> } }).card.body;
+    const card = (send!.body!.payload as { card: { body: Array<Record<string, unknown>> } }).card;
     // 首帧应含:header + thinking(done) + read(running/done)
-    const asText = (e: { text?: string; inlines?: Array<{ text: string }> }) =>
-      e.text ?? (e.inlines ?? []).map((i) => i.text).join("");
-    const joined = body.map(asText).join(" | ");
+    const joined = progressCardText(card);
     expect(joined).toContain("💭 思考"); // thinking step 出现
     expect(joined).toContain("读取文件");  // 后续 tool step 也在
   });
@@ -602,10 +640,9 @@ describe("card-progress 状态机 + hook + 节流", () => {
     await vi.advanceTimersByTimeAsync(900);
     const send = calls.find((c) => c.url.includes("/sendMessage"));
     expect(send).toBeTruthy();
-    const card = (send!.body!.payload as { card: { body: Array<{ text?: string; inlines?: Array<{ text: string }> }> } }).card;
-    const asText = (e: { text?: string; inlines?: Array<{ text: string }> }) =>
-      e.text ?? (e.inlines ?? []).map((i) => i.text).join("");
-    const joined = card.body.map(asText).join(" | ");
+    const card = (send!.body!.payload as { card: { metadata?: unknown; body: Array<Record<string, unknown>> } }).card;
+    expect(card.metadata).toEqual({ octo_layout: OCTO_CARD_LAYOUTS.agentProgressV1 });
+    const joined = progressCardText(card);
     expect(joined).toContain("读取文件");
     expect(joined).not.toContain("octo_send_display_card");
   });
@@ -694,15 +731,13 @@ describe("card-progress 状态机 + hook + 节流", () => {
     await vi.advanceTimersByTimeAsync(900);
 
     // 聚合所有发出去的帧(send payload + edit content_edit)的卡片文本
-    const asText = (e: { text?: string; inlines?: Array<{ text: string }> }) =>
-      e.text ?? (e.inlines ?? []).map((i) => i.text).join("");
     const allText = calls
       .filter((c) => c.url.includes("/sendMessage") || c.url.includes("/message/edit"))
       .map((c) => {
         const card = c.url.includes("/message/edit")
           ? JSON.parse(c.body!.content_edit as string).card
-          : (c.body!.payload as { card: { body: unknown[] } }).card;
-        return (card.body as Array<{ text?: string; inlines?: Array<{ text: string }> }>).map(asText).join(" | ");
+          : (c.body!.payload as { card: { body: Array<Record<string, unknown>> } }).card;
+        return progressCardText(card);
       })
       .join(" || ");
     expect(allText).toContain("写入文件"); // B 自己的步骤渲染出来了

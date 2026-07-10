@@ -118,6 +118,18 @@ describe("rich block(高价值:一行多样式,顺带解决 ColumnSet plain 分�
     expect(el.inlines[3]).toEqual({ type: "TextRun", text: " · 30ms", color: "good" });
   });
 
+  it("rich segment 支持 Monospace 字体,用于工具参数/命令片段", () => {
+    const { card } = buildDisplayCard({
+      caps: FULL_CAPS,
+      blocks: [{ type: "rich", segments: [
+        { text: "query_metrics", bold: true },
+        { text: " channel=B range=90d", fontType: "Monospace" },
+      ] }],
+    });
+    const el = body({ card })[0] as { inlines: Array<Record<string, unknown>> };
+    expect(el.inlines[1]).toMatchObject({ text: " channel=B range=90d", fontType: "Monospace" });
+  });
+
   it("不 advertise RichTextBlock → 段拼成单个 TextBlock(降级,零回归)", () => {
     const { card, plain } = buildDisplayCard({
       caps: { elements: new Set(["TextBlock"]) }, // 只 baseline TextBlock
@@ -200,6 +212,7 @@ describe("table block(Table)", () => {
     const el = body({ card })[0] as {
       type: string;
       firstRowAsHeader: boolean;
+      columns: Array<{ width: number }>;
       rows: Array<{ type: string; cells: Array<{ type: string; items: Array<{ type: string; text: string }> }> }>;
     };
     expect(el.type).toBe("Table");
@@ -209,6 +222,43 @@ describe("table block(Table)", () => {
     expect(el.rows[0].cells[0].type).toBe("TableCell");
     expect(el.rows[0].cells[0].items[0]).toMatchObject({ type: "TextBlock", text: "阶段" });
     expect(plain).toBe("阶段 | 状态\n联调 | 完成");
+  });
+
+  it("producer 可控制列宽、表头开关,并在 cell 内放 rich/group 等展示块", () => {
+    const { card, plain } = buildDisplayCard({
+      caps: FULL_CAPS,
+      blocks: [{
+        type: "table",
+        firstRowAsHeader: false,
+        columns: [{ width: 1 }, { width: 2 }],
+        rows: [
+          { cells: [
+            { blocks: [{ type: "rich", segments: [{ text: "模块", bold: true }] }] },
+            { text: "内容" },
+          ] },
+          { cells: [
+            { text: "状态" },
+            { blocks: [{ type: "group", style: "emphasis", blocks: [{ type: "text", text: "可用" }] }] },
+          ] },
+        ],
+      }],
+    });
+    const table = body({ card })[0] as {
+      firstRowAsHeader: boolean;
+      columns: Array<{ width: number }>;
+      rows: Array<{ cells: Array<{ items: Array<Record<string, unknown>> }> }>;
+    };
+    expect(table.firstRowAsHeader).toBe(false);
+    expect(table.columns).toEqual([{ width: 1 }, { width: 2 }]);
+    expect(table.rows[0].cells[0].items[0]).toMatchObject({
+      type: "RichTextBlock",
+      inlines: [{ type: "TextRun", text: "模块", weight: "Bolder" }],
+    });
+    expect(table.rows[1].cells[1].items[0]).toMatchObject({
+      type: "Container",
+      style: "emphasis",
+    });
+    expect(plain).toBe("模块 | 内容\n状态 | 可用");
   });
 
   it("未 advertise Table → 降级为管道分隔文本行", () => {
@@ -423,11 +473,11 @@ describe("collapsible block(forward-compat 折叠/展开)", () => {
    * 任一不满足 → 降级为平铺(summary 当 heading,inner 全部展开在下方 —— 零回归)。
    */
   const CAPS_WITH_TOGGLE: CardCaps = {
-    elements: new Set(["TextBlock", "Container", "ActionSet"]),
+    elements: new Set(["TextBlock", "RichTextBlock", "Container", "ColumnSet", "ActionSet"]),
     actions: new Set(["Action.ToggleVisibility"]),
   };
 
-  it("advertise ToggleVisibility+ActionSet+Container → 升级:summary+短按钮+隐藏 Container", () => {
+  it("advertise ToggleVisibility+ActionSet+Container+ColumnSet → 升级:summary 左侧 + 右侧展开/收起按钮 + 隐藏 Container", () => {
     const { card } = buildDisplayCard({
       caps: CAPS_WITH_TOGGLE,
       blocks: [{ type: "collapsible", summary: "详情", blocks: [
@@ -436,24 +486,40 @@ describe("collapsible block(forward-compat 折叠/展开)", () => {
       ]}],
     });
     const els = body({ card });
-    // 应有:summary(TextBlock)+ 短按钮(ActionSet)+ 目标 Container(isVisible:false),按钮不重复长 summary。
-    expect(els).toHaveLength(3);
+    expect(els).toHaveLength(2);
+    const header = els[0] as { type: string; columns: Array<{ width: string; items: Array<Record<string, unknown>> }> };
+    expect(header.type).toBe("ColumnSet");
+    expect(header.columns[0].width).toBe("stretch");
+    expect(header.columns[0].items[0]).toMatchObject({ type: "TextBlock", text: "详情" });
+    expect(header.columns[1].width).toBe("auto");
+    const collapseBtn = header.columns[1].items[0] as { id: string; isVisible: boolean; actions: Array<Record<string, unknown>> };
+    const expandBtn = header.columns[1].items[1] as { id: string; isVisible: boolean; actions: Array<Record<string, unknown>> };
+    expect(collapseBtn.isVisible).toBe(false);
+    expect(expandBtn.isVisible).toBe(true);
+
     const container = els.find((e) => e.type === "Container") as { id: string; isVisible: boolean; items: Element[] };
     expect(container).toBeTruthy();
     expect(container.isVisible).toBe(false);
     expect(container.id).toMatch(/^octo_disp_clp_\d+$/); // 展示元素 id 统一命名空间,避免与 input/action 撞名
     expect(container.items).toHaveLength(2);
 
-    const summary = els[0] as { text: string; selectAction?: unknown };
-    expect(summary.text).toBe("详情");
-    expect(summary.selectAction).toBeUndefined();
-
-    const actionSet = els[1] as { type: string; actions: Array<Record<string, unknown>> };
-    expect(actionSet.type).toBe("ActionSet");
-    expect(actionSet.actions[0]).toMatchObject({
+    expect(expandBtn.actions[0]).toMatchObject({
       type: "Action.ToggleVisibility",
-      title: "展开/收起",
-      targetElements: [container.id],
+      title: "展开",
+      targetElements: [
+        { elementId: container.id, isVisible: true },
+        { elementId: collapseBtn.id, isVisible: true },
+        { elementId: expandBtn.id, isVisible: false },
+      ],
+    });
+    expect(collapseBtn.actions[0]).toMatchObject({
+      type: "Action.ToggleVisibility",
+      title: "收起",
+      targetElements: [
+        { elementId: container.id, isVisible: false },
+        { elementId: collapseBtn.id, isVisible: false },
+        { elementId: expandBtn.id, isVisible: true },
+      ],
     });
   });
 
@@ -475,8 +541,9 @@ describe("collapsible block(forward-compat 折叠/展开)", () => {
         { type: "text", text: "先拆分线索" },
       ]}],
     });
-    const actionSet = body({ card }).find((e) => e.type === "ActionSet") as { actions: Array<Record<string, unknown>> };
-    expect(actionSet.actions[0]).toMatchObject({
+    const header = body({ card })[0] as { columns: Array<{ items: Array<{ actions: Array<Record<string, unknown>> }> }> };
+    const expandBtn = header.columns[1].items[1];
+    expect(expandBtn.actions[0]).toMatchObject({
       type: "Action.ToggleVisibility",
       title: "查看过程",
     });
@@ -491,8 +558,9 @@ describe("collapsible block(forward-compat 折叠/展开)", () => {
     });
     const els = body({ card });
     expect(els).toHaveLength(2);
-    expect(els[0].type).toBe("ActionSet");
-    expect((els[0] as { actions: Array<Record<string, unknown>> }).actions[0].title).toBe("查看过程");
+    expect(els[0].type).toBe("ColumnSet");
+    const header = els[0] as { columns: Array<{ items: Array<Record<string, unknown>> }> };
+    expect((header.columns[1].items[1] as { actions: Array<Record<string, unknown>> }).actions[0].title).toBe("展开");
     expect(els[1].type).toBe("Container");
     expect(JSON.stringify(card).match(/查看过程/g)).toHaveLength(1);
     expect(plain).toBe("查看过程\n先定位问题");
@@ -693,7 +761,7 @@ describe("validateDisplayBlocks 结构上限(不可信输入)", () => {
   it("合法浅结构照常通过", () => {
     const out = validateDisplayBlocks([
       { type: "heading", text: "H" },
-      { type: "table", rows: [{ cells: [{ text: "a" }] }] },
+      { type: "table", columns: [{ width: 1 }, { width: 2 }], rows: [{ cells: [{ text: "a" }, { blocks: [{ type: "rich", segments: [{ text: "b", bold: true, fontType: "Monospace" }] }] }] }] },
       { type: "columns", columns: [{ blocks: [{ type: "text", text: "c" }] }] },
       { type: "link", text: "Docs", url: "https://example.com/a" },
       { type: "group", blocks: [{ type: "text", text: "x" }] },
@@ -701,6 +769,8 @@ describe("validateDisplayBlocks 结构上限(不可信输入)", () => {
       { type: "copy", label: "复制", text: "y" },
     ]);
     expect(out).toHaveLength(7);
+    expect(out[1]).toMatchObject({ type: "table", columns: [{ width: 1 }, { width: 2 }] });
+    expect(JSON.stringify(out[1])).toContain("Monospace");
     expect(out[5]).toMatchObject({ type: "collapsible", actionLabel: "查看过程" });
   });
 

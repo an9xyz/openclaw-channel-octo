@@ -22,6 +22,7 @@ export interface RichSegment {
   text: string;
   bold?: boolean;
   subtle?: boolean;
+  fontType?: "Default" | "Monospace";
   color?: "default" | "good" | "warning" | "attention" | "accent";
 }
 
@@ -31,10 +32,16 @@ export interface Fact {
   value: string;
 }
 
-/** 表格单元格。 */
-export interface TableCell {
-  text: string;
+/** 表格列定义。 */
+export interface TableColumn {
+  /** Adaptive Cards TableColumnDefinition.width;当前 helper 暴露数字权重。 */
+  width?: number;
 }
+
+/** 表格单元格。text 是简写;blocks 可放 text/rich/group 等展示块。 */
+export type TableCell =
+  | { text: string; blocks?: never }
+  | { blocks: DisplayBlock[]; text?: never };
 
 /** 表格行。 */
 export interface TableRow {
@@ -47,7 +54,7 @@ export interface Column {
 }
 
 /** Container 语义着色(group block 用)。 */
-export type GroupStyle = "default" | "good" | "warning" | "attention";
+export type GroupStyle = "default" | "good" | "warning" | "attention" | "emphasis";
 
 /**
  * 展示 block —— agent / 进度卡用它表达「想展示什么」,不直接写 AC element JSON。
@@ -58,11 +65,20 @@ export type DisplayBlock =
   | { type: "text"; text: string }
   | { type: "rich"; segments: RichSegment[] }
   | { type: "facts"; items: Fact[] }
-  | { type: "table"; rows: TableRow[]; firstRowAsHeader?: boolean }
+  | { type: "table"; rows: TableRow[]; columns?: TableColumn[]; firstRowAsHeader?: boolean }
   | { type: "columns"; columns: Column[] }
   | { type: "link"; text: string; url: string }
   | { type: "group"; style?: GroupStyle; blocks: DisplayBlock[] }
-  | { type: "collapsible"; summary: string; summarySegments?: RichSegment[]; actionLabel?: string; blocks: DisplayBlock[] }
+  | {
+      type: "collapsible";
+      summary: string;
+      summarySegments?: RichSegment[];
+      actionLabel?: string;
+      expandLabel?: string;
+      collapseLabel?: string;
+      defaultVisible?: boolean;
+      blocks: DisplayBlock[];
+    }
   | { type: "copy"; label?: string; text: string };
 
 export interface BuildDisplayCardOptions {
@@ -213,6 +229,7 @@ function renderRich(segments: RichSegment[], ctx: RenderCtx): Rendered {
             text: s.text,
             ...(s.bold ? { weight: "Bolder" } : {}),
             ...(s.subtle ? { isSubtle: true } : {}),
+            ...(s.fontType ? { fontType: s.fontType } : {}),
             ...(s.color && s.color !== "default" ? { color: s.color } : {}),
           })),
         },
@@ -224,30 +241,52 @@ function renderRich(segments: RichSegment[], ctx: RenderCtx): Rendered {
   return { elements: [textBlock(clean)], plainLines: [clean] };
 }
 
-function renderTable(rows: TableRow[], firstRowAsHeader: boolean | undefined, ctx: RenderCtx): Rendered {
-  const cleanedRows: string[][] = [];
+function renderTableCell(cell: TableCell, ctx: RenderCtx): Rendered {
+  if (Array.isArray(cell.blocks)) return renderBlocks(cell.blocks, ctx);
+  return typeof cell.text === "string" ? renderText(cell.text, ctx) : EMPTY;
+}
+
+function renderTableColumns(columns: TableColumn[] | undefined, columnCount: number): Array<{ width: number }> {
+  return Array.from({ length: columnCount }, (_, i) => {
+    const width = columns?.[i]?.width;
+    return { width: typeof width === "number" && Number.isFinite(width) && width > 0 ? width : 1 };
+  });
+}
+
+function renderTable(
+  rows: TableRow[],
+  columns: TableColumn[] | undefined,
+  firstRowAsHeader: boolean | undefined,
+  ctx: RenderCtx,
+): Rendered {
+  const renderedRows: Array<{ cells: Rendered[]; plainLine: string }> = [];
   for (const row of rows) {
     const cells = row.cells
-      .map((c) => sanitize(c.text, ctx.generic))
-      .filter((c): c is string => !!c);
-    if (cells.length > 0) cleanedRows.push(cells);
+      .map((c) => renderTableCell(c, ctx))
+      .filter((c) => c.elements.length > 0);
+    if (cells.length > 0) {
+      renderedRows.push({
+        cells,
+        plainLine: cells.map((cell) => cell.plainLines.join("；")).filter(Boolean).join(" | "),
+      });
+    }
   }
-  if (cleanedRows.length === 0) return EMPTY;
+  if (renderedRows.length === 0) return EMPTY;
 
-  const plainLines = cleanedRows.map((cells) => cells.join(" | "));
+  const plainLines = renderedRows.map((row) => row.plainLine);
   if (cardSupports(ctx.caps, "Table")) {
-    const columnCount = Math.max(...cleanedRows.map((cells) => cells.length));
+    const columnCount = Math.max(columns?.length ?? 0, ...renderedRows.map((row) => row.cells.length));
     return {
       elements: [
         {
           type: "Table",
           firstRowAsHeader: firstRowAsHeader !== false,
-          columns: Array.from({ length: columnCount }, () => ({ width: 1 })),
-          rows: cleanedRows.map((cells) => ({
+          columns: renderTableColumns(columns, columnCount),
+          rows: renderedRows.map((row) => ({
             type: "TableRow",
-            cells: cells.map((text) => ({
+            cells: row.cells.map((cell) => ({
               type: "TableCell",
-              items: [textBlock(text)],
+              items: cell.elements,
             })),
           })),
         },
@@ -344,21 +383,22 @@ function renderGroup(
 }
 
 /**
- * 折叠/展开 —— 升级条件三维齐备(forward-compat,任一未 advertise 就降级平铺):
+ * 折叠/展开 —— 升级条件齐备(forward-compat,任一未 advertise 就降级平铺):
  *   1. `caps.elements` 含 `Container` —— 用来包 hidden 内容 + `isVisible:false`;
- *   2. `caps.elements` 含 `ActionSet` —— 触发器容器,避免部分前端对 TextBlock.selectAction
+ *   2. `caps.elements` 含 `ColumnSet` —— 摘要左列 + 右侧按钮列;
+ *   3. `caps.elements` 含 `ActionSet` —— 触发器容器,避免部分前端对 TextBlock.selectAction
  *      的 ToggleVisibility 支持不完整;
- *   3. `caps.actions` 含 `Action.ToggleVisibility` —— 具体动作被服务端接受(旧部署无该 advertise
+ *   4. `caps.actions` 含 `Action.ToggleVisibility` —— 具体动作被服务端接受(旧部署无该 advertise
  *      → 保守 fail-closed,避免乐观发出被 400)。
  *
- * summary 是永远可见的摘要,ActionSet 用短标题承载 ToggleVisibility,避免重复展示整段 summary。
- * inner 是默认隐藏的正文。降级形态 = summary 当 heading + inner 全部展开在下方(视觉上等同
- * "已展开",信息不丢)。
+ * summary 是永远可见的摘要,右侧 Column 放两个 ActionSet 互相切换可见性,避免单按钮文案无法
+ * 从"展开"自动变"收起"。inner 可默认隐藏或展开。降级形态 = summary 当 heading + inner
+ * 全部展开在下方(视觉上等同"已展开",信息不丢)。
  *
  * 若 summary 被脱敏或空 / inner 全被脱敏或空,整个 collapsible 不渲染 —— 避免展开后是空块。
  */
 function renderCollapsible(summary: string, blocks: DisplayBlock[], ctx: RenderCtx): Rendered {
-  return renderCollapsibleWithSummary(summary, undefined, undefined, blocks, ctx);
+  return renderCollapsibleWithSummary(summary, undefined, undefined, undefined, undefined, false, blocks, ctx);
 }
 
 function renderCollapsibleWithActionLabel(
@@ -367,20 +407,25 @@ function renderCollapsibleWithActionLabel(
   blocks: DisplayBlock[],
   ctx: RenderCtx,
 ): Rendered {
-  return renderCollapsibleWithSummary(summary, undefined, actionLabel, blocks, ctx);
+  return renderCollapsibleWithSummary(summary, undefined, actionLabel, undefined, undefined, false, blocks, ctx);
 }
 
 function renderCollapsibleWithSummary(
   summary: string,
   summarySegments: RichSegment[] | undefined,
   actionLabel: string | undefined,
+  expandLabel: string | undefined,
+  collapseLabel: string | undefined,
+  defaultVisible: boolean | undefined,
   blocks: DisplayBlock[],
   ctx: RenderCtx,
 ): Rendered {
   const rawSummary = summarySegments ? summarySegments.map((s) => s.text).join("") : summary;
   const cleanSummary = sanitize(rawSummary, ctx.generic);
   if (!cleanSummary) return EMPTY;
-  const cleanActionLabel = sanitize(actionLabel ?? "展开/收起", ctx.generic) ?? "展开/收起";
+  const rawExpandLabel = expandLabel ?? (actionLabel && actionLabel !== cleanSummary ? actionLabel : "展开");
+  const cleanExpandLabel = sanitize(rawExpandLabel, ctx.generic) ?? "展开";
+  const cleanCollapseLabel = sanitize(collapseLabel ?? "收起", ctx.generic) ?? "收起";
   const inner = renderBlocks(blocks, ctx);
   if (inner.elements.length === 0) return EMPTY;
   const summaryElements = summarySegments
@@ -390,29 +435,69 @@ function renderCollapsibleWithSummary(
 
   const canToggle =
     cardSupports(ctx.caps, "Container") &&
+    cardSupports(ctx.caps, "ColumnSet") &&
     cardSupports(ctx.caps, "ActionSet") &&
     cardSupports(ctx.caps, "Action.ToggleVisibility");
 
   if (canToggle) {
-    const targetId = nextId(ctx, "clp");
-    const visibleSummaryElements = cleanSummary === cleanActionLabel ? [] : summaryElements;
+    const detailId = nextId(ctx, "clp");
+    const expandId = nextId(ctx, "btn_expand");
+    const collapseId = nextId(ctx, "btn_collapse");
+    const startVisible = defaultVisible === true;
     return {
       elements: [
-        ...visibleSummaryElements,
         {
-          type: "ActionSet",
-          actions: [
+          type: "ColumnSet",
+          columns: [
             {
-              type: "Action.ToggleVisibility",
-              title: cleanActionLabel,
-              targetElements: [targetId],
+              type: "Column",
+              width: "stretch",
+              items: summaryElements,
+            },
+            {
+              type: "Column",
+              width: "auto",
+              items: [
+                {
+                  type: "ActionSet",
+                  id: collapseId,
+                  isVisible: startVisible,
+                  actions: [
+                    {
+                      type: "Action.ToggleVisibility",
+                      title: cleanCollapseLabel,
+                      targetElements: [
+                        { elementId: detailId, isVisible: false },
+                        { elementId: collapseId, isVisible: false },
+                        { elementId: expandId, isVisible: true },
+                      ],
+                    },
+                  ],
+                },
+                {
+                  type: "ActionSet",
+                  id: expandId,
+                  isVisible: !startVisible,
+                  actions: [
+                    {
+                      type: "Action.ToggleVisibility",
+                      title: cleanExpandLabel,
+                      targetElements: [
+                        { elementId: detailId, isVisible: true },
+                        { elementId: collapseId, isVisible: true },
+                        { elementId: expandId, isVisible: false },
+                      ],
+                    },
+                  ],
+                },
+              ],
             },
           ],
         },
         {
           type: "Container",
-          id: targetId,
-          isVisible: false,
+          id: detailId,
+          isVisible: startVisible,
           items: inner.elements,
         },
       ],
@@ -484,7 +569,7 @@ function renderBlock(block: DisplayBlock, ctx: RenderCtx): Rendered {
     case "facts":
       return renderFacts(block.items, ctx);
     case "table":
-      return renderTable(block.rows, block.firstRowAsHeader, ctx);
+      return renderTable(block.rows, block.columns, block.firstRowAsHeader, ctx);
     case "columns":
       return renderColumns(block.columns, ctx);
     case "link":
@@ -492,7 +577,16 @@ function renderBlock(block: DisplayBlock, ctx: RenderCtx): Rendered {
     case "group":
       return renderGroup(block.style, block.blocks, ctx);
     case "collapsible":
-      return renderCollapsibleWithSummary(block.summary, block.summarySegments, block.actionLabel, block.blocks, ctx);
+      return renderCollapsibleWithSummary(
+        block.summary,
+        block.summarySegments,
+        block.actionLabel,
+        block.expandLabel,
+        block.collapseLabel,
+        block.defaultVisible,
+        block.blocks,
+        ctx,
+      );
     case "copy":
       return renderCopy(block.label, block.text, ctx);
   }
@@ -571,8 +665,8 @@ export function buildDisplayCard(opts: BuildDisplayCardOptions): BuildDisplayCar
  * 白名单校验 agent / 外部输入的 DisplayBlock —— 每 block:
  *   - `type` 在支持集内(heading/text/rich/facts/table/columns/link/group/collapsible/copy);
  *   - 关键字段类型正确(text 是 string;facts.items 是 [{label,value}];rich.segments 是 [{text}];
- *     table.rows 是 rows/cells/text;columns/group/collapsible 递归校验;heading.size 若给则限于 medium/large;
- *     collapsible.actionLabel/copy.label 可选)。
+ *     table 支持 columns[].width 与 cell.text/cell.blocks;columns/group/collapsible 递归校验;heading.size 若给则限于 medium/large;
+ *     rich.fontType 限 Default/Monospace;collapsible labels/defaultVisible/copy.label 可选)。
  * 任何字段类型错的整块**静默丢弃**(不 fail 整个构建),避免 agent 单个字段错就完全无回复。
  * 内容脱敏由 buildDisplayCard/sanitize 兜底,此处只做结构校验。
  */
@@ -605,8 +699,9 @@ function validateBlockList(
 }
 
 const HEADING_SIZES = new Set(["medium", "large"]);
-const GROUP_STYLES = new Set(["default", "good", "warning", "attention"]);
+const GROUP_STYLES = new Set(["default", "good", "warning", "attention", "emphasis"]);
 const RICH_COLORS = new Set(["default", "good", "warning", "attention", "accent"]);
+const FONT_TYPES = new Set(["Default", "Monospace"]);
 
 function validateOneBlock(raw: unknown, depth: number, budget: { count: number }): DisplayBlock | null {
   if (!raw || typeof raw !== "object") return null;
@@ -631,10 +726,13 @@ function validateOneBlock(raw: unknown, depth: number, budget: { count: number }
         if (typeof seg.text !== "string") continue;
         const color = seg.color;
         if (color !== undefined && (typeof color !== "string" || !RICH_COLORS.has(color))) continue;
+        const fontType = seg.fontType;
+        if (fontType !== undefined && (typeof fontType !== "string" || !FONT_TYPES.has(fontType))) continue;
         segs.push({
           text: seg.text,
           ...(seg.bold === true ? { bold: true } : {}),
           ...(seg.subtle === true ? { subtle: true } : {}),
+          ...(typeof fontType === "string" ? { fontType: fontType as RichSegment["fontType"] } : {}),
           ...(typeof color === "string" ? { color: color as RichSegment["color"] } : {}),
         });
       }
@@ -659,6 +757,18 @@ function validateOneBlock(raw: unknown, depth: number, budget: { count: number }
     }
     case "table": {
       if (!Array.isArray(r.rows)) return null;
+      let columns: TableColumn[] | undefined;
+      if (Array.isArray(r.columns)) {
+        columns = [];
+        for (const col of r.columns) {
+          if (!col || typeof col !== "object") continue;
+          const width = (col as Record<string, unknown>).width;
+          columns.push({
+            ...(typeof width === "number" && Number.isFinite(width) && width > 0 ? { width } : {}),
+          });
+        }
+        if (columns.length === 0) columns = undefined;
+      }
       const rows: TableRow[] = [];
       for (const row of r.rows) {
         if (budget.count >= MAX_TOTAL_BLOCKS) break;
@@ -670,9 +780,17 @@ function validateOneBlock(raw: unknown, depth: number, budget: { count: number }
           if (budget.count >= MAX_TOTAL_BLOCKS) break;
           if (!cell || typeof cell !== "object") continue;
           const cc = cell as Record<string, unknown>;
-          if (typeof cc.text !== "string") continue;
-          budget.count++;
-          cells.push({ text: cc.text });
+          if (Array.isArray(cc.blocks)) {
+            const inner = validateBlockList(cc.blocks, depth - 1, budget);
+            if (inner.length === 0) continue;
+            budget.count++;
+            cells.push({ blocks: inner });
+            continue;
+          }
+          if (typeof cc.text === "string") {
+            budget.count++;
+            cells.push({ text: cc.text });
+          }
         }
         if (cells.length > 0) {
           budget.count++;
@@ -683,6 +801,7 @@ function validateOneBlock(raw: unknown, depth: number, budget: { count: number }
       return {
         type: "table",
         rows,
+        ...(columns ? { columns } : {}),
         ...(r.firstRowAsHeader === false ? { firstRowAsHeader: false } : {}),
       };
     }
@@ -718,6 +837,10 @@ function validateOneBlock(raw: unknown, depth: number, budget: { count: number }
       if (typeof r.summary !== "string") return null;
       const actionLabel = r.actionLabel;
       if (actionLabel !== undefined && typeof actionLabel !== "string") return null;
+      const expandLabel = r.expandLabel;
+      if (expandLabel !== undefined && typeof expandLabel !== "string") return null;
+      const collapseLabel = r.collapseLabel;
+      if (collapseLabel !== undefined && typeof collapseLabel !== "string") return null;
       let summarySegments: RichSegment[] | undefined;
       if (Array.isArray(r.summarySegments)) {
         summarySegments = [];
@@ -727,10 +850,13 @@ function validateOneBlock(raw: unknown, depth: number, budget: { count: number }
           if (typeof seg.text !== "string") continue;
           const color = seg.color;
           if (color !== undefined && (typeof color !== "string" || !RICH_COLORS.has(color))) continue;
+          const fontType = seg.fontType;
+          if (fontType !== undefined && (typeof fontType !== "string" || !FONT_TYPES.has(fontType))) continue;
           summarySegments.push({
             text: seg.text,
             ...(seg.bold === true ? { bold: true } : {}),
             ...(seg.subtle === true ? { subtle: true } : {}),
+            ...(typeof fontType === "string" ? { fontType: fontType as RichSegment["fontType"] } : {}),
             ...(typeof color === "string" ? { color: color as RichSegment["color"] } : {}),
           });
         }
@@ -738,9 +864,16 @@ function validateOneBlock(raw: unknown, depth: number, budget: { count: number }
       }
       const inner = validateBlockList(r.blocks, depth - 1, budget);
       if (inner.length === 0) return null;
-      return typeof actionLabel === "string"
-        ? { type: "collapsible", summary: r.summary, summarySegments, actionLabel, blocks: inner }
-        : { type: "collapsible", summary: r.summary, summarySegments, blocks: inner };
+      return {
+        type: "collapsible",
+        summary: r.summary,
+        summarySegments,
+        ...(typeof actionLabel === "string" ? { actionLabel } : {}),
+        ...(typeof expandLabel === "string" ? { expandLabel } : {}),
+        ...(typeof collapseLabel === "string" ? { collapseLabel } : {}),
+        ...(r.defaultVisible === true ? { defaultVisible: true } : {}),
+        blocks: inner,
+      };
     }
     case "copy": {
       if (typeof r.text !== "string") return null;

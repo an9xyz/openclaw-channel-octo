@@ -172,7 +172,7 @@ export function createDisplayCardTool(params: Params): Array<{
       "automatically and unsupported types degrade to plain text — you never need to check " +
       "compatibility yourself. " +
       "For visual emphasis, wrap key sections in a `group` block with `style: 'good' | " +
-      "'warning' | 'attention'` (tinted background — the client renders them as green / " +
+      "'warning' | 'attention' | 'emphasis'` (tinted background — the client renders them as green / " +
       "amber / pink zones); highlight important tokens with `rich` segment colors instead " +
       "of recoloring whole lines. Design for IM: the visible first screen should be a " +
       "3-6 line summary, not a log dump. Prefer ONE title, one compact process summary, " +
@@ -217,13 +217,13 @@ export function createDisplayCardTool(params: Params): Array<{
             "Ordered list of DisplayBlock. Each block is one of: " +
             "{type:'heading', text, size?:'medium'|'large'} · " +
             "{type:'text', text} · " +
-            "{type:'rich', segments:[{text, bold?, color?:'good'|'warning'|'attention'|'accent'}]} · " +
+            "{type:'rich', segments:[{text, bold?, fontType?:'Monospace', color?:'good'|'warning'|'attention'|'accent'}]} · " +
             "{type:'facts', items:[{label, value}]} · " +
             "{type:'columns', columns:[{blocks:[…]}]} for summary blocks such as weather / temperature / rain chance · " +
-            "{type:'table', rows:[{cells:[{text}]}], firstRowAsHeader?:boolean} · " +
+            "{type:'table', columns?:[{width:number}], rows:[{cells:[{text}|{blocks:[…]}]}], firstRowAsHeader?:boolean} · " +
             "{type:'link', text:string, url:string} for selectAction Action.OpenUrl navigation · " +
-            "{type:'group', style?:'good'|'warning'|'attention', blocks:[…]} · " +
-            "{type:'collapsible', summary, actionLabel?:string, blocks:[…]} (use actionLabel:'查看过程' for a process section) · " +
+            "{type:'group', style?:'good'|'warning'|'attention'|'emphasis', blocks:[…]} · " +
+            "{type:'collapsible', summary, actionLabel?:string, expandLabel?:string, collapseLabel?:string, defaultVisible?:boolean, blocks:[…]} (process cards render the toggle in a right-side ColumnSet) · " +
             "{type:'copy', label?:string, text:string} for a local Action.CopyToClipboard button. " +
             "Unknown block types or missing fields are silently dropped.",
           items: { type: "object" },

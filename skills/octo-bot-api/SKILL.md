@@ -352,16 +352,16 @@ POST /v1/bot/sendMessage
 |---|---|---|---|
 | `heading` (text, size?) | Bolder TextBlock (optional Medium/Large) | Section title | (always available) |
 | `text` (text) | TextBlock | Body paragraph | (always available) |
-| `rich` (segments[]) | RichTextBlock + TextRun inlines (bold / color) | One-line multi-style | TextBlock, segments joined |
+| `rich` (segments[]) | RichTextBlock + TextRun inlines (bold / color / `fontType:"Monospace"`) | One-line multi-style | TextBlock, segments joined |
 | `facts` (items[]) | FactSet | Key-value pairs | Rows of TextBlock `label:value` |
 | `columns` (columns[].blocks[]) | ColumnSet, with Column children inside `columns[]` | Summary/KPI strip, e.g. weather / temperature / rain chance | One TextBlock line joined with pipe separators |
-| `table` (rows[].cells[].text) | Table, with TableRow/TableCell children inside `rows[]` / `cells[]` | Dense matrix data | TextBlock rows with pipe separators |
+| `table` (columns?, rows[].cells[]) | Table, with TableRow/TableCell children inside `rows[]` / `cells[]` | Dense matrix data; producer controls column widths, header row, and cell display blocks | TextBlock rows with pipe separators |
 | `link` (text, url) | ActionSet with `Action.OpenUrl`; falls back to TextBlock `selectAction` only when `ActionSet` is absent | Visible local/navigation link, no bot callback | TextBlock `text: url` |
-| `group` (blocks[], style?) | Container with `style: good/warning/attention` | Grouped/tinted section | Flattened (color lost, content kept) |
-| `collapsible` (summary, actionLabel?, blocks[]) | Container `isVisible:false` + ActionSet `Action.ToggleVisibility` | Fold long details behind a click; use `actionLabel:"查看过程"` for card-message process sections | Summary as heading + inner blocks expanded below |
+| `group` (blocks[], style?) | Container with `style: good/warning/attention/emphasis` | Grouped/tinted section | Flattened (color lost, content kept) |
+| `collapsible` (summary, actionLabel?/expandLabel?/collapseLabel?/defaultVisible?, blocks[]) | Summary ColumnSet + right-side ActionSet buttons + Container `isVisible` | Fold long details behind a click; progress sections use two buttons so labels can switch | Summary as heading + inner blocks expanded below |
 | `copy` (label?, text) | ActionSet with `Action.CopyToClipboard` | Local clipboard copy, no bot callback | TextBlock containing the copy text |
 
-The `collapsible` upgrade requires **three** capability flags together: `elements` contains `Container` AND `ActionSet`, AND `actions` contains `Action.ToggleVisibility`. Any one missing → falls back to the expanded form; the content is never lost.
+The `collapsible` upgrade requires all related capability flags together: `elements` contains `Container`, `ColumnSet`, and `ActionSet`, AND `actions` contains `Action.ToggleVisibility`. Any one missing → falls back to the expanded form; the content is never lost.
 
 For a card-message process section, prepend one `collapsible` block with a short summary and `actionLabel: "查看过程"`:
 ```jsonc
@@ -388,6 +388,10 @@ The `copy` upgrade requires `elements` contains `ActionSet` AND `actions` contai
 
 The `link` block should render a visible `ActionSet` button when `ActionSet` and `Action.OpenUrl` are both advertised. Use TextBlock `selectAction` only as a compatibility fallback because it is clickable but not visually obvious. Never put `Action.Submit` in `selectAction`; Submit belongs to `octo/v2` callback cards.
 
+For `table`, producers may provide `columns: [{ "width": 1 }, { "width": 2 }]`, `firstRowAsHeader`, and either simple cells (`{ "text": "..." }`) or rich cells (`{ "blocks": [...] }`). Rich cell blocks may include `text`, `rich`, or `group` with `style: "good" | "warning" | "attention" | "emphasis"` when supported by the client. Keep table cells compact; use `wrap`, `weight`, `color`, and `isSubtle` semantics rather than long paragraphs.
+
+For agent progress cards, mark the root card with `metadata: { "octo_layout": "agent_progress_v1" }`; renderers should match known layout values and treat unknown values as ordinary Adaptive Cards. The top-level `body` structure must be `[ColumnSet, Container#timeline_detail]`: put summary/toggle controls in the first `ColumnSet`, and put all timeline rows inside `Container` with `id: "timeline_detail"`. Running cards keep `timeline_detail.isVisible: true`; terminal cards (`done` / `error`) should default collapsed when toggle is available (`timeline_detail:false`, `btn_collapse:false`, `btn_expand:true`). Do not set `style` on `timeline_detail`; put `style: "warning"` / `"attention"` only on child step containers so the client can override inline backgrounds cleanly. Put toggle buttons inside the right-side `ColumnSet` column, not root `actions`. Adaptive Cards does not auto-switch a single button label, so emit two `ActionSet`s and toggle all three targets: detail `Container`, `btn_collapse`, and `btn_expand`. Continuous timeline lines/dots can only be approximated in pure AC; producer should send structured rows, while precise line/dot/tool-row styling belongs in the client renderer.
+
 **Security & safety**
 
 - **Cards are visible to every member of the group.** Never render tokens, API keys, webhook URLs, or `Authorization` values into any card field, even inside a "hidden" collapsible — the raw JSON is stored server-side and can be pulled back by `/v1/message/get`. `buildDisplayCard` in this plugin auto-degrades embedded URLs to `scheme://<registrable-domain>` (including scheme-less and protocol-relative webhook URLs) and drops blocks that match secret shapes (`AKIA…`, `gh[pous]_…`, `xox[bap]-…`/`xapp-…`, `sk-…`, Stripe `sk_live_…`, `glpat-…`, Google `AIza…`, `npm_…`, `shpat_…`, `dop_v1_…`, JWTs, 32+ hex/base64 blobs), but hand-rolled clients must implement the same guardrails.
@@ -410,7 +414,7 @@ POST /v1/bot/message/edit
 The im-test deployment renders Adaptive Cards 1.5 rich styling end-to-end: `Container.style` tinted backgrounds, `TextRun` colors and weights, `heading.size`, `RichTextBlock` multi-inline layouts. Use them to reduce cognitive load, not for decoration. Rules of thumb:
 
 1. **Design for the IM first screen.** One title + one compact process summary + answer summary content is the default. Put reasoning sections behind `查看过程`; do not make the first screen a log viewer.
-2. **Layer status with `group.style`.** Wrap sections in a `group` block with `style: "good"` (success/completed), `"warning"` (待办/degraded), or `"attention"` (error/风险). The tinted background lets users spot the important zone at a glance. Example — a status summary:
+2. **Layer status with `group.style`.** Wrap sections in a `group` block with `style: "good"` (success/completed), `"warning"` (待办/degraded), `"attention"` (error/风险), or `"emphasis"` (neutral emphasis). The tinted background lets users spot the important zone at a glance. Example — a status summary:
    ```jsonc
    { "type": "group", "style": "good",       "blocks": [ /* heading + facts of what worked */ ] }
    { "type": "group", "style": "warning",    "blocks": [ /* heading + facts of what's pending */ ] }
@@ -579,6 +583,13 @@ if message.channel_id is present               → Group  → reply to (channel_
 - **Never end a turn on a tool call.** Tools (including `octo_send_display_card`, `exec`, version checks, etc.) are *actions*, not your reply. After the last tool returns, you **must** still emit a short text message to the user.
 - Sending a display card is a **side effect**, not a conversational answer. If the user asked a question (e.g. "check the versions"), a card alone does not answer it — follow the card with a one-line text reply that states the result (the version numbers, the outcome, or a next step).
 - A turn that finishes with zero text output is judged **incomplete** by the runtime and rendered to the user as an interrupted/failed turn (⚠️ 已中断), even though the tools ran. Always leave a closing sentence so the turn completes cleanly.
+
+#### Never End on a Preamble — Announce Then Actually Do It (CRITICAL)
+
+- A filler / preamble sentence — "我先看看…", "让我查一下…", "稍等，我来处理", "I'll take a look", "let me check" — **must never be the last thing you say in a turn.** It is a promise, not an answer.
+- If you announce an action, you **must** actually perform it **in the same turn**: call the tool(s), then deliver the real result (the file contents, the answer, the outcome). Announcing "我先看看 README" and then ending the turn without reading the file leaves the user staring at an empty promise and asking "然后呢?".
+- Rule of thumb: **either just do it silently and report the result, or say one short "on it" line AND immediately follow with the tool calls + result — never stop after the "on it" line.** When unsure whether more work remains, do the work; do not hand the turn back on a preamble.
+- This is the mirror image of the rule above: there, a turn ended on a tool call with no text; here, a turn ends on text with no follow-through. Both leave the user without the answer they asked for.
 
 ### Conversation Style — Talk Like a Person, Not a Document
 
