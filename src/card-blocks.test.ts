@@ -9,7 +9,21 @@ import type { CardCaps } from "./card-render.js";
 
 /** 便利:advertise 全套元素(RichTextBlock/FactSet/Container 都可用)。 */
 const FULL_CAPS: CardCaps = {
-  elements: new Set(["TextBlock", "RichTextBlock", "FactSet", "Container", "ColumnSet", "Column", "Image"]),
+  elements: new Set([
+    "TextBlock", "RichTextBlock", "FactSet", "Container", "ColumnSet",
+    "Image", "Table", "ActionSet",
+  ]),
+  actions: new Set(["Action.OpenUrl", "Action.ToggleVisibility", "Action.CopyToClipboard"]),
+};
+
+const CAPS_WITH_COPY: CardCaps = {
+  elements: new Set(["TextBlock", "ActionSet"]),
+  actions: new Set(["Action.CopyToClipboard"]),
+};
+
+const CAPS_WITH_OPEN_URL: CardCaps = {
+  elements: new Set(["TextBlock"]),
+  actions: new Set(["Action.OpenUrl"]),
 };
 
 /** 便利:仅基线(相当于旧部署不 advertise elements,card-render baseline)。 */
@@ -99,6 +113,7 @@ describe("rich block(高价值:一行多样式,顺带解决 ColumnSet plain 分�
     const el = body({ card })[0] as { type: string; inlines: Array<Record<string, unknown>> };
     expect(el.type).toBe("RichTextBlock");
     expect(el.inlines).toHaveLength(4);
+    expect(el.inlines.every((i) => i.type === "TextRun")).toBe(true); // 前端 validator 不接受 string shorthand
     expect(el.inlines[1]).toEqual({ type: "TextRun", text: "读取文件", weight: "Bolder" });
     expect(el.inlines[3]).toEqual({ type: "TextRun", text: " · 30ms", color: "good" });
   });
@@ -170,6 +185,147 @@ describe("rich block(高价值:一行多样式,顺带解决 ColumnSet plain 分�
     const cardStr = JSON.stringify(card);
     expect(cardStr).not.toContain("SuperSecretTail99");
     expect(plain).toBe("https://slack.com");
+  });
+});
+
+describe("table block(Table)", () => {
+  it("advertise Table → 渲染原生 Table,Row/Cell 作为 Table 内部子结构生成", () => {
+    const { card, plain } = buildDisplayCard({
+      caps: FULL_CAPS,
+      blocks: [{ type: "table", rows: [
+        { cells: [{ text: "阶段" }, { text: "状态" }] },
+        { cells: [{ text: "联调" }, { text: "完成" }] },
+      ]}],
+    });
+    const el = body({ card })[0] as {
+      type: string;
+      firstRowAsHeader: boolean;
+      rows: Array<{ type: string; cells: Array<{ type: string; items: Array<{ type: string; text: string }> }> }>;
+    };
+    expect(el.type).toBe("Table");
+    expect(el.firstRowAsHeader).toBe(true);
+    expect(el).toMatchObject({ columns: [{ width: 1 }, { width: 1 }] });
+    expect(el.rows[0].type).toBe("TableRow");
+    expect(el.rows[0].cells[0].type).toBe("TableCell");
+    expect(el.rows[0].cells[0].items[0]).toMatchObject({ type: "TextBlock", text: "阶段" });
+    expect(plain).toBe("阶段 | 状态\n联调 | 完成");
+  });
+
+  it("未 advertise Table → 降级为管道分隔文本行", () => {
+    const { card, plain } = buildDisplayCard({
+      caps: { elements: new Set(["TextBlock"]) },
+      blocks: [{ type: "table", rows: [
+        { cells: [{ text: "A" }, { text: "B" }] },
+      ]}],
+    });
+    expect((body({ card })[0] as { type: string; text: string }).type).toBe("TextBlock");
+    expect((body({ card })[0] as { text: string }).text).toBe("A | B");
+    expect(plain).toBe("A | B");
+  });
+
+  it("table cell 内容逐格脱敏,敏感 cell 被跳过", () => {
+    const { card, plain } = buildDisplayCard({
+      caps: FULL_CAPS,
+      blocks: [{ type: "table", rows: [
+        { cells: [{ text: "safe" }, { text: "AKIAIOSFODNN7EXAMPLE" }] },
+      ]}],
+    });
+    const cardStr = JSON.stringify(card);
+    expect(cardStr).toContain("safe");
+    expect(cardStr).not.toContain("AKIA");
+    expect(plain).toBe("safe");
+  });
+});
+
+describe("columns block(ColumnSet 摘要区)", () => {
+  it("advertise ColumnSet → 三块摘要渲染为 ColumnSet,Column 作为 ColumnSet 内部子结构生成", () => {
+    const { card, plain } = buildDisplayCard({
+      title: "北京天气",
+      caps: FULL_CAPS,
+      blocks: [
+        { type: "heading", text: "北京天气" }, // 与 title 重复,应去掉
+        { type: "columns", columns: [
+          { blocks: [{ type: "heading", text: "天气" }, { type: "text", text: "多云转晴" }] },
+          { blocks: [{ type: "heading", text: "温度" }, { type: "text", text: "28°C / 19°C" }] },
+          { blocks: [{ type: "heading", text: "降水概率" }, { type: "text", text: "20%" }] },
+        ]},
+        { type: "facts", items: [
+          { label: "城市", value: "北京" },
+          { label: "日期", value: "2026-07-11" },
+        ]},
+      ],
+    });
+    const b = body({ card });
+    expect((b[0] as { text: string }).text).toBe("北京天气");
+    expect(b.filter((e) => (e as { text?: string }).text === "北京天气")).toHaveLength(1);
+    const colSet = b.find((e) => e.type === "ColumnSet") as {
+      type: string;
+      columns: Array<{ type: string; items: Array<{ text?: string }> }>;
+    };
+    expect(colSet).toBeTruthy();
+    expect(colSet.columns).toHaveLength(3);
+    expect(colSet.columns[0].type).toBe("Column");
+    expect(colSet.columns[0].items.map((i) => i.text)).toEqual(["天气", "多云转晴"]);
+    expect(plain.split("\n")).toEqual([
+      "北京天气",
+      "天气；多云转晴 | 温度；28°C / 19°C | 降水概率；20%",
+      "城市：北京",
+      "日期：2026-07-11",
+    ]);
+  });
+
+  it("未 advertise ColumnSet → 摘要降级为单行 TextBlock", () => {
+    const { card, plain } = buildDisplayCard({
+      caps: { elements: new Set(["TextBlock"]) },
+      blocks: [{ type: "columns", columns: [
+        { blocks: [{ type: "text", text: "天气：晴" }] },
+        { blocks: [{ type: "text", text: "温度：28°C" }] },
+      ]}],
+    });
+    const el = body({ card })[0] as { type: string; text: string };
+    expect(el.type).toBe("TextBlock");
+    expect(el.text).toBe("天气：晴 | 温度：28°C");
+    expect(plain).toBe("天气：晴 | 温度：28°C");
+  });
+});
+
+describe("link block(Action.OpenUrl)", () => {
+  it("advertise ActionSet+Action.OpenUrl → 用可见 ActionSet 按钮,且不会生成 Submit", () => {
+    const { card, plain } = buildDisplayCard({
+      caps: FULL_CAPS,
+      blocks: [{ type: "link", text: "打开控制台", url: "https://admin.example.com/path?token=abc" }],
+    });
+    const el = body({ card })[0] as { type: string; actions: Array<Record<string, unknown>> };
+    expect(el.type).toBe("ActionSet");
+    expect(el.actions[0]).toEqual({
+      type: "Action.OpenUrl",
+      title: "打开控制台",
+      url: "https://example.com",
+    });
+    expect(JSON.stringify(card)).not.toContain("Action.Submit");
+    expect(plain).toBe("打开控制台：https://example.com");
+  });
+
+  it("advertise Action.OpenUrl 但缺 ActionSet → 退回 TextBlock.selectAction", () => {
+    const { card } = buildDisplayCard({
+      caps: CAPS_WITH_OPEN_URL,
+      blocks: [{ type: "link", text: "打开控制台", url: "https://admin.example.com/path?token=abc" }],
+    });
+    const el = body({ card })[0] as { type: string; text: string; selectAction: Record<string, unknown> };
+    expect(el.type).toBe("TextBlock");
+    expect(el.text).toBe("打开控制台");
+    expect(el.selectAction).toMatchObject({ type: "Action.OpenUrl" });
+  });
+
+  it("未 advertise Action.OpenUrl → 降级为普通文本", () => {
+    const { card } = buildDisplayCard({
+      caps: { elements: new Set(["TextBlock"]) },
+      blocks: [{ type: "link", text: "Docs", url: "https://docs.example.com/a" }],
+    });
+    const el = body({ card })[0] as { type: string; text: string; selectAction?: unknown };
+    expect(el.type).toBe("TextBlock");
+    expect(el.text).toBe("Docs：https://example.com");
+    expect(el.selectAction).toBeUndefined();
   });
 });
 
@@ -271,7 +427,7 @@ describe("collapsible block(forward-compat 折叠/展开)", () => {
     actions: new Set(["Action.ToggleVisibility"]),
   };
 
-  it("advertise ToggleVisibility+ActionSet+Container → 升级:summary+隐藏 Container", () => {
+  it("advertise ToggleVisibility+ActionSet+Container → 升级:summary+短按钮+隐藏 Container", () => {
     const { card } = buildDisplayCard({
       caps: CAPS_WITH_TOGGLE,
       blocks: [{ type: "collapsible", summary: "详情", blocks: [
@@ -280,18 +436,23 @@ describe("collapsible block(forward-compat 折叠/展开)", () => {
       ]}],
     });
     const els = body({ card });
-    // 应有:summary(TextBlock)+ toggle 触发器(ActionSet)+ 目标 Container(isVisible:false)
+    // 应有:summary(TextBlock)+ 短按钮(ActionSet)+ 目标 Container(isVisible:false),按钮不重复长 summary。
+    expect(els).toHaveLength(3);
     const container = els.find((e) => e.type === "Container") as { id: string; isVisible: boolean; items: Element[] };
     expect(container).toBeTruthy();
     expect(container.isVisible).toBe(false);
-    expect(container.id).toBeTruthy(); // 有 id 才能 target
+    expect(container.id).toMatch(/^octo_disp_clp_\d+$/); // 展示元素 id 统一命名空间,避免与 input/action 撞名
     expect(container.items).toHaveLength(2);
 
-    const actionSet = els.find((e) => e.type === "ActionSet") as { actions: Array<Record<string, unknown>> };
-    expect(actionSet).toBeTruthy();
+    const summary = els[0] as { text: string; selectAction?: unknown };
+    expect(summary.text).toBe("详情");
+    expect(summary.selectAction).toBeUndefined();
+
+    const actionSet = els[1] as { type: string; actions: Array<Record<string, unknown>> };
+    expect(actionSet.type).toBe("ActionSet");
     expect(actionSet.actions[0]).toMatchObject({
       type: "Action.ToggleVisibility",
-      title: "详情",
+      title: "展开/收起",
       targetElements: [container.id],
     });
   });
@@ -305,6 +466,36 @@ describe("collapsible block(forward-compat 折叠/展开)", () => {
       ]}],
     });
     expect(plain).toBe("详情\n行1\n行2");
+  });
+
+  it("actionLabel 可自定义为展示卡过程入口文案", () => {
+    const { card } = buildDisplayCard({
+      caps: CAPS_WITH_TOGGLE,
+      blocks: [{ type: "collapsible", summary: "✓ 已思考 12 秒 · 6 次工具调用", actionLabel: "查看过程", blocks: [
+        { type: "text", text: "先拆分线索" },
+      ]}],
+    });
+    const actionSet = body({ card }).find((e) => e.type === "ActionSet") as { actions: Array<Record<string, unknown>> };
+    expect(actionSet.actions[0]).toMatchObject({
+      type: "Action.ToggleVisibility",
+      title: "查看过程",
+    });
+  });
+
+  it("summary 与 actionLabel 同名时只保留按钮,避免截图里标题/按钮重复", () => {
+    const { card, plain } = buildDisplayCard({
+      caps: CAPS_WITH_TOGGLE,
+      blocks: [{ type: "collapsible", summary: "查看过程", actionLabel: "查看过程", blocks: [
+        { type: "text", text: "先定位问题" },
+      ]}],
+    });
+    const els = body({ card });
+    expect(els).toHaveLength(2);
+    expect(els[0].type).toBe("ActionSet");
+    expect((els[0] as { actions: Array<Record<string, unknown>> }).actions[0].title).toBe("查看过程");
+    expect(els[1].type).toBe("Container");
+    expect(JSON.stringify(card).match(/查看过程/g)).toHaveLength(1);
+    expect(plain).toBe("查看过程\n先定位问题");
   });
 
   it("未 advertise Action.ToggleVisibility → 降级平铺(summary 当 heading,inner 展开)", () => {
@@ -377,6 +568,72 @@ describe("collapsible block(forward-compat 折叠/展开)", () => {
   });
 });
 
+describe("copy block(Action.CopyToClipboard 本地动作)", () => {
+  it("advertise Action.CopyToClipboard+ActionSet → 渲染复制按钮,不产生顶层 callback action", () => {
+    const { card, plain } = buildDisplayCard({
+      caps: CAPS_WITH_COPY,
+      blocks: [{ type: "copy", label: "复制 SQL", text: "SELECT 1;" }],
+    });
+    const el = body({ card })[0] as { type: string; actions: Array<Record<string, unknown>> };
+    expect(el.type).toBe("ActionSet");
+    expect(el.actions[0]).toEqual({
+      type: "Action.CopyToClipboard",
+      title: "复制 SQL",
+      text: "SELECT 1;",
+    });
+    expect(card).not.toHaveProperty("actions");
+    expect(plain).toBe("SELECT 1;");
+  });
+
+  it("未 advertise CopyToClipboard 或 ActionSet → 降级为普通文本(不 400,内容不丢)", () => {
+    const noAction = buildDisplayCard({
+      caps: { elements: new Set(["TextBlock", "ActionSet"]) },
+      blocks: [{ type: "copy", label: "复制", text: "abc" }],
+    });
+    expect((body(noAction)[0] as { type: string; text: string }).type).toBe("TextBlock");
+    expect((body(noAction)[0] as { text: string }).text).toBe("abc");
+
+    const noActionSet = buildDisplayCard({
+      caps: { elements: new Set(["TextBlock"]), actions: new Set(["Action.CopyToClipboard"]) },
+      blocks: [{ type: "copy", label: "复制", text: "abc" }],
+    });
+    expect((body(noActionSet)[0] as { type: string; text: string }).type).toBe("TextBlock");
+    expect((body(noActionSet)[0] as { text: string }).text).toBe("abc");
+  });
+
+  it("CopyToClipboard.text 按 UTF-8 4KiB 限制,超限降级为说明而不是发非法 action", () => {
+    const ok = buildDisplayCard({
+      caps: CAPS_WITH_COPY,
+      blocks: [{ type: "copy", text: "中".repeat(1365) }], // 4095 bytes
+    });
+    expect((body(ok)[0] as { type: string }).type).toBe("ActionSet");
+
+    const tooLong = buildDisplayCard({
+      caps: CAPS_WITH_COPY,
+      blocks: [{ type: "copy", text: "中".repeat(1366) }], // 4098 bytes
+    });
+    const el = body(tooLong)[0] as { type: string; text: string };
+    expect(el.type).toBe("TextBlock");
+    expect(el.text).toContain("4KiB");
+    expect(JSON.stringify(tooLong.card)).not.toContain("Action.CopyToClipboard");
+  });
+
+  it("copy text / label 仍走脱敏;label 命中敏感时退回默认标题", () => {
+    const hidden = buildDisplayCard({
+      caps: CAPS_WITH_COPY,
+      blocks: [{ type: "copy", label: "复制", text: "AKIAIOSFODNN7EXAMPLE" }],
+    });
+    expect(body(hidden)).toEqual([]);
+
+    const defaultLabel = buildDisplayCard({
+      caps: CAPS_WITH_COPY,
+      blocks: [{ type: "copy", label: "token=AKIAIOSFODNN7EXAMPLE", text: "safe" }],
+    });
+    const action = (body(defaultLabel)[0] as { actions: Array<Record<string, unknown>> }).actions[0];
+    expect(action.title).toBe("复制");
+  });
+});
+
 describe("组合与边界", () => {
   it("多种 block 依序 + title,plain 逐行", () => {
     const blocks: DisplayBlock[] = [
@@ -436,9 +693,15 @@ describe("validateDisplayBlocks 结构上限(不可信输入)", () => {
   it("合法浅结构照常通过", () => {
     const out = validateDisplayBlocks([
       { type: "heading", text: "H" },
+      { type: "table", rows: [{ cells: [{ text: "a" }] }] },
+      { type: "columns", columns: [{ blocks: [{ type: "text", text: "c" }] }] },
+      { type: "link", text: "Docs", url: "https://example.com/a" },
       { type: "group", blocks: [{ type: "text", text: "x" }] },
+      { type: "collapsible", summary: "过程", actionLabel: "查看过程", blocks: [{ type: "text", text: "p" }] },
+      { type: "copy", label: "复制", text: "y" },
     ]);
-    expect(out).toHaveLength(2);
+    expect(out).toHaveLength(7);
+    expect(out[5]).toMatchObject({ type: "collapsible", actionLabel: "查看过程" });
   });
 
   it("facts.items 计入总节点预算 —— facts-heavy 卡被截断(防服务端 node 上限 400)", () => {

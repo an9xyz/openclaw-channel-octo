@@ -158,7 +158,7 @@ When replying, always use the `channel_id` and `channel_type` from the received 
 **When to use cards vs plain text**
 
 - Plain text (`payload.type=1`) — conversational replies, short answers, follow-ups.
-- **Display card** (`payload.type=17`, `profile="octo/v1"`) — rich, structured, **NON-INTERACTIVE** output: status reports, structured answers, key-value summaries, images, collapsible detail sections. The card **has no clickable buttons and does not trigger any callback event**. Use for anything a plain paragraph cannot express cleanly.
+- **Display card** (`payload.type=17`, `profile="octo/v1"`) — rich, structured, **NON-INTERACTIVE** output: status reports, structured answers, key-value summaries, collapsible detail sections, and local copy-to-clipboard buttons. The card **has no callback buttons and does not trigger any callback event**. Use for anything a plain paragraph cannot express cleanly. The underlying octo/v1 protocol can render `Image`/`ImageSet`, but the `octo_send_display_card` helper currently exposes the safer DisplayBlock subset listed below.
 - Interactive card with Submit buttons (`profile="octo/v2"`) — user clicks a button, server pushes a `card_action` event, your bot processes it and continues. Only use when you actually need a click-back. Requires the bot to poll `/v1/bot/events` for the callback.
 
 **Discover what the deployment supports (feature detection)**
@@ -173,21 +173,138 @@ Response (fields your bot should read):
   "enabled": true,                             // deployment-level rollout switch
   "card_version": "1.5",
   "profiles": ["octo/v1", "octo/v2"],
-  "elements": ["TextBlock","RichTextBlock","Container","ColumnSet","Column",
+  "elements": ["TextBlock","RichTextBlock","Container","ColumnSet",
                "FactSet","Image","ImageSet","Table","ActionSet"],
   "inputs":   ["Input.Text","Input.Toggle","Input.ChoiceSet",
                "Input.Number","Input.Date","Input.Time"],
+  "actions":  ["Action.OpenUrl","Action.ToggleVisibility","Action.CopyToClipboard"],
   "limits": { "max_payload_bytes": 524288, "max_nodes": 200, "max_depth": 16,
               "max_input_text_bytes": 4096, "max_inputs_bytes": 16384 }
 }
 ```
 
 - If `available` is false (404) or `enabled` is false → **do not send cards**; fall back to text.
-- `elements`/`inputs` are the authoritative whitelists — send only what the server advertises. Element not in the list → server responds 400.
-- Old deployments may omit `elements`/`inputs` — fall back to the conservative baseline: `TextBlock`/`Container`/`ColumnSet`/`Column`/`FactSet`/`Image`.
+- `elements`/`inputs`/`actions` are the authoritative whitelists — send only what the server advertises. Missing support → server responds 400.
+- `elements` lists renderable card elements such as `ColumnSet` and `Table`. It does **not** need to list schema child structures such as `Column`, `TableRow`, or `TableCell`; those are valid only inside their parent element.
+- Old deployments may omit `elements`/`inputs`/`actions` — fall back to the conservative baseline: `TextBlock`/`Container`/`ColumnSet`/`FactSet`/`Image`, and no actions.
 - Respect `limits.max_nodes` / `max_depth` — cards over the cap are rejected.
 
-**Payload shape for a display card**
+**Canonical card-message structure**
+
+The producer's job is not to make a pretty UI; it is to generate Adaptive Card JSON that reads well in IM. Think **IM summary card + expandable details**, not "logs converted into a card".
+
+For final answers, prefer **one display card message**. If the answer needs a "查看过程" affordance, put the process as the **first block inside that same display card**; do **not** send or leave a separate final process-only card.
+
+Keep the visible first screen short: normally **3-6 lines** total. If execution/process information is included, the first screen shows only a compact process summary plus the answer card content; the detailed process opens under `查看过程`.
+
+Inside the `查看过程` detail, use this fixed shape:
+
+1. Status line: completed / running / failed + step count + elapsed time.
+2. Summary line: reasoning stages, tool calls, failures.
+3. Reasoning sections: show **2-3** human-readable stage summaries; fold overflow stages and raw details.
+
+Do not send an engineering event stream as the card structure. Convert `tool_events` into `reasoning_sections`: each section has one natural-language reasoning sentence and optional tool evidence. Make tool names prominent, but keep parameters subtle and shortened. Put full tool calls, raw parameters, long paths, stack traces, and verbose logs behind `collapsible` / `Action.ToggleVisibility`. Summarize errors by default: show "2 个工具调用失败" plus one short line per failed operation; put raw error text in a folded detail block. Truncate long paths, queries, and error messages to roughly **80-120 characters** in visible rows. Use at most one status symbol; prefer text labels such as `阶段`, `工具`, `读取文件`, `失败`.
+
+`plain` is first-class output. Generate it from the same source as the card, keep exactly one title, and do not dump raw logs into `plain`.
+
+When using `octo_send_display_card`, this is the preferred shape:
+
+```jsonc
+{
+  "title": "天气卡片（模拟）",
+  "blocks": [
+    {
+      "type": "collapsible",
+      "summary": "已深度思考 · 12.3s · 3 段推理 · 4 次工具调用",
+      "actionLabel": "查看过程",
+      "blocks": [
+        { "type": "text", "text": "先确认用户要天气摘要卡，而不是额外发送过程卡或日志卡。" },
+        { "type": "rich", "segments": [
+          { "text": "fetch_weather", "bold": true, "color": "accent" },
+          { "text": "  city=上海 fields=weather,temp,rain_chance · 171ms", "color": "default" }
+        ] },
+        { "type": "text", "text": "再把首屏组织成天气、温度、降水概率三块摘要，明细只保留城市、时间、来源。" },
+        { "type": "rich", "segments": [
+          { "text": "read_profile", "bold": true, "color": "accent" },
+          { "text": "  .../bot/card/profile · 102ms", "color": "default" }
+        ] }
+      ]
+    },
+    {
+      "type": "columns",
+      "columns": [
+        { "blocks": [{ "type": "heading", "text": "天气" }, { "type": "text", "text": "多云转晴" }] },
+        { "blocks": [{ "type": "heading", "text": "温度" }, { "type": "text", "text": "28°C / 35°C" }] },
+        { "blocks": [{ "type": "heading", "text": "降水概率" }, { "type": "text", "text": "12%" }] }
+      ]
+    },
+    {
+      "type": "facts",
+      "items": [
+        { "label": "城市", "value": "上海" },
+        { "label": "更新时间", "value": "2026-07-10 06:57 UTC" },
+        { "label": "数据源", "value": "模拟数据" }
+      ]
+    },
+    { "type": "rich", "segments": [
+      { "text": "提示：", "bold": true, "color": "accent" },
+      { "text": "出门记得带伞，午后注意防晒。" }
+    ] },
+    { "type": "copy", "label": "复制天气摘要", "text": "上海：多云转晴，28°C / 35°C，降水概率 12%。" }
+  ]
+}
+```
+
+Rules this example is meant to enforce:
+
+- Process, if shown, is part of the card message (`collapsible` first block), not a separate process card.
+- The process block uses stage-level reasoning summaries, not raw `tool_events`. Tool calls are evidence under a stage.
+- The visible card starts with a short process summary, not full logs. After `查看过程` is opened, show only 2-3 reasoning stages and fold the rest.
+- Keep exactly one title. Do not repeat the same title as the first `heading`.
+- Use `columns` for top summary strips such as weather / temperature / rain chance.
+- Use `facts` for detail fields, not for the whole card body.
+- Use `copy` for local clipboard copy; it does not call back to the bot.
+
+Recommended producer-side shape before rendering:
+
+```text
+status: completed | running | failed | interrupted
+title: 已深度思考 | 正在思考 | 已中断 | 处理失败
+duration_text: 用时 12 秒
+summary: 3 段推理 · 13 次工具调用
+reasoning_sections[]:
+  - text: natural-language reasoning summary; never a raw log line
+  - tools[]:
+      name: query_metrics
+      args_preview: channel=B range=90d group=stage
+      count: 2
+      status: success | failed | running
+collapsed_section_ids[]: stages hidden by default
+plain: same-source summary text; never the full log
+```
+
+Anti-pattern:
+
+```text
+思考 · 2.8s
+执行命令 × 2 · 共 1.4s — 最近: openclaw
+思考 · 4.5s
+执行命令 × 2 · 共 82ms — 最近: node
+```
+
+Preferred:
+
+```text
+先定位下降发生在哪个漏斗阶段。
+  query_metrics channel=B range=90d group=stage
+  read_file ~/analytics/funnel_definition.sql
+
+再复核口径和行业结构，判断是不是数据口径问题。
+  query_metrics dims=industry metric=activation_rate
+  run_sql SELECT industry, activation_rate ...
+```
+
+**Low-level payload shape for a display card**
 
 ```jsonc
 POST /v1/bot/sendMessage
@@ -203,14 +320,28 @@ POST /v1/bot/sendMessage
       "version": "1.5",
       "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
       "body": [
-        { "type": "TextBlock", "text": "报告", "weight": "Bolder", "size": "Medium", "wrap": true },
+        { "type": "TextBlock", "text": "天气卡片（模拟）", "weight": "Bolder", "size": "Medium", "wrap": true },
+        { "type": "ColumnSet", "columns": [
+          { "type": "Column", "items": [
+            { "type": "TextBlock", "text": "天气", "weight": "Bolder", "wrap": true },
+            { "type": "TextBlock", "text": "多云转晴", "wrap": true }
+          ]},
+          { "type": "Column", "items": [
+            { "type": "TextBlock", "text": "温度", "weight": "Bolder", "wrap": true },
+            { "type": "TextBlock", "text": "28°C / 35°C", "wrap": true }
+          ]},
+          { "type": "Column", "items": [
+            { "type": "TextBlock", "text": "降水概率", "weight": "Bolder", "wrap": true },
+            { "type": "TextBlock", "text": "12%", "wrap": true }
+          ]}
+        ]},
         { "type": "FactSet", "facts": [
-            { "title": "状态", "value": "已完成" },
-            { "title": "耗时", "value": "30ms" }
+          { "title": "城市", "value": "上海" },
+          { "title": "更新时间", "value": "2026-07-10 06:57 UTC" }
         ]}
       ]
     },
-    "plain": "报告 · 状态:已完成 · 耗时:30ms"    // fallback text for non-card clients
+    "plain": "天气卡片（模拟）\n天气：多云转晴 · 温度：28°C / 35°C · 降水概率：12%\n城市：上海"
   }
 }
 ```
@@ -223,15 +354,46 @@ POST /v1/bot/sendMessage
 | `text` (text) | TextBlock | Body paragraph | (always available) |
 | `rich` (segments[]) | RichTextBlock + TextRun inlines (bold / color) | One-line multi-style | TextBlock, segments joined |
 | `facts` (items[]) | FactSet | Key-value pairs | Rows of TextBlock `label:value` |
+| `columns` (columns[].blocks[]) | ColumnSet, with Column children inside `columns[]` | Summary/KPI strip, e.g. weather / temperature / rain chance | One TextBlock line joined with pipe separators |
+| `table` (rows[].cells[].text) | Table, with TableRow/TableCell children inside `rows[]` / `cells[]` | Dense matrix data | TextBlock rows with pipe separators |
+| `link` (text, url) | ActionSet with `Action.OpenUrl`; falls back to TextBlock `selectAction` only when `ActionSet` is absent | Visible local/navigation link, no bot callback | TextBlock `text: url` |
 | `group` (blocks[], style?) | Container with `style: good/warning/attention` | Grouped/tinted section | Flattened (color lost, content kept) |
-| `collapsible` (summary, blocks[]) | Container `isVisible:false` + ActionSet `Action.ToggleVisibility` | Fold long details behind a click | Summary as heading + inner blocks expanded below |
+| `collapsible` (summary, actionLabel?, blocks[]) | Container `isVisible:false` + ActionSet `Action.ToggleVisibility` | Fold long details behind a click; use `actionLabel:"查看过程"` for card-message process sections | Summary as heading + inner blocks expanded below |
+| `copy` (label?, text) | ActionSet with `Action.CopyToClipboard` | Local clipboard copy, no bot callback | TextBlock containing the copy text |
 
-The `collapsible` upgrade requires **three** capability flags together: `elements` contains `Container` AND `ActionSet`, AND `actions` (once the server advertises it) contains `Action.ToggleVisibility`. Any one missing → falls back to the expanded form; the content is never lost.
+The `collapsible` upgrade requires **three** capability flags together: `elements` contains `Container` AND `ActionSet`, AND `actions` contains `Action.ToggleVisibility`. Any one missing → falls back to the expanded form; the content is never lost.
+
+For a card-message process section, prepend one `collapsible` block with a short summary and `actionLabel: "查看过程"`:
+```jsonc
+{
+  "type": "collapsible",
+  "summary": "已深度思考 · 12.3s · 3 段推理 · 4 次工具调用",
+  "actionLabel": "查看过程",
+  "blocks": [
+    { "type": "text", "text": "先定位下降发生在哪个漏斗阶段。" },
+    { "type": "rich", "segments": [
+      { "text": "query_metrics", "bold": true, "color": "accent" },
+      { "text": "  channel=B range=90d group=stage · 171ms", "color": "default" }
+    ] },
+    { "type": "text", "text": "再复核口径和行业结构，判断是不是数据口径问题。" },
+    { "type": "rich", "segments": [
+      { "text": "run_sql", "bold": true, "color": "accent" },
+      { "text": "  SELECT industry, activation_rate ... · 102ms", "color": "default" }
+    ] }
+  ]
+}
+```
+
+The `copy` upgrade requires `elements` contains `ActionSet` AND `actions` contains `Action.CopyToClipboard`. `copy.text` is limited to 4KiB measured as UTF-8 bytes; larger text should be shortened before sending.
+
+The `link` block should render a visible `ActionSet` button when `ActionSet` and `Action.OpenUrl` are both advertised. Use TextBlock `selectAction` only as a compatibility fallback because it is clickable but not visually obvious. Never put `Action.Submit` in `selectAction`; Submit belongs to `octo/v2` callback cards.
 
 **Security & safety**
 
 - **Cards are visible to every member of the group.** Never render tokens, API keys, webhook URLs, or `Authorization` values into any card field, even inside a "hidden" collapsible — the raw JSON is stored server-side and can be pulled back by `/v1/message/get`. `buildDisplayCard` in this plugin auto-degrades embedded URLs to `scheme://<registrable-domain>` (including scheme-less and protocol-relative webhook URLs) and drops blocks that match secret shapes (`AKIA…`, `gh[pous]_…`, `xox[bap]-…`/`xapp-…`, `sk-…`, Stripe `sk_live_…`, `glpat-…`, Google `AIza…`, `npm_…`, `shpat_…`, `dop_v1_…`, JWTs, 32+ hex/base64 blobs), but hand-rolled clients must implement the same guardrails.
+- Hidden collapsible content and copy text are still stored in card JSON. Treat them as public group-visible data.
 - The `plain` field is what non-card clients (and history search) see — keep it a truthful summary. Do not put anything in `plain` that isn't already visible in `card`.
+- Keep exactly one title. If you set the tool/card `title`, do not repeat the same text as the first `heading`; the builder deduplicates this, but producers should avoid creating the duplicate in the first place.
 
 **Editing a card (progress frames, live status)**
 
@@ -247,13 +409,14 @@ POST /v1/bot/message/edit
 
 The im-test deployment renders Adaptive Cards 1.5 rich styling end-to-end: `Container.style` tinted backgrounds, `TextRun` colors and weights, `heading.size`, `RichTextBlock` multi-inline layouts. Use them to reduce cognitive load, not for decoration. Rules of thumb:
 
-1. **Layer status with `group.style`.** Wrap sections in a `group` block with `style: "good"` (success/completed), `"warning"` (待办/degraded), or `"attention"` (error/风险). The tinted background lets users spot the important zone at a glance. Example — a status summary:
+1. **Design for the IM first screen.** One title + one compact process summary + answer summary content is the default. Put reasoning sections behind `查看过程`; do not make the first screen a log viewer.
+2. **Layer status with `group.style`.** Wrap sections in a `group` block with `style: "good"` (success/completed), `"warning"` (待办/degraded), or `"attention"` (error/风险). The tinted background lets users spot the important zone at a glance. Example — a status summary:
    ```jsonc
    { "type": "group", "style": "good",       "blocks": [ /* heading + facts of what worked */ ] }
    { "type": "group", "style": "warning",    "blocks": [ /* heading + facts of what's pending */ ] }
    { "type": "group", "style": "attention",  "blocks": [ /* heading + facts of risks */ ] }
    ```
-2. **Emphasize key tokens with `rich` segment colors.** Don't recolor a whole line — just the critical span. Example — a totals line:
+3. **Emphasize key tokens with `rich` segment colors.** Don't recolor a whole line — just the critical span. Example — a totals line:
    ```jsonc
    { "type": "rich", "segments": [
        { "text": "总计: " },
@@ -262,10 +425,25 @@ The im-test deployment renders Adaptive Cards 1.5 rich styling end-to-end: `Cont
    ]}
    ```
    Available colors: `default | good | warning | attention | accent`. Applied to a `TextRun`, not to a whole block.
-3. **Use `heading.size` for cross-section hierarchy.** The card's outer title uses `size: "large"` or `"medium"`; section-level headings inside groups leave `size` unset (default bold is enough — resist the urge to size every heading).
-4. **Prefer `facts` for stable key→value.** `facts` renders as a two-column table (label ⇢ value). Great for "status" / "耗时" / "总计" panels. Do NOT use it for rich text — use `text` or `rich` instead.
-5. **Keep a lid on it.** One `heading` + 1-2 tinted `group`s + one closing `rich` line is usually enough. Three tinted groups is the ceiling; more starts to feel like a Christmas tree.
-6. **Automatic degradation is free.** `buildDisplayCard` negotiates against the server's advertised elements: a deployment that doesn't advertise `RichTextBlock` will silently render your `rich` segments as a joined `TextBlock`, `FactSet` degrades to text rows, `Container.style` flattens to plain items. **You don't need to check compatibility — just describe the intent and the builder degrades gracefully.**
+4. **Use `heading.size` for cross-section hierarchy.** The card's outer title uses `size: "large"` or `"medium"`; section-level headings inside groups leave `size` unset (default bold is enough — resist the urge to size every heading).
+5. **Prefer `facts` for stable key→value.** `facts` renders as a two-column table (label ⇢ value). Great for "status" / "耗时" / "总计" panels. Do NOT use it for rich text or whole-card layout — use `columns`, `text`, or `rich` instead.
+6. **Use `columns` for three-part summaries; reserve `facts` for details.** Weather cards should not be a single FactSet. Use one `columns` block for the top summary, e.g. `天气` / `温度` / `降水概率`, then a small `facts` block for details like `城市` / `日期` / `风力` / `湿度`.
+   ```jsonc
+   {
+     "type": "columns",
+     "columns": [
+       { "blocks": [{ "type": "heading", "text": "天气" }, { "type": "text", "text": "多云转晴" }] },
+       { "blocks": [{ "type": "heading", "text": "温度" }, { "type": "text", "text": "28°C / 19°C" }] },
+       { "blocks": [{ "type": "heading", "text": "降水概率" }, { "type": "text", "text": "20%" }] }
+     ]
+   }
+   ```
+7. **Keep a lid on it.** One title + one summary strip + 1-2 detail groups is usually enough. Three tinted groups is the ceiling; more starts to compete with the answer.
+8. **Put process inside the card message when needed.** If the answer needs a "查看过程" affordance, make it the first block of the display card as a `collapsible` with `actionLabel: "查看过程"`; do not send a separate process-only card for the final answer. Structure it as `reasoning_sections`, not raw `tool_events`.
+9. **Use fewer emoji.** A single status symbol is acceptable, but do not prefix every row with mixed emoji. Tool/process rows should read as text: `阶段`, `工具`, `读取文件`, `失败`.
+10. **Automatic degradation is free.** `buildDisplayCard` negotiates against the server's advertised elements/actions: a deployment that doesn't advertise `RichTextBlock` will silently render your `rich` segments as a joined `TextBlock`; `ColumnSet`, `FactSet`, and `Table` degrade to text rows; `Container.style` flattens to plain items; local actions degrade to text. **You don't need to check compatibility — just describe the intent and the builder degrades gracefully.**
+
+RichTextBlock parity note: always emit `inlines` as objects like `{ "type": "TextRun", "text": "..." }`. The current frontend validator does not accept Adaptive Cards string shorthand in `RichTextBlock.inlines`.
 
 Anti-pattern: rendering a "success ✅ / warning ⚠️ / error ❌" prefix in every row instead of grouping them by tint — the icons carry the signal but rows still bleed into each other. Group them; the tint does the layout work for you.
 
@@ -395,6 +573,12 @@ if message.channel_id is present               → Group  → reply to (channel_
 - The conversation is casual chatter you weren't asked about — stay out.
 - Someone just said "thanks" or "ok" — no need to respond.
 - You were mentioned but the message is clearly for another user — ignore.
+
+#### Always Close the Turn with Text (CRITICAL)
+
+- **Never end a turn on a tool call.** Tools (including `octo_send_display_card`, `exec`, version checks, etc.) are *actions*, not your reply. After the last tool returns, you **must** still emit a short text message to the user.
+- Sending a display card is a **side effect**, not a conversational answer. If the user asked a question (e.g. "check the versions"), a card alone does not answer it — follow the card with a one-line text reply that states the result (the version numbers, the outcome, or a next step).
+- A turn that finishes with zero text output is judged **incomplete** by the runtime and rendered to the user as an interrupted/failed turn (⚠️ 已中断), even though the tools ran. Always leave a closing sentence so the turn completes cleanly.
 
 ### Conversation Style — Talk Like a Person, Not a Document
 

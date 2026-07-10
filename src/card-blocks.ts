@@ -4,9 +4,11 @@
  * 同套 helper:URL 降级到 scheme://注册域、命中 secret shape 整块隐藏)。绝不产出会被服务端
  * 400 的结构,消费者无需自己判断白名单。
  *
- * 本轮支持的 block:heading / text / rich / facts / group(高价值子集)。
+ * 本轮支持的 block:heading / text / rich / facts / table / columns / group(高价值子集)。
  * collapsible 在 P1-c 引入(依赖 caps.actions 里 Action.ToggleVisibility);
- * table/image/gallery/columns 后续轮次。
+ * copy 在 P1-j 引入(依赖 caps.actions 里 Action.CopyToClipboard,客户端本地动作,不回流)。
+ * link 在 P1-k 引入(依赖 caps.actions 里 Action.OpenUrl;优先可见 ActionSet,不回流)。
+ * image/gallery 后续轮次。
  *
  * 纯函数、无副作用、无 I/O —— hook 进度卡与 agent 展示卡工具共享这一层。
  */
@@ -19,6 +21,7 @@ import { CARD_VERSION } from "./types.js";
 export interface RichSegment {
   text: string;
   bold?: boolean;
+  subtle?: boolean;
   color?: "default" | "good" | "warning" | "attention" | "accent";
 }
 
@@ -26,6 +29,21 @@ export interface RichSegment {
 export interface Fact {
   label: string;
   value: string;
+}
+
+/** 表格单元格。 */
+export interface TableCell {
+  text: string;
+}
+
+/** 表格行。 */
+export interface TableRow {
+  cells: TableCell[];
+}
+
+/** ColumnSet 单列。 */
+export interface Column {
+  blocks: DisplayBlock[];
 }
 
 /** Container 语义着色(group block 用)。 */
@@ -40,8 +58,12 @@ export type DisplayBlock =
   | { type: "text"; text: string }
   | { type: "rich"; segments: RichSegment[] }
   | { type: "facts"; items: Fact[] }
+  | { type: "table"; rows: TableRow[]; firstRowAsHeader?: boolean }
+  | { type: "columns"; columns: Column[] }
+  | { type: "link"; text: string; url: string }
   | { type: "group"; style?: GroupStyle; blocks: DisplayBlock[] }
-  | { type: "collapsible"; summary: string; blocks: DisplayBlock[] };
+  | { type: "collapsible"; summary: string; summarySegments?: RichSegment[]; actionLabel?: string; blocks: DisplayBlock[] }
+  | { type: "copy"; label?: string; text: string };
 
 export interface BuildDisplayCardOptions {
   /** 卡片标题(渲染成置顶的 Bolder TextBlock)。 */
@@ -104,7 +126,7 @@ interface RenderCtx {
 }
 
 function nextId(ctx: RenderCtx, prefix: string): string {
-  return `${prefix}_${ctx.uid.n++}`;
+  return `octo_disp_${prefix}_${ctx.uid.n++}`;
 }
 
 function textBlock(text: string, opts?: { bold?: boolean; size?: "medium" | "large" }): Record<string, unknown> {
@@ -114,6 +136,14 @@ function textBlock(text: string, opts?: { bold?: boolean; size?: "medium" | "lar
     wrap: true,
     ...(opts?.bold ? { weight: "Bolder" } : {}),
     ...(opts?.size ? { size: opts.size === "medium" ? "Medium" : "Large" } : {}),
+  };
+}
+
+function openUrlAction(title: string, url: string): Record<string, unknown> {
+  return {
+    type: "Action.OpenUrl",
+    title,
+    url,
   };
 }
 
@@ -127,6 +157,41 @@ function renderText(text: string, ctx: RenderCtx): Rendered {
   const clean = sanitize(text, ctx.generic);
   if (!clean) return EMPTY;
   return { elements: [textBlock(clean)], plainLines: [clean] };
+}
+
+function sanitizeUrlForAction(url: string, ctx: RenderCtx): string | null {
+  const clean = sanitize(url, ctx.generic);
+  if (!clean) return null;
+  try {
+    const u = new URL(clean);
+    return u.protocol === "http:" || u.protocol === "https:" ? clean : null;
+  } catch {
+    return null;
+  }
+}
+
+function renderLink(text: string, url: string, ctx: RenderCtx): Rendered {
+  const cleanText = sanitize(text, ctx.generic);
+  const cleanUrl = sanitizeUrlForAction(url, ctx);
+  if (!cleanText || !cleanUrl) return EMPTY;
+  if (cardSupports(ctx.caps, "ActionSet") && cardSupports(ctx.caps, "Action.OpenUrl")) {
+    return {
+      elements: [
+        {
+          type: "ActionSet",
+          actions: [openUrlAction(cleanText, cleanUrl)],
+        },
+      ],
+      plainLines: [`${cleanText}：${cleanUrl}`],
+    };
+  }
+  if (cardSupports(ctx.caps, "Action.OpenUrl")) {
+    const el = textBlock(cleanText);
+    // selectAction 只承载本地/导航类动作。Submit 必须是回流交互卡路径,这里永不生成。
+    el.selectAction = openUrlAction(cleanText, cleanUrl);
+    return { elements: [el], plainLines: [`${cleanText}：${cleanUrl}`] };
+  }
+  return { elements: [textBlock(`${cleanText}：${cleanUrl}`)], plainLines: [`${cleanText}：${cleanUrl}`] };
 }
 
 function renderRich(segments: RichSegment[], ctx: RenderCtx): Rendered {
@@ -147,6 +212,7 @@ function renderRich(segments: RichSegment[], ctx: RenderCtx): Rendered {
             type: "TextRun",
             text: s.text,
             ...(s.bold ? { weight: "Bolder" } : {}),
+            ...(s.subtle ? { isSubtle: true } : {}),
             ...(s.color && s.color !== "default" ? { color: s.color } : {}),
           })),
         },
@@ -156,6 +222,73 @@ function renderRich(segments: RichSegment[], ctx: RenderCtx): Rendered {
   }
   // 降级:段拼成单个 TextBlock(已 URL 降级;顺带解决 ColumnSet plain 分行:一行完整而非按列拆行)。
   return { elements: [textBlock(clean)], plainLines: [clean] };
+}
+
+function renderTable(rows: TableRow[], firstRowAsHeader: boolean | undefined, ctx: RenderCtx): Rendered {
+  const cleanedRows: string[][] = [];
+  for (const row of rows) {
+    const cells = row.cells
+      .map((c) => sanitize(c.text, ctx.generic))
+      .filter((c): c is string => !!c);
+    if (cells.length > 0) cleanedRows.push(cells);
+  }
+  if (cleanedRows.length === 0) return EMPTY;
+
+  const plainLines = cleanedRows.map((cells) => cells.join(" | "));
+  if (cardSupports(ctx.caps, "Table")) {
+    const columnCount = Math.max(...cleanedRows.map((cells) => cells.length));
+    return {
+      elements: [
+        {
+          type: "Table",
+          firstRowAsHeader: firstRowAsHeader !== false,
+          columns: Array.from({ length: columnCount }, () => ({ width: 1 })),
+          rows: cleanedRows.map((cells) => ({
+            type: "TableRow",
+            cells: cells.map((text) => ({
+              type: "TableCell",
+              items: [textBlock(text)],
+            })),
+          })),
+        },
+      ],
+      plainLines,
+    };
+  }
+
+  return {
+    elements: plainLines.map((line) => textBlock(line)),
+    plainLines,
+  };
+}
+
+function renderColumns(columns: Column[], ctx: RenderCtx): Rendered {
+  const renderedColumns = columns
+    .map((col) => renderBlocks(col.blocks, ctx))
+    .filter((col) => col.elements.length > 0);
+  if (renderedColumns.length === 0) return EMPTY;
+
+  const plainLines = [renderedColumns.map((col) => col.plainLines.join("；")).filter(Boolean).join(" | ")];
+  if (cardSupports(ctx.caps, "ColumnSet")) {
+    return {
+      elements: [
+        {
+          type: "ColumnSet",
+          columns: renderedColumns.map((col) => ({
+            type: "Column",
+            width: "stretch",
+            items: col.elements,
+          })),
+        },
+      ],
+      plainLines,
+    };
+  }
+
+  return {
+    elements: [textBlock(plainLines[0])],
+    plainLines,
+  };
 }
 
 function renderFacts(items: Fact[], ctx: RenderCtx): Rendered {
@@ -213,20 +346,47 @@ function renderGroup(
 /**
  * 折叠/展开 —— 升级条件三维齐备(forward-compat,任一未 advertise 就降级平铺):
  *   1. `caps.elements` 含 `Container` —— 用来包 hidden 内容 + `isVisible:false`;
- *   2. `caps.elements` 含 `ActionSet` —— 触发器容器(比 selectAction 更少属性依赖);
+ *   2. `caps.elements` 含 `ActionSet` —— 触发器容器,避免部分前端对 TextBlock.selectAction
+ *      的 ToggleVisibility 支持不完整;
  *   3. `caps.actions` 含 `Action.ToggleVisibility` —— 具体动作被服务端接受(旧部署无该 advertise
  *      → 保守 fail-closed,避免乐观发出被 400)。
  *
- * summary 是永远可见的"点我展开"入口,inner 是默认隐藏的正文。降级形态 = summary 当 heading +
- * inner 全部展开在下方(视觉上等同"已展开",信息不丢)。
+ * summary 是永远可见的摘要,ActionSet 用短标题承载 ToggleVisibility,避免重复展示整段 summary。
+ * inner 是默认隐藏的正文。降级形态 = summary 当 heading + inner 全部展开在下方(视觉上等同
+ * "已展开",信息不丢)。
  *
  * 若 summary 被脱敏或空 / inner 全被脱敏或空,整个 collapsible 不渲染 —— 避免展开后是空块。
  */
 function renderCollapsible(summary: string, blocks: DisplayBlock[], ctx: RenderCtx): Rendered {
-  const cleanSummary = sanitize(summary, ctx.generic);
+  return renderCollapsibleWithSummary(summary, undefined, undefined, blocks, ctx);
+}
+
+function renderCollapsibleWithActionLabel(
+  summary: string,
+  actionLabel: string | undefined,
+  blocks: DisplayBlock[],
+  ctx: RenderCtx,
+): Rendered {
+  return renderCollapsibleWithSummary(summary, undefined, actionLabel, blocks, ctx);
+}
+
+function renderCollapsibleWithSummary(
+  summary: string,
+  summarySegments: RichSegment[] | undefined,
+  actionLabel: string | undefined,
+  blocks: DisplayBlock[],
+  ctx: RenderCtx,
+): Rendered {
+  const rawSummary = summarySegments ? summarySegments.map((s) => s.text).join("") : summary;
+  const cleanSummary = sanitize(rawSummary, ctx.generic);
   if (!cleanSummary) return EMPTY;
+  const cleanActionLabel = sanitize(actionLabel ?? "展开/收起", ctx.generic) ?? "展开/收起";
   const inner = renderBlocks(blocks, ctx);
   if (inner.elements.length === 0) return EMPTY;
+  const summaryElements = summarySegments
+    ? renderRich(summarySegments, ctx).elements
+    : [textBlock(cleanSummary, { bold: true })];
+  if (summaryElements.length === 0) return EMPTY;
 
   const canToggle =
     cardSupports(ctx.caps, "Container") &&
@@ -235,15 +395,16 @@ function renderCollapsible(summary: string, blocks: DisplayBlock[], ctx: RenderC
 
   if (canToggle) {
     const targetId = nextId(ctx, "clp");
+    const visibleSummaryElements = cleanSummary === cleanActionLabel ? [] : summaryElements;
     return {
       elements: [
-        textBlock(cleanSummary, { bold: true }),
+        ...visibleSummaryElements,
         {
           type: "ActionSet",
           actions: [
             {
               type: "Action.ToggleVisibility",
-              title: cleanSummary,
+              title: cleanActionLabel,
               targetElements: [targetId],
             },
           ],
@@ -262,8 +423,53 @@ function renderCollapsible(summary: string, blocks: DisplayBlock[], ctx: RenderC
 
   // 降级:summary 当 heading + inner 全部展开在下方(零回归展开态)。
   return {
-    elements: [textBlock(cleanSummary, { bold: true }), ...inner.elements],
+    elements: [...summaryElements, ...inner.elements],
     plainLines: [cleanSummary, ...inner.plainLines],
+  };
+}
+
+const COPY_TEXT_MAX_BYTES = 4096;
+const COPY_LABEL_DEFAULT = "复制";
+
+function utf8Bytes(s: string): number {
+  return new TextEncoder().encode(s).byteLength;
+}
+
+/**
+ * Action.CopyToClipboard 是客户端本地动作,不触发 bot callback。text 仍是群卡 JSON 的一部分,
+ * 所以与普通正文同样脱敏,并按服务端/客户端约定限制为 UTF-8 4KiB。
+ */
+function renderCopy(label: string | undefined, text: string, ctx: RenderCtx): Rendered {
+  const cleanText = sanitize(text, ctx.generic);
+  if (!cleanText) return EMPTY;
+  const cleanLabel = sanitize(label ?? COPY_LABEL_DEFAULT, ctx.generic) ?? COPY_LABEL_DEFAULT;
+  if (!cardSupports(ctx.caps, "Action.CopyToClipboard") || !cardSupports(ctx.caps, "ActionSet")) {
+    return {
+      elements: [textBlock(cleanText)],
+      plainLines: [cleanText],
+    };
+  }
+  if (utf8Bytes(cleanText) > COPY_TEXT_MAX_BYTES) {
+    const msg = "复制内容超过 4KiB，未渲染复制按钮";
+    return {
+      elements: [textBlock(msg)],
+      plainLines: [msg],
+    };
+  }
+  return {
+    elements: [
+      {
+        type: "ActionSet",
+        actions: [
+          {
+            type: "Action.CopyToClipboard",
+            title: cleanLabel,
+            text: cleanText,
+          },
+        ],
+      },
+    ],
+    plainLines: [cleanText],
   };
 }
 
@@ -277,10 +483,18 @@ function renderBlock(block: DisplayBlock, ctx: RenderCtx): Rendered {
       return renderRich(block.segments, ctx);
     case "facts":
       return renderFacts(block.items, ctx);
+    case "table":
+      return renderTable(block.rows, block.firstRowAsHeader, ctx);
+    case "columns":
+      return renderColumns(block.columns, ctx);
+    case "link":
+      return renderLink(block.text, block.url, ctx);
     case "group":
       return renderGroup(block.style, block.blocks, ctx);
     case "collapsible":
-      return renderCollapsible(block.summary, block.blocks, ctx);
+      return renderCollapsibleWithSummary(block.summary, block.summarySegments, block.actionLabel, block.blocks, ctx);
+    case "copy":
+      return renderCopy(block.label, block.text, ctx);
   }
 }
 
@@ -304,9 +518,10 @@ export function buildDisplayCard(opts: BuildDisplayCardOptions): BuildDisplayCar
   const ctx: RenderCtx = { caps, uid: { n: 0 }, generic: !trusted };
   const body: Record<string, unknown>[] = [];
   const plainLines: string[] = [];
+  let cleanTitle = "";
 
   if (title) {
-    const cleanTitle = sanitize(title, ctx.generic);
+    cleanTitle = sanitize(title, ctx.generic) ?? "";
     if (cleanTitle) {
       body.push(textBlock(cleanTitle, { bold: true }));
       plainLines.push(cleanTitle);
@@ -314,6 +529,16 @@ export function buildDisplayCard(opts: BuildDisplayCardOptions): BuildDisplayCar
   }
 
   const rendered = renderBlocks(blocks, ctx);
+  // Agent 常同时传 title + 首个同名 heading。展示面只保留一个标题,plain 同步去重。
+  if (
+    cleanTitle &&
+    rendered.plainLines[0] === cleanTitle &&
+    rendered.elements[0]?.type === "TextBlock" &&
+    rendered.elements[0]?.text === cleanTitle
+  ) {
+    rendered.elements.shift();
+    rendered.plainLines.shift();
+  }
   body.push(...rendered.elements);
   plainLines.push(...rendered.plainLines);
 
@@ -344,9 +569,10 @@ export function buildDisplayCard(opts: BuildDisplayCardOptions): BuildDisplayCar
 // ── 不可信输入验证 ────────────────────────────────────────────
 /**
  * 白名单校验 agent / 外部输入的 DisplayBlock —— 每 block:
- *   - `type` 在支持集内(heading/text/rich/facts/group/collapsible);
+ *   - `type` 在支持集内(heading/text/rich/facts/table/columns/link/group/collapsible/copy);
  *   - 关键字段类型正确(text 是 string;facts.items 是 [{label,value}];rich.segments 是 [{text}];
- *     group.blocks / collapsible.blocks 递归校验;heading.size 若给则限于 medium/large)。
+ *     table.rows 是 rows/cells/text;columns/group/collapsible 递归校验;heading.size 若给则限于 medium/large;
+ *     collapsible.actionLabel/copy.label 可选)。
  * 任何字段类型错的整块**静默丢弃**(不 fail 整个构建),避免 agent 单个字段错就完全无回复。
  * 内容脱敏由 buildDisplayCard/sanitize 兜底,此处只做结构校验。
  */
@@ -408,6 +634,7 @@ function validateOneBlock(raw: unknown, depth: number, budget: { count: number }
         segs.push({
           text: seg.text,
           ...(seg.bold === true ? { bold: true } : {}),
+          ...(seg.subtle === true ? { subtle: true } : {}),
           ...(typeof color === "string" ? { color: color as RichSegment["color"] } : {}),
         });
       }
@@ -430,6 +657,54 @@ function validateOneBlock(raw: unknown, depth: number, budget: { count: number }
       if (items.length === 0) return null;
       return { type: "facts", items };
     }
+    case "table": {
+      if (!Array.isArray(r.rows)) return null;
+      const rows: TableRow[] = [];
+      for (const row of r.rows) {
+        if (budget.count >= MAX_TOTAL_BLOCKS) break;
+        if (!row || typeof row !== "object") continue;
+        const rr = row as Record<string, unknown>;
+        if (!Array.isArray(rr.cells)) continue;
+        const cells: TableCell[] = [];
+        for (const cell of rr.cells) {
+          if (budget.count >= MAX_TOTAL_BLOCKS) break;
+          if (!cell || typeof cell !== "object") continue;
+          const cc = cell as Record<string, unknown>;
+          if (typeof cc.text !== "string") continue;
+          budget.count++;
+          cells.push({ text: cc.text });
+        }
+        if (cells.length > 0) {
+          budget.count++;
+          rows.push({ cells });
+        }
+      }
+      if (rows.length === 0) return null;
+      return {
+        type: "table",
+        rows,
+        ...(r.firstRowAsHeader === false ? { firstRowAsHeader: false } : {}),
+      };
+    }
+    case "columns": {
+      if (!Array.isArray(r.columns)) return null;
+      const columns: Column[] = [];
+      for (const col of r.columns) {
+        if (budget.count >= MAX_TOTAL_BLOCKS) break;
+        if (!col || typeof col !== "object") continue;
+        const cc = col as Record<string, unknown>;
+        const inner = validateBlockList(cc.blocks, depth - 1, budget);
+        if (inner.length === 0) continue;
+        budget.count++;
+        columns.push({ blocks: inner });
+      }
+      if (columns.length === 0) return null;
+      return { type: "columns", columns };
+    }
+    case "link": {
+      if (typeof r.text !== "string" || typeof r.url !== "string") return null;
+      return { type: "link", text: r.text, url: r.url };
+    }
     case "group": {
       const inner = validateBlockList(r.blocks, depth - 1, budget);
       if (inner.length === 0) return null;
@@ -441,9 +716,39 @@ function validateOneBlock(raw: unknown, depth: number, budget: { count: number }
     }
     case "collapsible": {
       if (typeof r.summary !== "string") return null;
+      const actionLabel = r.actionLabel;
+      if (actionLabel !== undefined && typeof actionLabel !== "string") return null;
+      let summarySegments: RichSegment[] | undefined;
+      if (Array.isArray(r.summarySegments)) {
+        summarySegments = [];
+        for (const s of r.summarySegments) {
+          if (!s || typeof s !== "object") continue;
+          const seg = s as Record<string, unknown>;
+          if (typeof seg.text !== "string") continue;
+          const color = seg.color;
+          if (color !== undefined && (typeof color !== "string" || !RICH_COLORS.has(color))) continue;
+          summarySegments.push({
+            text: seg.text,
+            ...(seg.bold === true ? { bold: true } : {}),
+            ...(seg.subtle === true ? { subtle: true } : {}),
+            ...(typeof color === "string" ? { color: color as RichSegment["color"] } : {}),
+          });
+        }
+        if (summarySegments.length === 0) summarySegments = undefined;
+      }
       const inner = validateBlockList(r.blocks, depth - 1, budget);
       if (inner.length === 0) return null;
-      return { type: "collapsible", summary: r.summary, blocks: inner };
+      return typeof actionLabel === "string"
+        ? { type: "collapsible", summary: r.summary, summarySegments, actionLabel, blocks: inner }
+        : { type: "collapsible", summary: r.summary, summarySegments, blocks: inner };
+    }
+    case "copy": {
+      if (typeof r.text !== "string") return null;
+      const label = r.label;
+      if (label !== undefined && typeof label !== "string") return null;
+      return typeof label === "string"
+        ? { type: "copy", label, text: r.text }
+        : { type: "copy", text: r.text };
     }
     default:
       return null;

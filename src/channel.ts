@@ -30,10 +30,22 @@ function getAgentVersion(): string {
 }
 import { WKSocket } from "./socket.js";
 import { handleInboundMessage, type OctoStatusSink, sanitizeFilename } from "./inbound.js";
-import { runWithSessionInitRetry } from "./session-retry.js";
+import { runWithSessionInitRetry, isSessionInitConflict } from "./session-retry.js";
+import { notifyInboundConflictDropped } from "./inbound-conflict-notice.js";
 
-/** 会话初始化冲突(core CAS)兜底重试参数:同群紧挨两条消息时 turn N 收尾写与 turn N+1 init 竞态。 */
-const SESSION_INIT_RETRY = { retries: 2, backoffMs: 800 } as const;
+/**
+ * 会话初始化冲突(core CAS)兜底重试参数。同群紧挨两条消息时,turn N 的 session 收尾写
+ * 与 turn N+1 init 竞态。
+ *
+ * `retries=4, backoffMs=1500` 线性退避,累计等待 1.5+3+4.5+6 = **15 秒**。选这个上限是因为
+ * 真实场景观察到:进度卡 + 复杂 turn(10+ steps / 25s+)让 core 侧收尾写显著变长,原来的
+ * 2.4s 窗口不够覆盖(联调实测 3 次 attempt 全撞、消息被丢)。
+ *
+ * 若 15s 内仍不停撞车(每次 init 读到的 revision 都不同),那大概率不是瞬态冲突,而是 core
+ * 已知的 skillsSnapshot 翻转持久性 bug —— 加多少重试都救不了,需上游 core 修。此时最终抛错
+ * 让 dispatch 走既有失败路径。
+ */
+const SESSION_INIT_RETRY = { retries: 4, backoffMs: 1500 } as const;
 import { ChannelType, MessageType, type BotMessage, type MessagePayload, type SendMessageResult } from "./types.js";
 import { buildEntitiesFromFallback, parseStructuredMentions, convertStructuredMentions, sanitizeOutboundMentions, MENTION_FORMAT_HINT } from "./mention-utils.js";
 import type { MentionEntity } from "./types.js";
@@ -1505,26 +1517,46 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
 
           enqueueInbound(
             inboundQueueKey,
-            () =>
-              runWithSessionInitRetry(
-                () =>
-                  handleInboundMessage({
-                    account,
-                    message: msg,
-                    botUid: credentials.robot_id,
-                    groupHistories,
-                    lastBotReplySeqMap,
-                    memberMap,
-                    uidToNameMap,
-                    groupCacheTimestamps,
-                    memberRobotMap,
-                    currentGroupMembersMap,
-                    groupMdCache,
+            async () => {
+              try {
+                await runWithSessionInitRetry(
+                  () =>
+                    handleInboundMessage({
+                      account,
+                      message: msg,
+                      botUid: credentials.robot_id,
+                      groupHistories,
+                      lastBotReplySeqMap,
+                      memberMap,
+                      uidToNameMap,
+                      groupCacheTimestamps,
+                      memberRobotMap,
+                      currentGroupMembersMap,
+                      groupMdCache,
+                      log,
+                      statusSink,
+                    }),
+                  { ...SESSION_INIT_RETRY, log },
+                );
+              } catch (err) {
+                // 重试耗尽仍是 core 会话初始化冲突(已知 skillsSnapshot revision bug,
+                // upstream openclaw#101848):不再静默丢,发用户可见回执 + 独立告警打点,
+                // 然后正常返回 —— 避免 enqueueInbound 的通用失败日志再重复记录一遍。
+                // 其它错误照旧抛给 enqueueInbound 的通用失败路径。
+                if (isSessionInitConflict(err)) {
+                  await notifyInboundConflictDropped({
+                    err,
+                    msg,
+                    accountId: account.accountId,
+                    apiUrl: account.config.apiUrl,
+                    botToken: account.config.botToken,
                     log,
-                    statusSink,
-                  }),
-                { ...SESSION_INIT_RETRY, log },
-              ),
+                  });
+                  return;
+                }
+                throw err;
+              }
+            },
             log,
           );
         },

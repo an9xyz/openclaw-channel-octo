@@ -377,7 +377,7 @@ function headerText(state: CardProgressState): string {
 
 /** octo/v1 1.5 已验证可安全渲染的展示元素基线(manifest 未 advertise elements 时用)。 */
 const BASELINE_ELEMENTS: ReadonlySet<string> = new Set([
-  "TextBlock", "Container", "ColumnSet", "Column", "FactSet", "Image",
+  "TextBlock", "Container", "ColumnSet", "FactSet", "Image",
 ]);
 
 /**
@@ -397,7 +397,7 @@ export interface CardCaps {
   elements?: ReadonlySet<string>;
   /** 服务端 advertise 的输入白名单(Input.Text/Toggle/ChoiceSet/Number/Date/Time)。 */
   inputs?: ReadonlySet<string>;
-  /** 服务端 advertise 的动作白名单(Submit/ToggleVisibility/ShowCard/OpenUrl 等)。 */
+  /** 服务端 advertise 的动作白名单(v1 本地/导航动作 + v2 Submit 回流动作)。 */
   actions?: ReadonlySet<string>;
   /** 递归节点数上限(limits.max_nodes)。 */
   maxNodes?: number;
@@ -510,6 +510,104 @@ function groupSteps(steps: CardStep[]): CardStep[][] {
   return out;
 }
 
+/** 显式 advertise 富布局能力时,把步骤收进 Container 分组;旧部署保持平铺零回归。 */
+function supportsTimelineLayout(caps: CardCaps | undefined): boolean {
+  return !!caps?.elements && cardSupports(caps, "Container") && cardSupports(caps, "RichTextBlock");
+}
+
+/**
+ * 进度视觉分组:每个 thinking 步开启一个阶段,后续 tool call 收在同一阶段里,直到下一次
+ * thinking。SDK 当前不给 thinking 正文,这里只能展示 thinking 耗时 + 工具摘要。
+ */
+function timelineGroups(steps: CardStep[]): CardStep[][] {
+  const groups: CardStep[][] = [];
+  let cur: CardStep[] = [];
+  for (const step of steps) {
+    if (step.tool === "__thinking__" && cur.length > 0) {
+      groups.push(cur);
+      cur = [];
+    }
+    cur.push(step);
+  }
+  if (cur.length > 0) groups.push(cur);
+  return groups;
+}
+
+function timelineGroupStyle(group: CardStep[]): "default" | "warning" | "attention" | undefined {
+  if (group.some((s) => s.status === "error")) return "attention";
+  if (group.some((s) => s.status === "running")) return "warning";
+  return "default";
+}
+
+function renderStepBlocks(steps: CardStep[]): DisplayBlock[] {
+  return groupSteps(steps).map((g) => ({
+    type: "rich" as const,
+    segments: g.length > 1 ? groupSegments(g) : stepSegments(g[0]),
+  }));
+}
+
+function renderProgressDetailBlocks(steps: CardStep[], caps: CardCaps | undefined): DisplayBlock[] {
+  if (supportsTimelineLayout(caps)) {
+    return timelineGroups(steps).map((g) => ({
+      type: "group" as const,
+      style: timelineGroupStyle(g),
+      blocks: renderStepBlocks(g),
+    }));
+  }
+  return renderStepBlocks(steps);
+}
+
+function supportsTerminalCollapse(caps: CardCaps | undefined): boolean {
+  return (
+    cardSupports(caps, "Container") &&
+    cardSupports(caps, "ActionSet") &&
+    cardSupports(caps, "Action.ToggleVisibility")
+  );
+}
+
+function progressSummary(steps: CardStep[], total: number): string {
+  const thinking = steps.filter((s) => s.tool === "__thinking__").length;
+  const tools = total - thinking;
+  const parts = ["推理与工具调用"];
+  if (thinking > 0) parts.push(`思考 ${thinking}`);
+  if (tools > 0) parts.push(`工具 ${tools}`);
+  if (thinking === 0 && tools === 0) parts.push(`${total} 步`);
+  return parts.join(" · ");
+}
+
+function terminalHeaderSegments(state: CardProgressState): RichSegment[] | null {
+  if (state.phase === "done") {
+    const n = state.steps.length;
+    const secs = fmtDuration(state.elapsedMs);
+    const stats = [n > 0 ? `${n} 步` : "", secs].filter(Boolean).join(" · ");
+    return [
+      { text: "✅ 已完成", bold: true },
+      ...(stats ? [{ text: ` · ${stats}`, subtle: true } satisfies RichSegment] : []),
+    ];
+  }
+  if (state.phase === "error") {
+    const detail = sanitizeErrorText(state.errorText);
+    return [
+      { text: "⚠️ 已中断", bold: true },
+      ...(detail ? [{ text: `：${detail}`, color: "attention" } satisfies RichSegment] : []),
+    ];
+  }
+  return null;
+}
+
+function progressSummarySegments(steps: CardStep[], total: number, visible: string): RichSegment[] {
+  const thinking = steps.filter((s) => s.tool === "__thinking__").length;
+  const tools = total - thinking;
+  const stats: string[] = [];
+  if (thinking > 0) stats.push(`思考 ${thinking}`);
+  if (tools > 0) stats.push(`工具 ${tools}`);
+  stats.push(`${visible} 步`);
+  return [
+    { text: "推理与工具调用", bold: true },
+    { text: ` · ${stats.join(" · ")}`, subtle: true },
+  ];
+}
+
 /**
  * 渲染进度卡 —— **走 buildDisplayCard 底座**(吃自己狗粮):header 用 heading(medium)block、
  * 每步用 rich block(advertise RichTextBlock 时是 RichTextBlock 富行、否则 TextBlock 平铺 —— 一行完整,
@@ -532,15 +630,32 @@ export function renderProgressCard(
   // 只展示最近 cap 步;更早的折叠成一行计数,避免卡片无界膨胀。
   const hidden = Math.max(0, total - cap);
   const visibleSteps = hidden > 0 ? state.steps.slice(-cap) : state.steps;
+  const canRichText = cardSupports(caps, "RichTextBlock");
+  const headerSegments = canRichText ? terminalHeaderSegments(state) : null;
 
   const blocks: DisplayBlock[] = [
-    { type: "heading", text: header, size: "medium" },
+    headerSegments
+      ? { type: "rich", segments: headerSegments }
+      : { type: "heading", text: header, size: "medium" },
   ];
-  if (hidden > 0) blocks.push({ type: "text", text: `… 省略前 ${hidden} 步` });
-  // 同类合并:连续 ≥2 个同 tool 全 done 的段压成一行(用户看到的行数远少于原始步数);
-  // running/error 保留单独行,当前重点不糊掉。header 的"N 步"计数仍用原始 steps.length。
-  for (const g of groupSteps(visibleSteps)) {
-    blocks.push({ type: "rich", segments: g.length > 1 ? groupSegments(g) : stepSegments(g[0]) });
+
+  const detailBlocks: DisplayBlock[] = [];
+  if (hidden > 0) detailBlocks.push({ type: "text", text: `… 省略前 ${hidden} 步` });
+  detailBlocks.push(...renderProgressDetailBlocks(visibleSteps, caps));
+
+  // 运行中保持展开;终态仅在服务端明确 advertise ToggleVisibility 时折叠历史推理/工具调用。
+  // 未声明动作能力的旧部署保持原展开结构,避免多出 summary 行造成视觉/测试回归。
+  if ((state.phase === "done" || state.phase === "error") && detailBlocks.length > 0 && supportsTerminalCollapse(caps)) {
+    const visible = hidden > 0 ? `${visibleSteps.length}/${total}` : `${total}`;
+    const summary = `${progressSummary(state.steps, total)} · ${visible} 步`;
+    blocks.push({
+      type: "collapsible",
+      summary,
+      ...(canRichText ? { summarySegments: progressSummarySegments(state.steps, total, visible) } : {}),
+      blocks: detailBlocks,
+    });
+  } else {
+    blocks.push(...detailBlocks);
   }
 
   // trusted:进度卡的每行文案已在上游逐 sink 脱敏(summarizeToolParams/sanitizeErrorText/safeLabel:

@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 vi.mock("./accounts.js", () => ({
   listOctoAccountIds: vi.fn(),
@@ -9,6 +12,7 @@ vi.mock("./accounts.js", () => ({
 vi.mock("./api-fetch.js", () => ({
   sendCardMessage: vi.fn(),
   getCardProfile: vi.fn(),
+  generateClientMsgNo: vi.fn(),
 }));
 
 import { createDisplayCardTool } from "./card-display-tool.js";
@@ -17,10 +21,12 @@ import {
   resolveOctoAccount,
 } from "./accounts.js";
 import { sendCardMessage, getCardProfile } from "./api-fetch.js";
+import { generateClientMsgNo } from "./api-fetch.js";
 
 const mockCfg = { channels: { octo: { botToken: "t" } } } as never;
 
 function setupOk(): void {
+  vi.mocked(generateClientMsgNo).mockReturnValue("client-msg-no-1");
   vi.mocked(listOctoAccountIds).mockReturnValue(["default"]);
   vi.mocked(resolveOctoAccount).mockReturnValue({
     accountId: "default",
@@ -57,6 +63,7 @@ function getTool(): {
 describe("createDisplayCardTool 骨架", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.OCTO_CARD_REQUEST_LOG_DIR;
     setupOk();
   });
 
@@ -85,11 +92,31 @@ describe("createDisplayCardTool 骨架", () => {
     // 指向 SKILL 详细节
     expect(t.description).toMatch(/SKILL(\.md)?/);
   });
+
+  it("卡片过程指引:description 要求 reasoning_sections,避免 raw tool_events 日志卡", () => {
+    const t = getTool();
+    expect(t.description).toMatch(/reasoning_sections/);
+    expect(t.description).toMatch(/tool_events/);
+    expect(t.description).toMatch(/human-readable reasoning sentence/i);
+    expect(t.description).toMatch(/2-3 .*reasoning_sections/);
+    expect(t.description).toMatch(/查看过程/);
+  });
+
+  it("收尾约束:description 提醒发卡是 side-effect,turn 必须补文本收尾(否则被判 incomplete)", () => {
+    const t = getTool();
+    // 强调发卡不是对话回复
+    expect(t.description).toMatch(/side[- ]?effect/i);
+    // 要求调用后仍要输出文本 / 不要以工具调用结束 turn
+    expect(t.description).toMatch(/final text|text message|end your turn/i);
+    // 点明零文本收尾会被判 incomplete
+    expect(t.description).toMatch(/incomplete/i);
+  });
 });
 
 describe("execute:发展示卡", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.OCTO_CARD_REQUEST_LOG_DIR;
     setupOk();
   });
 
@@ -212,5 +239,38 @@ describe("execute:发展示卡", () => {
     });
     expect(sendCardMessage).not.toHaveBeenCalled();
     expect(res.content[0].text.toLowerCase()).toMatch(/error|empty|blocks/);
+  });
+
+  it("OCTO_CARD_REQUEST_LOG_DIR:记录脱敏后的请求参数,用 client_msg_no 关联实际消息", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "octo-card-req-"));
+    process.env.OCTO_CARD_REQUEST_LOG_DIR = dir;
+    try {
+      const t = getTool();
+      const res = await t.execute("trace-call-1", {
+        channelId: "group:g1",
+        title: "调试卡",
+        blocks: [
+          { type: "text", text: "safe text" },
+          { type: "text", text: "Authorization: Bearer sk-abcdefghijklmnop" },
+        ],
+      });
+      const sent = vi.mocked(sendCardMessage).mock.calls[0][0];
+      expect(typeof sent.clientMsgNo).toBe("string");
+      expect(sent.clientMsgNo).toBeTruthy();
+      expect(res.details).toMatchObject({ client_msg_no: sent.clientMsgNo });
+
+      const logText = await readFile(path.join(dir, "display-card-requests.jsonl"), "utf8");
+      const entry = JSON.parse(logText.trim());
+      expect(entry.tool_call_id).toBe("trace-call-1");
+      expect(entry.message_id).toBe("m1");
+      expect(entry.client_msg_no).toBe(sent.clientMsgNo);
+      expect(entry.args.title).toBe("调试卡");
+      expect(JSON.stringify(entry)).toContain("safe text");
+      expect(JSON.stringify(entry)).not.toContain("sk-abcdefghijklmnop");
+      expect(JSON.stringify(entry)).toContain("[redacted]");
+    } finally {
+      delete process.env.OCTO_CARD_REQUEST_LOG_DIR;
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

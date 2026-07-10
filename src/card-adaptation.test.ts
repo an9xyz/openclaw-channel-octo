@@ -105,16 +105,14 @@ describe("getCardProfile (D12 feature-detect)", () => {
         profiles: ["octo/v1", "octo/v2"],
         elements: [
           "TextBlock", "RichTextBlock", "Image", "ImageSet",
-          "Container", "ColumnSet", "Column", "FactSet",
+          "Container", "ColumnSet", "FactSet",
           "Table", "ActionSet",
         ],
         inputs: [
           "Input.Text", "Input.Toggle", "Input.ChoiceSet",
           "Input.Number", "Input.Date", "Input.Time",
         ],
-        // Action 白名单目前 server 未 advertise(附加式提议),消费方按 undefined 保守处理。
-        // 显式给一份用于验证解析器路径(P1-a 打通,forward-compat)。
-        actions: ["Action.Submit", "Action.ToggleVisibility", "Action.OpenUrl"],
+        actions: ["Action.OpenUrl", "Action.ToggleVisibility", "Action.CopyToClipboard"],
         limits: {
           max_payload_bytes: 524288,
           max_nodes: 200,
@@ -132,14 +130,14 @@ describe("getCardProfile (D12 feature-detect)", () => {
     expect(m.profiles).toEqual(["octo/v1", "octo/v2"]);
     expect(m.elements).toEqual([
       "TextBlock", "RichTextBlock", "Image", "ImageSet",
-      "Container", "ColumnSet", "Column", "FactSet",
+      "Container", "ColumnSet", "FactSet",
       "Table", "ActionSet",
     ]);
     expect(m.inputs).toEqual([
       "Input.Text", "Input.Toggle", "Input.ChoiceSet",
       "Input.Number", "Input.Date", "Input.Time",
     ]);
-    expect(m.actions).toEqual(["Action.Submit", "Action.ToggleVisibility", "Action.OpenUrl"]);
+    expect(m.actions).toEqual(["Action.OpenUrl", "Action.ToggleVisibility", "Action.CopyToClipboard"]);
     expect(m.limits).toEqual({
       max_payload_bytes: 524288,
       max_nodes: 200,

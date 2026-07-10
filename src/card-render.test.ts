@@ -440,6 +440,96 @@ describe("cardSupports / CardCaps 渲染协商(波 C)", () => {
     expect(plain).not.toContain("⌨️\n执行命令"); // 关键:不分行
   });
 
+  it("advertise Container+RichTextBlock → 进度步骤按 thinking 阶段收进 timeline 容器", () => {
+    const caps = { elements: new Set(["TextBlock", "RichTextBlock", "Container"]) };
+    const { card, plain } = renderProgressCard(
+      {
+        phase: "tool",
+        steps: [
+          { tool: "__thinking__", status: "done", durationMs: 3000 },
+          { tool: "exec", status: "done", summary: "find", durationMs: 100 },
+          { tool: "__thinking__", status: "running" },
+        ],
+      },
+      caps,
+    );
+    const body = card.body as Array<Record<string, unknown>>;
+    expect(body[0].type).toBe("TextBlock");
+    const containers = body.slice(1) as Array<{ type: string; style?: string; items?: Array<Record<string, unknown>> }>;
+    expect(containers).toHaveLength(2);
+    expect(containers[0].type).toBe("Container");
+    expect(containers[0].items?.map((e) => e.type)).toEqual(["RichTextBlock", "RichTextBlock"]);
+    expect(containers[1].style).toBe("warning");
+    expect(containers[1].items?.[0]?.type).toBe("RichTextBlock");
+    expect(plain).toContain("💭 思考 · 3.0s");
+    expect(plain).toContain("⌨️ 执行命令：find · 100ms");
+  });
+
+  it("终态 advertise ToggleVisibility → thinking/tool 明细折叠进隐藏 Container", () => {
+    const caps = {
+      elements: new Set(["TextBlock", "RichTextBlock", "Container", "ActionSet"]),
+      actions: new Set(["Action.ToggleVisibility"]),
+    };
+    const { card, plain } = renderProgressCard(
+      {
+        phase: "done",
+        elapsedMs: 3200,
+        steps: [
+          { tool: "__thinking__", status: "done", durationMs: 3000 },
+          { tool: "exec", status: "done", summary: "find", durationMs: 100 },
+        ],
+      },
+      caps,
+    );
+
+    const body = card.body as Array<Record<string, unknown>>;
+    expect(body[0].type).toBe("RichTextBlock");
+    const headerInlines = body[0].inlines as Array<Record<string, unknown>>;
+    expect(headerInlines).toMatchObject([
+      { text: "✅ 已完成", weight: "Bolder" },
+      { text: " · 2 步 · 3.2s", isSubtle: true },
+    ]);
+    expect(body[1].type).toBe("RichTextBlock");
+    const summaryInlines = body[1].inlines as Array<Record<string, unknown>>;
+    expect(summaryInlines).toMatchObject([
+      { text: "推理与工具调用", weight: "Bolder" },
+      { text: " · 思考 1 · 工具 1 · 2 步", isSubtle: true },
+    ]);
+
+    const actionSet = body[2] as { type: string; actions: Array<Record<string, unknown>> };
+    expect(actionSet.type).toBe("ActionSet");
+    expect(actionSet.actions[0]).toMatchObject({ type: "Action.ToggleVisibility", title: "展开/收起" });
+    expect(actionSet.actions[0].title).not.toBe("推理与工具调用 · 思考 1 · 工具 1 · 2 步");
+
+    const hidden = body[3] as { type: string; id: string; isVisible: boolean; items: Array<Record<string, unknown>> };
+    expect(hidden.type).toBe("Container");
+    expect(hidden.isVisible).toBe(false);
+    expect(actionSet.actions[0].targetElements).toEqual([hidden.id]);
+    expect(hidden.items[0].type).toBe("Container");
+    expect(JSON.stringify(hidden.items)).toContain("💭");
+    expect(JSON.stringify(hidden.items)).toContain("执行命令");
+    expect(plain).toContain("推理与工具调用 · 思考 1 · 工具 1 · 2 步");
+    expect(plain).toContain("⌨️ 执行命令：find · 100ms");
+  });
+
+  it("终态未 advertise ToggleVisibility → 保持旧展开结构,不额外插入 summary", () => {
+    const caps = { elements: new Set(["TextBlock", "RichTextBlock", "Container", "ActionSet"]) };
+    const { card } = renderProgressCard(
+      {
+        phase: "done",
+        steps: [
+          { tool: "__thinking__", status: "done", durationMs: 100 },
+          { tool: "exec", status: "done", summary: "find", durationMs: 50 },
+        ],
+      },
+      caps,
+    );
+    const body = card.body as Array<Record<string, unknown>>;
+    expect(body.some((b) => b.type === "ActionSet")).toBe(false);
+    expect(body.some((b) => (b as { text?: string }).text?.startsWith("推理与工具调用"))).toBe(false);
+    expect(body.slice(1).every((b) => b.type === "Container")).toBe(true);
+  });
+
   it("advertise 了 elements 但既无 RichTextBlock 也无 ColumnSet → TextBlock 平铺(降级)", () => {
     const caps = { elements: new Set(["TextBlock", "FactSet"]) };
     const { card } = renderProgressCard({ phase: "tool", steps: [{ tool: "read", status: "done" }] }, caps);

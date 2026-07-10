@@ -433,7 +433,7 @@ describe("card-progress 状态机 + hook + 节流", () => {
             profiles: ["octo/v1"],
             // 真实 im-test 部署 advertise 的元素超集(P1-d 起进度卡优先 RichTextBlock 而非 ColumnSet:
             // 解决服务端权威重算 plain 时 ColumnSet 图标/文本分行的问题)
-            elements: ["TextBlock", "RichTextBlock", "Container", "ColumnSet", "Column", "FactSet"],
+            elements: ["TextBlock", "RichTextBlock", "Container", "ColumnSet", "FactSet"],
             limits: { max_nodes: 200 },
           }),
         };
@@ -450,8 +450,60 @@ describe("card-progress 状态机 + hook + 节流", () => {
 
     const send = calls.find((c) => c.url.includes("/sendMessage"));
     expect(send).toBeTruthy();
-    const card = (send!.body!.payload as { card: { body: Array<{ type: string }> } }).card;
-    expect(card.body[1].type).toBe("RichTextBlock"); // manifest advertise → 富文本行渲染
+    const card = (send!.body!.payload as {
+      card: { body: Array<{ type: string; items?: Array<{ type: string }> }> };
+    }).card;
+    expect(card.body[1].type).toBe("Container"); // manifest advertise → timeline 分组容器
+    expect(card.body[1].items?.[0]?.type).toBe("RichTextBlock"); // 容器内仍是富文本行
+  });
+
+  it("波C: manifest advertise Action.ToggleVisibility → 终态 edit 折叠 thinking/tool 明细", async () => {
+    const calls: Array<{ url: string; body: Record<string, unknown> | undefined }> = [];
+    const fn = vi.fn().mockImplementation(async (url: string, init?: { body?: string }) => {
+      calls.push({ url: String(url), body: init?.body ? JSON.parse(init.body) : undefined });
+      if (String(url).includes("/card/profile")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            enabled: true,
+            profiles: ["octo/v1"],
+            elements: ["TextBlock", "RichTextBlock", "Container", "ActionSet"],
+            actions: ["Action.ToggleVisibility"],
+            limits: { max_nodes: 200 },
+          }),
+        };
+      }
+      if (String(url).includes("/sendMessage")) return { ok: true, status: 200, text: async () => JSON.stringify({ message_id: "card1" }) };
+      return { ok: true, status: 200, text: async () => "" };
+    });
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi();
+
+    setCardContext("wc-toggle", { apiUrl: "https://wc-toggle.test", botToken: "bf", channelId: "g1", channelType: ChannelType.Group });
+    handlers.model_call_started({}, { sessionKey: "wc-toggle" });
+    await vi.advanceTimersByTimeAsync(100);
+    handlers.before_tool_call({ toolName: "exec", toolCallId: "e1", params: { command: "find src" } }, { sessionKey: "wc-toggle" });
+    handlers.after_tool_call({ toolName: "exec", toolCallId: "e1", durationMs: 50 }, { sessionKey: "wc-toggle" });
+    await vi.advanceTimersByTimeAsync(900);
+
+    await finalizeCard("wc-toggle", { success: true });
+    const edit = calls.filter((c) => c.url.includes("/message/edit")).pop();
+    expect(edit).toBeTruthy();
+    const env = JSON.parse(edit!.body!.content_edit as string);
+    const body = env.card.body as Array<Record<string, unknown>>;
+    expect(body[1].type).toBe("RichTextBlock");
+    const summaryInlines = body[1].inlines as Array<Record<string, unknown>>;
+    expect(summaryInlines[0]).toMatchObject({ text: "推理与工具调用", weight: "Bolder" });
+    expect(summaryInlines[1]).toMatchObject({ isSubtle: true });
+    expect((body[2] as { type: string }).type).toBe("ActionSet");
+    const action = (body[2] as { actions: Array<Record<string, unknown>> }).actions[0];
+    expect(action).toMatchObject({ type: "Action.ToggleVisibility", title: "展开/收起" });
+    expect(action.title).not.toBe("推理与工具调用");
+    expect((body[3] as { type: string; isVisible: boolean }).type).toBe("Container");
+    expect((body[3] as { isVisible: boolean }).isVisible).toBe(false);
+    expect(action.targetElements).toEqual([(body[3] as { id: string }).id]);
+    expect(JSON.stringify(body[3])).toContain("执行命令");
   });
 
   it("P1-g: model_call_started 产 running thinking step,before_tool_call 结束它(标 done + durationMs)", async () => {

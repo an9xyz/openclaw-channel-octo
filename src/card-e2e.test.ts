@@ -42,11 +42,11 @@ suite("card E2E（真实 octo-server）", () => {
       ...(m.elements ? { elements: new Set(m.elements) } : {}),
       ...(typeof m.limits?.max_nodes === "number" ? { maxNodes: m.limits.max_nodes as number } : {}),
     };
-    // 探针:OCTO_E2E_FORCE_COLUMNS=1 时强制 advertise ColumnSet+Column,验证 octo/v1 是否接受
+    // 探针:OCTO_E2E_FORCE_COLUMNS=1 时强制 advertise ColumnSet,验证 octo/v1 是否接受
     // 列布局(即便本部署 manifest 尚未 advertise elements)—— 回答"server 端上线 elements 后我们发
     // ColumnSet 会不会 400"。
     if (process.env.OCTO_E2E_FORCE_COLUMNS === "1") {
-      caps.elements = new Set([...(caps.elements ?? []), "TextBlock", "ColumnSet", "Column"]);
+      caps.elements = new Set([...(caps.elements ?? []), "TextBlock", "ColumnSet"]);
     }
     const steps = [
       { tool: "read", status: "done" as const, summary: "/work/README.md", durationMs: 180 },

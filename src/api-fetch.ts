@@ -519,8 +519,10 @@ export interface CardProfileManifest {
   elements?: string[];
   inputs?: string[];
   /**
-   * 动作白名单(pkg/cardmsg 权威;server 目前未 advertise,消费方保守视为 undefined)。
-   * 覆盖不回流展示交互(`Action.ToggleVisibility`/`ShowCard`/`OpenUrl`)与回流 `Action.Submit`。
+   * 动作白名单(pkg/cardmsg 权威)。octo/v1 展示卡只消费本地/导航动作
+   * (`Action.ToggleVisibility`/`Action.CopyToClipboard`/`Action.OpenUrl`);回流 `Action.Submit`
+   * 属于 octo/v2 交互卡路径,不得放进展示卡 selectAction。
+   * 旧部署不返该字段(undefined) → 消费方保守视为不支持任何 action。
    */
   actions?: string[];
   /** 尺寸/结构上限（node/depth/body caps 等）。 */

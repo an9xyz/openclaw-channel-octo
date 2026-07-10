@@ -68,10 +68,11 @@ const gateCache = new Map<string, boolean>();
  */
 const capsCache = new Map<string, CardCaps>();
 
-/** manifest → 渲染 caps。只取当前渲染用得上的:元素白名单 + max_nodes(其余 limits 结构浅、天然满足)。 */
+/** manifest → 渲染 caps。只取当前渲染用得上的:元素/动作白名单 + max_nodes。 */
 function deriveCaps(m: CardProfileManifest): CardCaps {
   const caps: CardCaps = {};
   if (Array.isArray(m.elements) && m.elements.length > 0) caps.elements = new Set(m.elements);
+  if (Array.isArray(m.actions) && m.actions.length > 0) caps.actions = new Set(m.actions);
   const maxNodes = m.limits?.max_nodes;
   if (typeof maxNodes === "number" && maxNodes > 0) caps.maxNodes = maxNodes;
   return caps;
