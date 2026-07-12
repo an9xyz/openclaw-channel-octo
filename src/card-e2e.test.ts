@@ -40,6 +40,7 @@ suite("card E2E（真实 octo-server）", () => {
     const m = await getCardProfile({ apiUrl: API!, botToken: TOKEN! });
     const caps: CardCaps = {
       ...(m.elements ? { elements: new Set(m.elements) } : {}),
+      ...(m.actions ? { actions: new Set(m.actions) } : {}),
       ...(typeof m.limits?.max_nodes === "number" ? { maxNodes: m.limits.max_nodes as number } : {}),
       ...(typeof m.limits?.max_depth === "number" ? { maxDepth: m.limits.max_depth as number } : {}),
       ...(typeof m.limits?.max_payload_bytes === "number" ? { maxPayloadBytes: m.limits.max_payload_bytes as number } : {}),
