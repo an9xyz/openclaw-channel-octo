@@ -14,6 +14,7 @@
  */
 
 import { cardSupports, isSensitive, reduceUrlsInText, type CardCaps } from "./card-render.js";
+import { cardFitsLimits } from "./card-limits.js";
 import { CARD_VERSION } from "./types.js";
 
 // ── DisplayBlock:展示意图 ──────────────────────────────────
@@ -126,6 +127,71 @@ function sanitize(text: string, generic = true): string | null {
 interface Rendered {
   elements: Record<string, unknown>[];
   plainLines: string[];
+}
+
+function adaptiveCard(body: Record<string, unknown>[]): Record<string, unknown> {
+  return {
+    type: "AdaptiveCard",
+    version: CARD_VERSION,
+    $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
+    body,
+  };
+}
+
+/** Preserve complete rendered blocks while greedily fitting negotiated recursive limits. */
+function fitRenderedGroups(
+  groups: Rendered[],
+  caps: CardCaps | undefined,
+): { body: Record<string, unknown>[]; plainLines: string[] } {
+  if (!caps?.maxNodes && !caps?.maxDepth && !caps?.maxPayloadBytes) {
+    return {
+      body: groups.flatMap((group) => group.elements),
+      plainLines: groups.flatMap((group) => group.plainLines),
+    };
+  }
+
+  const body: Record<string, unknown>[] = [];
+  const plainLines: string[] = [];
+  const accepted: Rendered[] = [];
+  let dropped = 0;
+  for (let i = 0; i < groups.length; i++) {
+    const group = groups[i];
+    const nextBody = [...body, ...group.elements];
+    const nextPlain = [...plainLines, ...group.plainLines];
+    if (cardFitsLimits(adaptiveCard(nextBody), nextPlain.join("\n"), caps)) {
+      accepted.push(group);
+      body.push(...group.elements);
+      plainLines.push(...group.plainLines);
+      continue;
+    }
+    dropped = groups.length - i;
+    break;
+  }
+
+  if (dropped > 0 && cardSupports(caps, "TextBlock")) {
+    while (true) {
+      const markerText = `… 省略 ${dropped} 项(超出服务端限制)`;
+      const markerPlain = `… 省略 ${dropped} 项`;
+      const marker = textBlock(markerText);
+      if (cardFitsLimits(adaptiveCard([...body, marker]), [...plainLines, markerPlain].join("\n"), caps)) {
+        body.push(marker);
+        plainLines.push(markerPlain);
+        break;
+      }
+      const removed = accepted.pop();
+      if (!removed) break;
+      body.splice(body.length - removed.elements.length, removed.elements.length);
+      plainLines.splice(plainLines.length - removed.plainLines.length, removed.plainLines.length);
+      dropped++;
+    }
+  }
+
+  // An impossibly small payload/depth budget may not fit even the marker. Empty output makes
+  // the caller fail closed instead of sending a payload the server will reject.
+  if (!cardFitsLimits(adaptiveCard(body), plainLines.join("\n"), caps)) {
+    return { body: [], plainLines: [] };
+  }
+  return { body, plainLines };
 }
 
 const EMPTY: Rendered = { elements: [], plainLines: [] };
@@ -609,54 +675,37 @@ function renderBlocks(blocks: DisplayBlock[], ctx: RenderCtx): Rendered {
  */
 export function buildDisplayCard(opts: BuildDisplayCardOptions): BuildDisplayCardResult {
   const { title, blocks, caps, trusted } = opts;
+  // Every currently supported block either is TextBlock or degrades through TextBlock.
+  // An explicitly advertised capability set without TextBlock has no safe output shape.
+  if (caps?.elements !== undefined && !cardSupports(caps, "TextBlock")) {
+    return { card: adaptiveCard([]), plain: "" };
+  }
   const ctx: RenderCtx = { caps, uid: { n: 0 }, generic: !trusted };
-  const body: Record<string, unknown>[] = [];
-  const plainLines: string[] = [];
+  const groups: Rendered[] = [];
   let cleanTitle = "";
 
   if (title) {
     cleanTitle = sanitize(title, ctx.generic) ?? "";
     if (cleanTitle) {
-      body.push(textBlock(cleanTitle, { bold: true }));
-      plainLines.push(cleanTitle);
+      groups.push({ elements: [textBlock(cleanTitle, { bold: true })], plainLines: [cleanTitle] });
     }
   }
 
-  const rendered = renderBlocks(blocks, ctx);
+  const renderedGroups = blocks.map((block) => renderBlock(block, ctx));
+  const firstRendered = renderedGroups.find((group) => group.elements.length > 0 || group.plainLines.length > 0);
   // Agent 常同时传 title + 首个同名 heading。展示面只保留一个标题,plain 同步去重。
   if (
     cleanTitle &&
-    rendered.plainLines[0] === cleanTitle &&
-    rendered.elements[0]?.type === "TextBlock" &&
-    rendered.elements[0]?.text === cleanTitle
+    firstRendered?.plainLines[0] === cleanTitle &&
+    firstRendered.elements[0]?.type === "TextBlock" &&
+    firstRendered.elements[0]?.text === cleanTitle
   ) {
-    rendered.elements.shift();
-    rendered.plainLines.shift();
+    firstRendered.elements.shift();
+    firstRendered.plainLines.shift();
   }
-  body.push(...rendered.elements);
-  plainLines.push(...rendered.plainLines);
-
-  // 服务端 max_nodes 权威约束:顶层 body 元素数超上限时截断并附一行说明,避免 edit/send 撞 400
-  // (card-blocks.ts 契约「绝不产出会被服务端 400 的结构」)。节点计数取顶层元素的保守近似。
-  const maxNodes = caps?.maxNodes;
-  if (typeof maxNodes === "number" && maxNodes > 0 && body.length > maxNodes) {
-    const keep = Math.max(1, maxNodes - 1); // 留一格给「截断」提示
-    const dropped = body.length - keep;
-    body.length = keep;
-    // 同步截断 plainLines,保持「plain 与 card 同步」不变量:否则 plain 会列出 card 已丢弃的项。
-    // flat 卡片下 body/plainLines 一一对应,截断精确;嵌套卡片下为近似(plain 本就是 advisory,
-    // 服务端 Finalize 会权威重算),至少不再多列一整串被丢弃的内容。
-    plainLines.length = Math.min(plainLines.length, keep);
-    body.push(textBlock(`… 省略 ${dropped} 项(超出服务端节点上限)`));
-    plainLines.push(`… 省略 ${dropped} 项`);
-  }
-
-  const card: Record<string, unknown> = {
-    type: "AdaptiveCard",
-    version: CARD_VERSION,
-    $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
-    body,
-  };
+  groups.push(...renderedGroups.filter((group) => group.elements.length > 0 || group.plainLines.length > 0));
+  const { body, plainLines } = fitRenderedGroups(groups, caps);
+  const card = adaptiveCard(body);
   return { card, plain: plainLines.join("\n") };
 }
 

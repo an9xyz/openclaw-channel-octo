@@ -28,7 +28,7 @@ import { octoPlugin } from "./src/channel.js";
 import { createOctoManagementTools } from "./src/agent-tools.js";
 import { createDisplayCardTool } from "./src/card-display-tool.js";
 import { CHANNEL_ID, DISPLAY_CARD_TOOL_NAME } from "./src/constants.js";
-import { registerCardProgress } from "./src/card-progress.js";
+import { bindCardRun, registerCardProgress } from "./src/card-progress.js";
 
 // ---------------------------------------------------------------------------
 // Tool-availability self-diagnostic (issue #137)
@@ -154,6 +154,8 @@ export default defineBundledChannelEntry({
           cfg,
           agentAccountId: ctx.agentAccountId,
           agentId: ctx.agentId,
+          deliveryContext: ctx.deliveryContext,
+          messageChannel: ctx.messageChannel,
         });
       },
       { names: [DISPLAY_CARD_TOOL_NAME] },
@@ -185,6 +187,10 @@ export default defineBundledChannelEntry({
 
     console.log('[octo] registering before_prompt_build hook');
     api.on('before_prompt_build', (_event, ctx) => {
+      // Bind progress ownership before any model/tool event. before_agent_run repeats this on
+      // newer hosts; the prompt hook preserves compatibility where that gate is unavailable.
+      // Provider gating prevents a same-key non-Octo session from claiming an Octo entry.
+      if (ctx.messageProvider === CHANNEL_ID) bindCardRun(ctx.sessionKey, ctx.runId);
       // Sections destined for the user-prompt context block (group MD,
       // member list, inbound history). These belong to the conversation
       // surface, not the LLM's system identity.

@@ -9,6 +9,7 @@
  */
 import { CARD_PLACEHOLDER, CARD_VERSION } from "./types.js";
 import { buildDisplayCard, type DisplayBlock, type RichSegment } from "./card-blocks.js";
+import { cardFitsLimits, type CardLimits } from "./card-limits.js";
 
 export const OCTO_CARD_LAYOUTS = {
   agentProgressV1: "agent_progress_v1",
@@ -413,7 +414,7 @@ const BASELINE_ACTIONS: ReadonlySet<string> = new Set();
  * 未 advertise elements → 用 BASELINE_ELEMENTS;未 advertise inputs/actions → 空集(fail-closed);
  * 未给 maxNodes → 用本地 MAX_VISIBLE_STEPS。
  */
-export interface CardCaps {
+export interface CardCaps extends CardLimits {
   /** 服务端 advertise 的元素白名单(pkg/cardmsg 权威)。 */
   elements?: ReadonlySet<string>;
   /** 服务端 advertise 的输入白名单(Input.Text/Toggle/ChoiceSet/Number/Date/Time)。 */
@@ -422,6 +423,10 @@ export interface CardCaps {
   actions?: ReadonlySet<string>;
   /** 递归节点数上限(limits.max_nodes)。 */
   maxNodes?: number;
+  /** 渲染后 JSON 对象最大深度(limits.max_depth)。 */
+  maxDepth?: number;
+  /** 完整 type-17 payload UTF-8 字节上限(limits.max_payload_bytes)。 */
+  maxPayloadBytes?: number;
 }
 
 /**
@@ -753,6 +758,28 @@ export function renderProgressCard(
   const canRichText = cardSupports(caps, "RichTextBlock");
   const visible = hidden > 0 ? `${visibleSteps.length}/${total}` : `${total}`;
 
+  const renderFlatFallback = (): { card: Record<string, unknown>; plain: string } => {
+    // The specialized layout is all-or-nothing. Once either root element is unavailable or
+    // the enhanced tree exceeds a hard limit, use only the universally degradable TextBlock
+    // surface and omit agent_progress_v1 metadata so clients use ordinary AC rendering.
+    const flatCaps: CardCaps = {
+      ...caps,
+      elements: new Set(["TextBlock"]),
+      inputs: new Set(),
+      actions: new Set(),
+    };
+    const flatBlocks: DisplayBlock[] = [];
+    if (total > 0) flatBlocks.push({ type: "text", text: progressSummaryText(state.steps, total, visible) });
+    if (hidden > 0) flatBlocks.push({ type: "text", text: `… 省略前 ${hidden} 步` });
+    flatBlocks.push(...renderProgressDetailBlocks(visibleSteps, flatCaps));
+    const flat = buildDisplayCard({ title: header, blocks: flatBlocks, caps: flatCaps, trusted: true });
+    return { card: flat.card, plain: flat.plain || CARD_PLACEHOLDER };
+  };
+
+  if (!cardSupports(caps, "ColumnSet") || !cardSupports(caps, "Container")) {
+    return renderFlatFallback();
+  }
+
   const detailBlocks: DisplayBlock[] = [];
   if (hidden > 0) detailBlocks.push({ type: "text", text: `… 省略前 ${hidden} 步` });
   detailBlocks.push(...renderProgressDetailBlocks(visibleSteps, caps));
@@ -797,5 +824,8 @@ export function renderProgressCard(
   card.metadata = { octo_layout: OCTO_CARD_LAYOUTS.agentProgressV1 };
   const summaryPlain = total > 0 ? progressSummaryText(state.steps, total, visible) : "";
   const plain = [header, summaryPlain, detail.plain].filter(Boolean).join("\n");
+  if (!cardFitsLimits(card, plain || CARD_PLACEHOLDER, caps)) {
+    return renderFlatFallback();
+  }
   return { card, plain: plain || CARD_PLACEHOLDER };
 }

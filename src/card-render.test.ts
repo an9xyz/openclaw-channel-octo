@@ -9,6 +9,7 @@ import {
   stepLine,
   cardSupports,
 } from "./card-render.js";
+import { countCardNodes } from "./card-limits.js";
 
 function elementText(e: Record<string, unknown>): string {
   if (typeof e.text === "string") return e.text;
@@ -489,12 +490,15 @@ describe("cardSupports / CardCaps 渲染协商(波 C)", () => {
     // 优于 ColumnSet 列的原因:服务端 Finalize 权威重算 plain 时,ColumnSet 会把图标列/文本列
     // 各当一行,输出成"⌨️\n执行命令:ls · 200ms"两行(降级客户端视觉退化)。RichTextBlock 是单元素,
     // 内联多段样式,plain 输出干净一行。
-    const caps = { elements: new Set(["TextBlock", "RichTextBlock"]) };
+    const caps = { elements: new Set(["TextBlock", "RichTextBlock", "Container", "ColumnSet"]) };
     const { card, plain } = renderProgressCard(
       { phase: "tool", steps: [{ tool: "exec", status: "done", summary: "ls", durationMs: 200 }] },
       caps,
     );
-    const row = progressDetailItems(card)[0];
+    const detailItem = progressDetailItems(card)[0];
+    const row = detailItem.type === "Container"
+      ? (detailItem.items as Array<Record<string, unknown>>)[0]
+      : detailItem;
     expect(row.type).toBe("RichTextBlock");
     const inlines = row.inlines as Array<Record<string, unknown>>;
     // 至少有:图标段、label(bold)段、summary/duration 段
@@ -506,7 +510,7 @@ describe("cardSupports / CardCaps 渲染协商(波 C)", () => {
   });
 
   it("advertise Container+RichTextBlock → 进度步骤按 thinking 阶段收进 timeline 容器", () => {
-    const caps = { elements: new Set(["TextBlock", "RichTextBlock", "Container"]) };
+    const caps = { elements: new Set(["TextBlock", "RichTextBlock", "Container", "ColumnSet"]) };
     const { card, plain } = renderProgressCard(
       {
         phase: "tool",
@@ -648,7 +652,8 @@ describe("cardSupports / CardCaps 渲染协商(波 C)", () => {
       status: "done" as const,
     }));
     const { card } = renderProgressCard({ phase: "tool", steps }, { maxNodes: 6 }); // reserve=2 → 4 步
-    expect(progressDetailItems(card)).toHaveLength(5); // 折叠 + 4 步
+    expect(countCardNodes(card)).toBeLessThanOrEqual(6);
+    expect(card.metadata).toBeUndefined(); // enhanced root 超预算后降级普通平面卡
   });
 
   it("P1-g: __thinking__ 特殊 tool 名 → icon 💭, label '思考'(done 时用 icon, running 时仍用 ⏳)", () => {

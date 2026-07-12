@@ -38,9 +38,8 @@ interface CardEntry {
    */
   identity: string;
   /**
-   * 属主 run 的 SDK runId(hook ctx 权威提供)。首个带 runId 的 hook 认领本 entry;之后 runId
-   * 不符的迟到/外来 hook 一律丢弃 —— 闭合"同 sessionKey 上超时 run A 的迟到 hook 落到新 run B 的卡"
-   * 竞态(setCardContext 侧拿不到 runId,故由首个 hook 绑定)。
+   * 属主 run 的 SDK runId。由 before_agent_run 在任何 model/tool 事件前预绑定;普通 hook
+   * 只能校验、不能认领,避免旧 run 的迟到 hook first-hook-wins 抢占新 entry。
    */
   runId?: string;
   messageId?: string;
@@ -53,6 +52,8 @@ interface CardEntry {
   flushTimer?: ReturnType<typeof setTimeout>;
   /** 当前 in-flight flush 的 promise;finalizeCard 据此等待首帧 send/中间帧 edit 落定。 */
   flushPromise?: Promise<void>;
+  /** replacement/clear 时主动取消 profile/send/edit,缩小 stale side-effect 窗口。 */
+  flushAbort?: AbortController;
 }
 
 /** key = sessionKey(H1 实证:全 hook 一致)。跨账号碰撞由 entry.identity + fail-closed 兜底。 */
@@ -63,18 +64,23 @@ const gateCache = new Map<string, boolean>();
 
 /**
  * D12 能力(elements/limits 派生的渲染 caps)缓存,key = apiUrl(部署级,同 gate)。gateEnabled
- * 探测 manifest 时一并填充;渲染时按此按元素/节点上限裁剪。旧部署无这些字段 → caps 为空 → 渲染
+ * 探测 manifest 时一并填充;渲染时按元素以及节点/深度/字节上限裁剪。旧部署无这些字段 → caps 为空 → 渲染
  * 走保守默认(等同今天行为)。
  */
 const capsCache = new Map<string, CardCaps>();
 
-/** manifest → 渲染 caps。只取当前渲染用得上的:元素/动作白名单 + max_nodes。 */
+/** manifest → 渲染 caps。显式空 capability 数组同样是权威结果,不得回退 baseline。 */
 function deriveCaps(m: CardProfileManifest): CardCaps {
   const caps: CardCaps = {};
-  if (Array.isArray(m.elements) && m.elements.length > 0) caps.elements = new Set(m.elements);
-  if (Array.isArray(m.actions) && m.actions.length > 0) caps.actions = new Set(m.actions);
+  if (Array.isArray(m.elements)) caps.elements = new Set(m.elements);
+  if (Array.isArray(m.inputs)) caps.inputs = new Set(m.inputs);
+  if (Array.isArray(m.actions)) caps.actions = new Set(m.actions);
   const maxNodes = m.limits?.max_nodes;
   if (typeof maxNodes === "number" && maxNodes > 0) caps.maxNodes = maxNodes;
+  const maxDepth = m.limits?.max_depth;
+  if (typeof maxDepth === "number" && maxDepth > 0) caps.maxDepth = maxDepth;
+  const maxPayloadBytes = m.limits?.max_payload_bytes;
+  if (typeof maxPayloadBytes === "number" && maxPayloadBytes > 0) caps.maxPayloadBytes = maxPayloadBytes;
   return caps;
 }
 
@@ -111,12 +117,15 @@ export function setCardContext(sessionKey: string, ctx: CardContext): void {
   const identity = contextIdentity(ctx);
   const existing = cards.get(sessionKey);
   const collision = !!existing && existing.identity !== identity;
+  // 任何 replacement 都清掉旧 entry 的 debounce timer。旧 entry 若已有 messageId,其
+  // fire-and-forget finalize 仍可收尾;但定时中间帧不得跨 generation 泄漏到新 run。
+  if (existing?.flushTimer) {
+    clearTimeout(existing.flushTimer);
+    existing.flushTimer = undefined;
+  }
+  existing?.flushAbort?.abort(new Error("card entry replaced"));
   if (collision) {
     existing!.skip = true; // 冻结旧 run 的卡:后续 flush/finalize 不再发送
-    if (existing!.flushTimer) {
-      clearTimeout(existing!.flushTimer);
-      existing!.flushTimer = undefined;
-    }
     warn(`sessionKey collision across identities; failing closed for session=${sessionKey}`);
   }
   cards.set(sessionKey, {
@@ -137,11 +146,11 @@ export function setCardContext(sessionKey: string, ctx: CardContext): void {
  * 返回值三态:`true`=启用,`false`=**明确禁用**(可永久 skip 本 session),
  * `null`=**瞬时探测失败**(5xx/网络,不缓存、不 skip,下次 flush 重探)。
  */
-async function gateEnabled(ctx: CardContext): Promise<boolean | null> {
+async function gateEnabled(ctx: CardContext, signal?: AbortSignal): Promise<boolean | null> {
   const cached = gateCache.get(ctx.apiUrl);
   if (cached !== undefined) return cached;
   try {
-    const m = await getCardProfile({ apiUrl: ctx.apiUrl, botToken: ctx.botToken });
+    const m = await getCardProfile({ apiUrl: ctx.apiUrl, botToken: ctx.botToken, signal });
     // 能力清单是部署级事实(与 enabled 无关),探到就缓存供渲染裁剪。
     capsCache.set(ctx.apiUrl, deriveCaps(m));
     let enabled = m.available ? m.enabled : process.env.OCTO_CARD_MESSAGE_ENABLED === "1";
@@ -154,6 +163,11 @@ async function gateEnabled(ctx: CardContext): Promise<boolean | null> {
         enabled = false;
       } else if (typeof m.card_version === "string" && m.card_version !== CARD_VERSION) {
         dbg(`gate: card_version ${m.card_version} != ${CARD_VERSION} → disabled`);
+        enabled = false;
+      } else if (Array.isArray(m.elements) && !m.elements.includes("TextBlock")) {
+        // 所有安全降级最终都依赖 TextBlock。显式空数组或缺 TextBlock 是权威不支持,
+        // 不能退回旧部署 baseline,否则会稳定撞 server 400。
+        dbg("gate: TextBlock not advertised → disabled");
         enabled = false;
       }
     }
@@ -199,11 +213,17 @@ async function flush(sessionKey: string): Promise<void> {
 
 /** 实际执行 gate + send/edit。调用方已置 inFlight=true 并接管 flushPromise。 */
 async function runFlush(sessionKey: string, entry: CardEntry): Promise<void> {
+  const abort = new AbortController();
+  entry.flushAbort = abort;
+  const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(EDIT_TIMEOUT_MS)]);
   try {
     // 首帧前做一次 D12 gate。明确禁用 → 永久跳过本 session;瞬时失败 → 本轮不发,
     // 下次 flush(下个工具事件触发)重探,避免一次抖动永久关闭本 session。
     if (!entry.messageId) {
-      const gate = await gateEnabled(entry.ctx);
+      const gate = await gateEnabled(entry.ctx, signal);
+      // gate await 期间 entry 可能已被同 sessionKey 的下一 run 或跨身份上下文替换。
+      // Map 对象身份就是 generation fence;stale entry 绝不能继续网络副作用。
+      if (!isCurrentEntry(sessionKey, entry)) return;
       if (gate === false) {
         entry.skip = true;
         return;
@@ -218,8 +238,13 @@ async function runFlush(sessionKey: string, entry: CardEntry): Promise<void> {
 
     entry.dirty = false;
     const { card, plain } = renderProgressCard({ phase: entry.phase, steps: entry.steps }, capsCache.get(entry.ctx.apiUrl));
-    const signal = AbortSignal.timeout(EDIT_TIMEOUT_MS);
+    if (!Array.isArray(card.body) || card.body.length === 0) {
+      warn("rendered card cannot fit negotiated capabilities/limits; disabling for session");
+      entry.skip = true;
+      return;
+    }
     if (!entry.messageId) {
+      if (!isCurrentEntry(sessionKey, entry)) return;
       const res = await sendCardMessage({
         apiUrl: entry.ctx.apiUrl,
         botToken: entry.ctx.botToken,
@@ -231,6 +256,7 @@ async function runFlush(sessionKey: string, entry: CardEntry): Promise<void> {
         signal,
       });
       entry.messageId = res?.message_id;
+      if (!isCurrentEntry(sessionKey, entry)) return;
       if (!entry.messageId) {
         warn("placeholder card send returned no message_id; disabling for session");
         entry.skip = true;
@@ -238,6 +264,7 @@ async function runFlush(sessionKey: string, entry: CardEntry): Promise<void> {
       }
       dbg(`placeholder sent messageId=${entry.messageId} steps=${entry.steps.length}`);
     } else {
+      if (!isCurrentEntry(sessionKey, entry)) return;
       await editCardMessage({
         apiUrl: entry.ctx.apiUrl,
         botToken: entry.ctx.botToken,
@@ -250,6 +277,7 @@ async function runFlush(sessionKey: string, entry: CardEntry): Promise<void> {
         ...(entry.ctx.onBehalfOf ? { onBehalfOf: entry.ctx.onBehalfOf } : {}),
         signal,
       });
+      if (!isCurrentEntry(sessionKey, entry)) return;
       dbg(`edited steps=${entry.steps.length} phase=${entry.phase}`);
     }
   } catch (err: unknown) {
@@ -261,10 +289,16 @@ async function runFlush(sessionKey: string, entry: CardEntry): Promise<void> {
       entry.skip = true;
     }
   } finally {
+    if (entry.flushAbort === abort) entry.flushAbort = undefined;
     entry.inFlight = false;
     // 期间有新帧 → 再刷。entry 已被 finalize/clear 删除时不再重排,避免悬挂定时器。
     if (entry.dirty && !entry.skip && cards.get(sessionKey) === entry) scheduleFlush(sessionKey, entry);
   }
+}
+
+/** entry 是否仍是该 session 的当前 generation 且允许副作用。 */
+function isCurrentEntry(sessionKey: string, entry: CardEntry): boolean {
+  return cards.get(sessionKey) === entry && !entry.skip;
 }
 
 /**
@@ -304,6 +338,10 @@ export async function finalizeCard(
   };
   try {
     const { card, plain } = renderProgressCard(state, capsCache.get(entry.ctx.apiUrl));
+    if (!Array.isArray(card.body) || card.body.length === 0) {
+      warn("terminal card cannot fit negotiated capabilities/limits; leaving last valid frame");
+      return;
+    }
     await editCardMessage({
       apiUrl: entry.ctx.apiUrl,
       botToken: entry.ctx.botToken,
@@ -326,12 +364,16 @@ export function clearCard(sessionKey: string): void {
   const entry = cards.get(sessionKey);
   if (!entry) return;
   if (entry.flushTimer) clearTimeout(entry.flushTimer);
+  entry.flushAbort?.abort(new Error("card entry cleared"));
   cards.delete(sessionKey);
 }
 
 /** 测试辅助:清空全部状态。 */
 export function _resetCardProgressForTests(): void {
-  for (const e of cards.values()) if (e.flushTimer) clearTimeout(e.flushTimer);
+  for (const e of cards.values()) {
+    if (e.flushTimer) clearTimeout(e.flushTimer);
+    e.flushAbort?.abort(new Error("card progress reset"));
+  }
   cards.clear();
   gateCache.clear();
   capsCache.clear();
@@ -353,19 +395,36 @@ function endRunningThinking(entry: CardEntry, now: number): void {
 }
 
 /**
- * runId 归属守卫。首个带 runId 的 hook 认领本 entry;之后返回该 hook 是否属于同一 run:
- *   - true → 属主 run(或旧 host 无 runId)→ 照常处理;
- *   - false → runId 不符的迟到/外来 hook(超时 run A 的尾随事件落到新 run B 的 entry)→ 调用方丢弃。
- * hook ctx 的 runId 由 SDK 权威提供(PluginHookToolContext / PluginHookAgentContext 均带)。
+ * runId 归属守卫。before_agent_run 是唯一绑定点;普通 hook 永不认领 entry。
+ * 旧 host 完全不提供 runId 时保留 sessionKey-only 兼容;一旦 entry 已绑定 runId,
+ * 缺失或不匹配 runId 的 hook 均 fail closed。
  */
 function claimRun(entry: CardEntry, ctx: unknown): boolean {
   const rid = (ctx as { runId?: string })?.runId;
-  if (!rid) return true; // 旧 host 不带 runId → 退回今天的 sessionKey-only 行为,不阻拦
-  if (entry.runId === undefined) { entry.runId = rid; return true; }
+  if (!rid) return entry.runId === undefined;
+  if (entry.runId === undefined) return false;
   return entry.runId === rid;
 }
 
+/**
+ * 从可信 agent 生命周期 hook 预绑定 run owner。before_prompt_build 与 before_agent_run
+ * 都早于 model/tool 事件;重复绑定相同 runId 幂等,不同 runId 不能覆盖已有 owner。
+ */
+export function bindCardRun(sessionKey: string | undefined, runId: string | undefined): void {
+  if (!sessionKey || !runId) return;
+  const entry = cards.get(sessionKey);
+  if (!entry || entry.skip) return;
+  if (entry.runId === undefined) entry.runId = runId;
+}
+
 export function registerCardProgress(api: OpenClawPluginApi): void {
+  api.on("before_agent_run", (_event: unknown, ctx: unknown) => {
+    const { sessionKey, runId } = (ctx ?? {}) as { sessionKey?: string; runId?: string };
+    bindCardRun(sessionKey, runId);
+    // before_agent_run 是 fail-closed gate。必须显式 pass,不能依赖不同 host 对 void 的解释。
+    return { outcome: "pass" } as const;
+  });
+
   api.on("before_tool_call", (event: unknown, ctx: unknown) => {
     const e = (event ?? {}) as { toolName?: string; params?: unknown; toolCallId?: string };
     const sk = (ctx as { sessionKey?: string })?.sessionKey;

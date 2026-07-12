@@ -41,6 +41,8 @@ suite("card E2E（真实 octo-server）", () => {
     const caps: CardCaps = {
       ...(m.elements ? { elements: new Set(m.elements) } : {}),
       ...(typeof m.limits?.max_nodes === "number" ? { maxNodes: m.limits.max_nodes as number } : {}),
+      ...(typeof m.limits?.max_depth === "number" ? { maxDepth: m.limits.max_depth as number } : {}),
+      ...(typeof m.limits?.max_payload_bytes === "number" ? { maxPayloadBytes: m.limits.max_payload_bytes as number } : {}),
     };
     // 探针:OCTO_E2E_FORCE_COLUMNS=1 时强制 advertise ColumnSet,验证 octo/v1 是否接受
     // 列布局(即便本部署 manifest 尚未 advertise elements)—— 回答"server 端上线 elements 后我们发

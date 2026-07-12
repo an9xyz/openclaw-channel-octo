@@ -766,9 +766,11 @@ describe("card-progress 状态机 + hook + 节流", () => {
     const profileReached = makeDeferred();
     const releaseProfile = makeDeferred();
     const calls: Array<{ url: string; body?: Record<string, unknown> }> = [];
-    global.fetch = vi.fn().mockImplementation(async (url: string, init?: { body?: string }) => {
+    let profileSignal: AbortSignal | undefined;
+    global.fetch = vi.fn().mockImplementation(async (url: string, init?: { body?: string; signal?: AbortSignal }) => {
       calls.push({ url: String(url), body: init?.body ? JSON.parse(init.body) : undefined });
       if (String(url).includes("/card/profile")) {
+        profileSignal = init?.signal;
         profileReached.resolve();
         await releaseProfile.promise;
         return { ok: true, status: 200, json: async () => ({ enabled: true, profiles: ["octo/v1"] }) };
@@ -786,6 +788,7 @@ describe("card-progress 状态机 + hook + 节流", () => {
     await profileReached.promise;
 
     setCardContext("collision", { apiUrl: "https://race.test", botToken: "token-b", channelId: "group-b", channelType: ChannelType.Group });
+    expect(profileSignal?.aborted).toBe(true);
     releaseProfile.resolve();
     await vi.runAllTimersAsync();
     await Promise.resolve();

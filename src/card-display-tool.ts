@@ -14,11 +14,13 @@
  *   - 出站前 D12 gate:manifest disabled / profile 不含 `octo/v1` / card_version 不兼容
  *     → 拒绝(fail-closed),避免服务端 400。
  *   - caps.elements 未 advertise 的元素自动降级,agent 无需自己判断白名单。
+ *   - 发送目标只取 runtime-owned deliveryContext;模型不能通过 channelId/threadId 跨会话发送。
  *   - **身份不接受 agent 入参**:展示卡始终以 bot 自身身份发出,OBO(persona-clone)绝不由
  *     不可信模型输入指定(与进度卡路径一致,OBO 一律跳过),避免群可见卡片成为 persona 冒充 sink。
  */
 
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import type { OpenClawPluginToolContext } from "openclaw/plugin-sdk/plugin-entry";
 import { listOctoAccountIds, resolveOctoAccount } from "./accounts.js";
 import { appendFile, mkdir } from "node:fs/promises";
 import path from "node:path";
@@ -28,7 +30,7 @@ import { isSensitive, reduceUrlsInText } from "./card-render.js";
 import { resolveOutboundOctoTarget } from "./actions.js";
 import type { CardCaps } from "./card-render.js";
 import { ChannelType, CARD_PROFILE, CARD_VERSION } from "./types.js";
-import { DISPLAY_CARD_TOOL_NAME } from "./constants.js";
+import { CHANNEL_ID, DISPLAY_CARD_TOOL_NAME } from "./constants.js";
 
 /** 展示卡发送超时(postJson 无默认超时,防挂起的 POST 拖死 tool 调用)。 */
 const SEND_TIMEOUT_MS = 15_000;
@@ -48,14 +50,21 @@ function err(msg: string): ToolResult {
   return { content: [{ type: "text", text: `Error: ${msg}` }], details: null };
 }
 
-/** manifest → CardCaps(限于本工具消费:elements + maxNodes)。 */
+/** manifest → CardCaps，包含权威 capability 集与递归结构/字节 hard limits。 */
 function deriveCaps(m: CardProfileManifest): CardCaps {
+  const limits = m.limits as Record<string, unknown> | undefined;
   return {
-    ...(m.elements ? { elements: new Set(m.elements) } : {}),
-    ...(m.inputs ? { inputs: new Set(m.inputs) } : {}),
-    ...(m.actions ? { actions: new Set(m.actions) } : {}),
-    ...(m.limits && typeof (m.limits as Record<string, unknown>).max_nodes === "number"
-      ? { maxNodes: (m.limits as Record<string, unknown>).max_nodes as number }
+    ...(m.elements !== undefined ? { elements: new Set(m.elements) } : {}),
+    ...(m.inputs !== undefined ? { inputs: new Set(m.inputs) } : {}),
+    ...(m.actions !== undefined ? { actions: new Set(m.actions) } : {}),
+    ...(typeof limits?.max_nodes === "number"
+      ? { maxNodes: limits.max_nodes }
+      : {}),
+    ...(typeof limits?.max_depth === "number"
+      ? { maxDepth: limits.max_depth }
+      : {}),
+    ...(typeof limits?.max_payload_bytes === "number"
+      ? { maxPayloadBytes: limits.max_payload_bytes }
       : {}),
   };
 }
@@ -125,6 +134,9 @@ function gateReason(m: CardProfileManifest): string | null {
   if (typeof m.card_version === "string" && m.card_version !== CARD_VERSION) {
     return `card_version ${m.card_version} not compatible (need ${CARD_VERSION})`;
   }
+  if (Array.isArray(m.elements) && !m.elements.includes("TextBlock")) {
+    return "TextBlock is not advertised; no safe display-card fallback is available";
+  }
   return null;
 }
 
@@ -132,6 +144,9 @@ interface Params {
   cfg?: OpenClawConfig;
   agentAccountId?: string;
   agentId?: string;
+  /** Runtime-owned current delivery route. Model arguments are never used for authorization. */
+  deliveryContext?: OpenClawPluginToolContext["deliveryContext"];
+  messageChannel?: string;
 }
 
 /**
@@ -144,8 +159,12 @@ export function createDisplayCardTool(params: Params): Array<{
   parameters: Record<string, unknown>;
   execute: (toolCallId: string, args: Record<string, unknown>) => Promise<ToolResult>;
 }> {
-  const { cfg, agentAccountId } = params;
+  const { cfg, agentAccountId, deliveryContext, messageChannel } = params;
   if (!cfg) return [];
+  const ambientChannel = deliveryContext?.channel ?? messageChannel;
+  // Plugin tools are registered globally. An explicit non-Octo ambient route must never expose
+  // an Octo side-effect tool to another provider's conversation.
+  if (ambientChannel && ambientChannel !== CHANNEL_ID) return [];
   try {
     const ids = listOctoAccountIds(cfg);
     const hasConfigured = ids.some((id) => {
@@ -161,7 +180,8 @@ export function createDisplayCardTool(params: Params): Array<{
     name: DISPLAY_CARD_TOOL_NAME,
     label: "Octo Send Display Card",
     description:
-      "Send a DISPLAY card (Adaptive Card 1.5) to an Octo conversation. Use this for rich, " +
+      "Send a DISPLAY card (Adaptive Card 1.5) to the current Octo conversation. The target " +
+      "comes from trusted runtime delivery context and cannot be selected by tool arguments. Use this for rich, " +
       "structured, NON-INTERACTIVE output — status reports, structured answers, key-value " +
       "summaries, three-column KPI/weather summary strips, tables, collapsible detail sections, local copy-to-clipboard buttons, and " +
       "safe navigation links. The card " +
@@ -198,16 +218,6 @@ export function createDisplayCardTool(params: Params): Array<{
     parameters: {
       type: "object",
       properties: {
-        channelId: {
-          type: "string",
-          description:
-            "Target channel (REQUIRED): 'group:<groupId>', 'user:<uid>', or an existing channelId. " +
-            "Use the channel_id from the event you are replying to.",
-        },
-        threadId: {
-          type: "string",
-          description: "Optional thread short_id when targeting a group topic.",
-        },
         title: {
           type: "string",
           description: "Optional bold title rendered at the top of the card.",
@@ -230,18 +240,30 @@ export function createDisplayCardTool(params: Params): Array<{
           items: { type: "object" },
         },
       },
-      required: ["blocks", "channelId"],
+      required: ["blocks"],
     },
     execute: async (
       _toolCallId: string,
       args: Record<string, unknown>,
     ): Promise<ToolResult> => {
       try {
+        if (deliveryContext?.channel !== CHANNEL_ID || !deliveryContext.to?.trim()) {
+          return err("trusted current Octo delivery context is unavailable");
+        }
         const validated = validateDisplayBlocks(args.blocks);
         const rawTitle = typeof args.title === "string" ? args.title : "";
 
-        // Account 解析 —— 复用 octo_management 的选择路径:agentAccountId 优先,单账号回退。
-        const requestedAccountId = agentAccountId
+        // Account 解析优先使用 runtime 当前 delivery route。agentAccountId 仅作为同一 run 的
+        // 次级可信上下文;模型没有 accountId 参数,不能跨账号选目标。
+        if (
+          deliveryContext.accountId &&
+          agentAccountId &&
+          deliveryContext.accountId.toLowerCase() !== agentAccountId.toLowerCase()
+        ) {
+          return err("trusted delivery account does not match the active agent account");
+        }
+        const requestedAccountId = deliveryContext.accountId
+          ?? agentAccountId
           ?? (listOctoAccountIds(cfg).length === 1 ? listOctoAccountIds(cfg)[0] : undefined);
         if (!requestedAccountId) return err("no configured Octo account available");
         const acct = resolveOctoAccount({ cfg, accountId: requestedAccountId });
@@ -272,12 +294,9 @@ export function createDisplayCardTool(params: Params): Array<{
         const body = (card.body as unknown[]) ?? [];
         if (body.length === 0) return err("card is empty (no valid blocks after validation)");
 
-        // 解析目标 channel。channelId 缺省时 agent 依赖 runtime 注入(此工具签名保留 channelId,
-        // 让 agent 显式给出;默认路由到当前会话由 channel.ts 侧的 outbound 完成,不在此层猜)。
-        const rawChannelId = typeof args.channelId === "string" ? args.channelId : "";
-        if (!rawChannelId.trim()) return err("channelId is required (use 'group:<id>' or 'user:<uid>')");
-        const rawThread = typeof args.threadId === "string" ? args.threadId : undefined;
-        const target = resolveOutboundOctoTarget(rawChannelId, rawThread);
+        // 只从 runtime-owned deliveryContext 解析当前会话。args 中即便夹带 channelId/threadId
+        // 也完全忽略,它们既不是路由来源,更不是授权凭据。
+        const target = resolveOutboundOctoTarget(deliveryContext.to, deliveryContext.threadId);
 
         // 身份**不**接受 agent 入参:OBO(persona-clone)是可信运行时/服务端授权语义,绝不能由不可信的
         // 模型输入指定,否则群可见卡片就成了 persona 冒充的 sink。与进度卡路径一致(OBO 一律跳过);
@@ -304,13 +323,11 @@ export function createDisplayCardTool(params: Params): Array<{
           account_id: requestedAccountId,
           channel_id: target.channelId,
           channel_type: target.channelType,
-          thread_id: rawThread,
+          thread_id: deliveryContext.threadId,
           client_msg_no: clientMsgNo,
           message_id: messageId,
           manifest: manifestForDebug(manifest),
           args: redactDebugValue({
-            channelId: rawChannelId,
-            threadId: rawThread,
             title: rawTitle,
             blocks: validated,
           }),

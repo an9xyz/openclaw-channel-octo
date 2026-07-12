@@ -22,6 +22,7 @@ import {
 } from "./accounts.js";
 import { sendCardMessage, getCardProfile } from "./api-fetch.js";
 import { generateClientMsgNo } from "./api-fetch.js";
+import { cardMaxDepth, cardPayloadBytes, countCardNodes } from "./card-limits.js";
 
 const mockCfg = { channels: { octo: { botToken: "t" } } } as never;
 type DisplayToolParams = Parameters<typeof createDisplayCardTool>[0] & {
@@ -59,7 +60,7 @@ function setupOk(): void {
   vi.mocked(sendCardMessage).mockResolvedValue({ message_id: "m1" } as never);
 }
 
-function getTool(deliveryContext: DisplayToolParams["deliveryContext"] = CURRENT_DELIVERY): {
+function getTool(deliveryContext: DisplayToolParams["deliveryContext"] | null = CURRENT_DELIVERY): {
   name: string;
   description: string;
   parameters: unknown;
@@ -68,7 +69,7 @@ function getTool(deliveryContext: DisplayToolParams["deliveryContext"] = CURRENT
   const tools = createDisplayCardTool({
     cfg: mockCfg,
     agentAccountId: "default",
-    deliveryContext,
+    deliveryContext: deliveryContext ?? undefined,
     messageChannel: deliveryContext?.channel,
   } as DisplayToolParams);
   expect(tools).toHaveLength(1);
@@ -187,7 +188,7 @@ describe("execute:发展示卡", () => {
   });
 
   it("缺少可信当前会话上下文时拒绝副作用,即使模型提供 channelId", async () => {
-    const t = getTool(undefined);
+    const t = getTool(null);
     const res = await t.execute("missing-route", {
       channelId: "group:g1",
       blocks: [{ type: "text", text: "must not send" }],
@@ -251,6 +252,44 @@ describe("execute:发展示卡", () => {
     // FactSet 降级为 TextBlock 罗列 —— 不会有 FactSet 元素
     expect(body.some((e) => e.type === "FactSet")).toBe(false);
     expect(body.some((e) => e.type === "TextBlock")).toBe(true);
+  });
+
+  it("manifest 明确 elements=[] → 无安全 fallback,拒绝发送", async () => {
+    vi.mocked(getCardProfile).mockResolvedValue({
+      available: true,
+      enabled: true,
+      profiles: ["octo/v1"],
+      card_version: "1.5",
+      elements: [],
+    } as never);
+    const res = await getTool().execute("empty-elements", {
+      blocks: [{ type: "text", text: "cannot render" }],
+    });
+    expect(sendCardMessage).not.toHaveBeenCalled();
+    expect(res.content[0].text).toMatch(/TextBlock|fallback/i);
+  });
+
+  it("manifest hard limits 贯穿到最终 sendCardMessage 信封", async () => {
+    vi.mocked(getCardProfile).mockResolvedValue({
+      available: true,
+      enabled: true,
+      profiles: ["octo/v1"],
+      card_version: "1.5",
+      elements: ["TextBlock", "RichTextBlock", "Container", "Table"],
+      limits: { max_nodes: 8, max_depth: 3, max_payload_bytes: 420 },
+    } as never);
+    await getTool().execute("limited", {
+      blocks: [{
+        type: "table",
+        rows: Array.from({ length: 8 }, (_, row) => ({
+          cells: [{ blocks: [{ type: "rich", segments: [{ text: `第${row}行🙂`.repeat(20), bold: true }] }] }],
+        })),
+      }],
+    });
+    const sent = vi.mocked(sendCardMessage).mock.calls[0][0];
+    expect(countCardNodes(sent.card)).toBeLessThanOrEqual(8);
+    expect(cardMaxDepth(sent.card)).toBeLessThanOrEqual(3);
+    expect(cardPayloadBytes(sent.card, sent.plain ?? "")).toBeLessThanOrEqual(420);
   });
 
   it("安全:agent 传入的 onBehalfOf 被忽略(不接受不可信身份,防 persona 冒充)", async () => {
