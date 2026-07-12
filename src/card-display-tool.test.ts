@@ -24,6 +24,16 @@ import { sendCardMessage, getCardProfile } from "./api-fetch.js";
 import { generateClientMsgNo } from "./api-fetch.js";
 
 const mockCfg = { channels: { octo: { botToken: "t" } } } as never;
+type DisplayToolParams = Parameters<typeof createDisplayCardTool>[0] & {
+  deliveryContext?: { channel?: string; to?: string; threadId?: string | number; accountId?: string };
+  messageChannel?: string;
+};
+
+const CURRENT_DELIVERY = {
+  channel: "octo",
+  to: "group:g1",
+  accountId: "default",
+} as const;
 
 function setupOk(): void {
   vi.mocked(generateClientMsgNo).mockReturnValue("client-msg-no-1");
@@ -49,13 +59,18 @@ function setupOk(): void {
   vi.mocked(sendCardMessage).mockResolvedValue({ message_id: "m1" } as never);
 }
 
-function getTool(): {
+function getTool(deliveryContext: DisplayToolParams["deliveryContext"] = CURRENT_DELIVERY): {
   name: string;
   description: string;
   parameters: unknown;
   execute: (id: string, args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }>; details?: unknown }>;
 } {
-  const tools = createDisplayCardTool({ cfg: mockCfg, agentAccountId: "default" });
+  const tools = createDisplayCardTool({
+    cfg: mockCfg,
+    agentAccountId: "default",
+    deliveryContext,
+    messageChannel: deliveryContext?.channel,
+  } as DisplayToolParams);
   expect(tools).toHaveLength(1);
   return tools[0];
 }
@@ -74,6 +89,15 @@ describe("createDisplayCardTool 骨架", () => {
 
   it("cfg 缺失 → 空数组", () => {
     expect(createDisplayCardTool({ cfg: undefined as never })).toEqual([]);
+  });
+
+  it("非 Octo 会话不注册展示卡工具", () => {
+    expect(createDisplayCardTool({
+      cfg: mockCfg,
+      agentAccountId: "default",
+      deliveryContext: { channel: "telegram", to: "group:other", accountId: "default" },
+      messageChannel: "telegram",
+    } as DisplayToolParams)).toEqual([]);
   });
 
   it("tool 元数据:name=octo_send_display_card,description 涵盖『展示型』『不回流』", () => {
@@ -111,6 +135,16 @@ describe("createDisplayCardTool 骨架", () => {
     // 点明零文本收尾会被判 incomplete
     expect(t.description).toMatch(/incomplete/i);
   });
+
+  it("schema 不暴露模型可控 channelId/threadId,只要求 blocks", () => {
+    const schema = getTool().parameters as {
+      properties: Record<string, unknown>;
+      required: string[];
+    };
+    expect(schema.properties.channelId).toBeUndefined();
+    expect(schema.properties.threadId).toBeUndefined();
+    expect(schema.required).toEqual(["blocks"]);
+  });
 });
 
 describe("execute:发展示卡", () => {
@@ -120,10 +154,10 @@ describe("execute:发展示卡", () => {
     setupOk();
   });
 
-  it("blocks + channelId → 调 sendCardMessage,payload.card 是 buildDisplayCard 产物,payload 无 actions(展示型)", async () => {
+  it("始终发送到可信当前会话,忽略模型伪造 channelId", async () => {
     const t = getTool();
     const res = await t.execute("call-1", {
-      channelId: "group:g1",
+      channelId: "group:attacker-controlled",
       title: "报告",
       blocks: [
         { type: "text", text: "任务完成" },
@@ -138,6 +172,28 @@ describe("execute:发展示卡", () => {
     // 展示型 → 顶层无 actions
     expect(call.card).not.toHaveProperty("actions");
     expect(res.content[0].text).toContain("m1"); // 返回 message_id
+  });
+
+  it("当前 thread 从可信 deliveryContext 合成 CommunityTopic 目标", async () => {
+    const t = getTool({ channel: "octo", to: "group:g1", threadId: "topic-7", accountId: "default" });
+    await t.execute("thread-call", {
+      channelId: "user:attacker",
+      threadId: "evil-topic",
+      blocks: [{ type: "text", text: "thread result" }],
+    });
+    const call = vi.mocked(sendCardMessage).mock.calls[0][0];
+    expect(call.channelId).toBe("g1____topic-7");
+    expect(call.channelType).toBe(5);
+  });
+
+  it("缺少可信当前会话上下文时拒绝副作用,即使模型提供 channelId", async () => {
+    const t = getTool(undefined);
+    const res = await t.execute("missing-route", {
+      channelId: "group:g1",
+      blocks: [{ type: "text", text: "must not send" }],
+    });
+    expect(sendCardMessage).not.toHaveBeenCalled();
+    expect(res.content[0].text).toMatch(/trusted|current.*conversation|delivery context/i);
   });
 
   it("blocks 空 + title 空 → 拒绝(不发)", async () => {
@@ -265,6 +321,8 @@ describe("execute:发展示卡", () => {
       expect(entry.message_id).toBe("m1");
       expect(entry.client_msg_no).toBe(sent.clientMsgNo);
       expect(entry.args.title).toBe("调试卡");
+      expect(entry.args.channelId).toBeUndefined();
+      expect(entry.args.threadId).toBeUndefined();
       expect(JSON.stringify(entry)).toContain("safe text");
       expect(JSON.stringify(entry)).not.toContain("sk-abcdefghijklmnop");
       expect(JSON.stringify(entry)).toContain("[redacted]");

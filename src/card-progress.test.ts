@@ -9,9 +9,9 @@ import {
 } from "./card-progress.js";
 
 /** 收集 registerCardProgress 注册的 hook handler。 */
-function makeApi(): { handlers: Record<string, (e: unknown, c: unknown) => void> } {
-  const handlers: Record<string, (e: unknown, c: unknown) => void> = {};
-  const api = { on: (name: string, fn: (e: unknown, c: unknown) => void) => { handlers[name] = fn; } };
+function makeApi(): { handlers: Record<string, (e: unknown, c: unknown) => unknown> } {
+  const handlers: Record<string, (e: unknown, c: unknown) => unknown> = {};
+  const api = { on: (name: string, fn: (e: unknown, c: unknown) => unknown) => { handlers[name] = fn; } };
   registerCardProgress(api as never);
   return { handlers };
 }
@@ -124,6 +124,22 @@ describe("card-progress 状态机 + hook + 节流", () => {
     const { handlers } = makeApi();
     setCardContext("s3", { apiUrl: "https://a3.test", botToken: "y", channelId: "g", channelType: ChannelType.Group });
     handlers.before_tool_call({ toolName: "read" }, { sessionKey: "s3" });
+    await vi.advanceTimersByTimeAsync(900);
+    expect(calls.some((c) => c.url.includes("/sendMessage"))).toBe(false);
+  });
+
+  it("D12 明确 elements=[] 时不回退 baseline,不发送无法渲染的卡", async () => {
+    const calls: Array<{ url: string }> = [];
+    global.fetch = vi.fn().mockImplementation(async (url: string) => {
+      calls.push({ url: String(url) });
+      if (String(url).includes("/card/profile")) {
+        return { ok: true, status: 200, json: async () => ({ enabled: true, profiles: ["octo/v1"], elements: [] }) };
+      }
+      return { ok: true, status: 200, text: async () => JSON.stringify({ message_id: "should-not-send" }) };
+    }) as unknown as typeof fetch;
+    const { handlers } = makeApi();
+    setCardContext("empty-elements", { apiUrl: "https://empty.test", botToken: "bf", channelId: "g", channelType: ChannelType.Group });
+    handlers.before_tool_call({ toolName: "read" }, { sessionKey: "empty-elements" });
     await vi.advanceTimersByTimeAsync(900);
     expect(calls.some((c) => c.url.includes("/sendMessage"))).toBe(false);
   });
@@ -710,24 +726,26 @@ describe("card-progress 状态机 + hook + 节流", () => {
     expect(send).toBeTruthy();
   });
 
-  it("§4.1 runId 守卫:超时 run 的迟到 hook 不落到同 sessionKey 的新 run 卡上", async () => {
+  it("runId 在 before_agent_run 预绑定:旧 run 迟到 hook 先到也不能抢占新 entry", async () => {
     const { fn, calls } = mockFetch();
     global.fetch = fn as unknown as typeof fetch;
     const { handlers } = makeApi();
     const target = { apiUrl: "https://rg.test", botToken: "bf", channelId: "g", channelType: ChannelType.Group };
 
-    // run A 登记并跑一步(runId=A)→ entry 认领给 A;随后超时收尾
+    // run A 在任何 model/tool 事件前由 before_agent_run 绑定,随后跑一步并超时收尾。
     setCardContext("rg1", target);
+    expect(handlers.before_agent_run({}, { sessionKey: "rg1", runId: "A" })).toEqual({ outcome: "pass" });
     handlers.before_tool_call({ toolName: "read", params: { path: "/a" }, toolCallId: "a1" }, { sessionKey: "rg1", runId: "A" });
     await vi.advanceTimersByTimeAsync(900);
     await finalizeCard("rg1", { success: false });
 
-    // 同 sessionKey 的 run B 登记(fresh entry);B 自己的 hook(runId=B)先到 → 认领 entry
+    // 同 sessionKey 的 run B 登记 fresh entry。A 的迟到 hook 在 B 的首个工具事件之前到达，
+    // 但 entry 尚未由 before_agent_run 绑定时不得 first-hook-wins。
     setCardContext("rg1", target);
-    handlers.before_tool_call({ toolName: "write", params: { path: "/b" }, toolCallId: "b1" }, { sessionKey: "rg1", runId: "B" });
-    // run A 的迟到 hook(runId=A)—— runId 与属主 B 不符,必须被丢弃
     handlers.before_tool_call({ toolName: "exec", params: { command: "echo x" }, toolCallId: "a2" }, { sessionKey: "rg1", runId: "A" });
     handlers.after_tool_call({ toolName: "exec", toolCallId: "a2", durationMs: 9 }, { sessionKey: "rg1", runId: "A" });
+    expect(handlers.before_agent_run({}, { sessionKey: "rg1", runId: "B" })).toEqual({ outcome: "pass" });
+    handlers.before_tool_call({ toolName: "write", params: { path: "/b" }, toolCallId: "b1" }, { sessionKey: "rg1", runId: "B" });
     await vi.advanceTimersByTimeAsync(900);
 
     // 聚合所有发出去的帧(send payload + edit content_edit)的卡片文本
@@ -742,5 +760,36 @@ describe("card-progress 状态机 + hook + 节流", () => {
       .join(" || ");
     expect(allText).toContain("写入文件"); // B 自己的步骤渲染出来了
     expect(allText).not.toContain("执行命令"); // A 迟到的 exec 步骤从未进入任何帧
+  });
+
+  it("entry 等待 profile 时被新身份替换,恢复后不得向旧频道发送占位卡", async () => {
+    const profileReached = makeDeferred();
+    const releaseProfile = makeDeferred();
+    const calls: Array<{ url: string; body?: Record<string, unknown> }> = [];
+    global.fetch = vi.fn().mockImplementation(async (url: string, init?: { body?: string }) => {
+      calls.push({ url: String(url), body: init?.body ? JSON.parse(init.body) : undefined });
+      if (String(url).includes("/card/profile")) {
+        profileReached.resolve();
+        await releaseProfile.promise;
+        return { ok: true, status: 200, json: async () => ({ enabled: true, profiles: ["octo/v1"] }) };
+      }
+      if (String(url).includes("/sendMessage")) {
+        return { ok: true, status: 200, text: async () => JSON.stringify({ message_id: "stale" }) };
+      }
+      return { ok: true, status: 200, text: async () => "" };
+    }) as unknown as typeof fetch;
+    const { handlers } = makeApi();
+
+    setCardContext("collision", { apiUrl: "https://race.test", botToken: "token-a", channelId: "group-a", channelType: ChannelType.Group });
+    handlers.before_tool_call({ toolName: "read", toolCallId: "a1" }, { sessionKey: "collision" });
+    await vi.advanceTimersByTimeAsync(900);
+    await profileReached.promise;
+
+    setCardContext("collision", { apiUrl: "https://race.test", botToken: "token-b", channelId: "group-b", channelType: ChannelType.Group });
+    releaseProfile.resolve();
+    await vi.runAllTimersAsync();
+    await Promise.resolve();
+
+    expect(calls.some((c) => c.url.includes("/sendMessage"))).toBe(false);
   });
 });

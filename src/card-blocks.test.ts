@@ -703,6 +703,30 @@ describe("copy block(Action.CopyToClipboard 本地动作)", () => {
 });
 
 describe("组合与边界", () => {
+  function countNodes(value: unknown, root = true): number {
+    if (Array.isArray(value)) return value.reduce((sum, item) => sum + countNodes(item, false), 0);
+    if (!value || typeof value !== "object") return 0;
+    return (root ? 0 : 1) + Object.values(value as Record<string, unknown>)
+      .reduce<number>((sum, item) => sum + countNodes(item, false), 0);
+  }
+
+  function maxDepth(value: unknown, depth = 0): number {
+    if (Array.isArray(value)) return value.reduce((max, item) => Math.max(max, maxDepth(item, depth)), depth);
+    if (!value || typeof value !== "object") return depth;
+    return Object.values(value as Record<string, unknown>)
+      .reduce<number>((max, item) => Math.max(max, maxDepth(item, depth + 1)), depth);
+  }
+
+  function envelopeBytes(card: Record<string, unknown>, plain: string): number {
+    return new TextEncoder().encode(JSON.stringify({
+      type: 17,
+      profile: "octo/v1",
+      card_version: "1.5",
+      card,
+      plain,
+    })).byteLength;
+  }
+
   it("多种 block 依序 + title,plain 逐行", () => {
     const blocks: DisplayBlock[] = [
       { type: "heading", text: "报告" },
@@ -742,6 +766,54 @@ describe("组合与边界", () => {
     expect(plain).not.toContain("行2");
     expect(plain).not.toContain("行9");
     expect(plain).toContain("行0");
+  });
+
+  it("max_nodes 递归统计嵌套 Table/Column/Cell/inline,最终输出不超预算", () => {
+    const caps = {
+      ...FULL_CAPS,
+      maxNodes: 8,
+    };
+    const { card } = buildDisplayCard({
+      blocks: [{
+        type: "table",
+        rows: Array.from({ length: 4 }, (_, row) => ({
+          cells: Array.from({ length: 3 }, (_, col) => ({
+            blocks: [{ type: "rich", segments: [{ text: `${row}-${col}`, bold: true }, { text: "value" }] }],
+          })),
+        })),
+      }],
+      caps,
+    });
+    expect(countNodes(card)).toBeLessThanOrEqual(caps.maxNodes);
+  });
+
+  it("max_depth 对渲染后的 Adaptive Card 树生效,不是只限制输入 block 深度", () => {
+    const caps = {
+      ...FULL_CAPS,
+      maxDepth: 3,
+    } as CardCaps & { maxDepth: number };
+    const { card } = buildDisplayCard({
+      blocks: [{
+        type: "group",
+        blocks: [{ type: "group", blocks: [{ type: "text", text: "deep" }] }],
+      }],
+      caps,
+    });
+    expect(maxDepth(card)).toBeLessThanOrEqual(caps.maxDepth);
+  });
+
+  it("max_payload_bytes 按完整 type-17 信封的 UTF-8 字节裁剪", () => {
+    const caps = {
+      elements: new Set(["TextBlock"]),
+      maxPayloadBytes: 360,
+    } as CardCaps & { maxPayloadBytes: number };
+    const { card, plain } = buildDisplayCard({
+      title: "UTF-8",
+      blocks: [{ type: "text", text: "汉字🙂".repeat(300) }],
+      caps,
+    });
+    expect(envelopeBytes(card, plain)).toBeLessThanOrEqual(caps.maxPayloadBytes);
+    expect((card.body as unknown[]).length).toBeGreaterThan(0);
   });
 });
 

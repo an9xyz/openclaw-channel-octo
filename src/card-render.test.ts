@@ -614,7 +614,7 @@ describe("cardSupports / CardCaps 渲染协商(波 C)", () => {
     expect(expandBtn.isVisible).toBe(false);
   });
 
-  it("未 advertise ToggleVisibility → 保持 agent_progress_v1 根结构但不插入按钮列", () => {
+  it("缺 ColumnSet → 降级普通平面卡,不伪装 agent_progress_v1", () => {
     const caps = { elements: new Set(["TextBlock", "RichTextBlock", "Container", "ActionSet"]) };
     const { card } = renderProgressCard(
       {
@@ -627,16 +627,18 @@ describe("cardSupports / CardCaps 渲染协商(波 C)", () => {
       caps,
     );
     const body = card.body as Array<Record<string, unknown>>;
-    expect(body.some((b) => b.type === "ActionSet")).toBe(false);
-    const header = body[0] as { columns: Array<{ items: unknown[] }> };
-    expect(header.columns).toHaveLength(1);
-    expect(body[1]).toMatchObject({ type: "Container", id: "timeline_detail", isVisible: true });
+    expect(body.every((b) => b.type === "TextBlock" || b.type === "RichTextBlock" || b.type === "Container")).toBe(true);
+    expect(body.some((b) => b.type === "ColumnSet")).toBe(false);
+    expect(card.metadata).toBeUndefined();
   });
 
-  it("advertise 了 elements 但既无 RichTextBlock 也无 ColumnSet → detail TextBlock 降级", () => {
+  it("只支持 TextBlock → 整张进度卡纯 TextBlock 降级且无布局 metadata", () => {
     const caps = { elements: new Set(["TextBlock", "FactSet"]) };
     const { card } = renderProgressCard({ phase: "tool", steps: [{ tool: "read", status: "done" }] }, caps);
-    expect(progressDetailItems(card)[0].type).toBe("TextBlock");
+    const body = card.body as Array<Record<string, unknown>>;
+    expect(body.length).toBeGreaterThan(0);
+    expect(body.every((item) => item.type === "TextBlock")).toBe(true);
+    expect(card.metadata).toBeUndefined();
   });
 
   it("caps.maxNodes 权威收紧可见步数(比本地上限更严)", () => {
