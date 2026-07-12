@@ -55,6 +55,16 @@ suite("card E2E（真实 octo-server）", () => {
       { tool: "exec", status: "done" as const, summary: "ls -la", durationMs: 220 },
     ];
     const { card, plain } = renderProgressCard({ phase: "tool", steps }, caps);
+    const done = renderProgressCard({ phase: "done", steps, elapsedMs: 1600 }, caps);
+    if (m.actions?.includes("Action.ToggleVisibility")) {
+      const doneJson = JSON.stringify(done.card);
+      expect(doneJson).toContain("Action.ToggleVisibility");
+      expect(doneJson).toContain("展开推理");
+      expect(doneJson).toContain("收起推理");
+      expect(done.card.body).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: "timeline_detail", isVisible: false }),
+      ]));
+    }
     // eslint-disable-next-line no-console -- e2e 联调观测
     console.log("[e2e] send card =", JSON.stringify(card));
     const res = await sendCardMessage({
@@ -69,7 +79,6 @@ suite("card E2E（真实 octo-server）", () => {
     });
 
     // 终态帧（进修订历史）
-    const done = renderProgressCard({ phase: "done", steps, elapsedMs: 1600 }, caps);
     await editCardMessage({
       apiUrl: API!, botToken: TOKEN!, messageId: res!.message_id!, channelId: CHANNEL!,
       channelType: CHANNEL_TYPE, card: done.card, plain: done.plain,
