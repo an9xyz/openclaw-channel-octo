@@ -710,11 +710,12 @@ describe("组合与边界", () => {
       .reduce<number>((sum, item) => sum + countNodes(item, false), 0);
   }
 
-  function maxDepth(value: unknown, depth = 0): number {
-    if (Array.isArray(value)) return value.reduce((max, item) => Math.max(max, maxDepth(item, depth)), depth);
+  function maxDepth(value: unknown, depth = 0, root = true): number {
+    if (Array.isArray(value)) return value.reduce((max, item) => Math.max(max, maxDepth(item, depth, root)), depth);
     if (!value || typeof value !== "object") return depth;
+    const currentDepth = root ? depth : depth + 1;
     return Object.values(value as Record<string, unknown>)
-      .reduce<number>((max, item) => Math.max(max, maxDepth(item, depth + 1)), depth);
+      .reduce<number>((max, item) => Math.max(max, maxDepth(item, currentDepth, false)), currentDepth);
   }
 
   function envelopeBytes(card: Record<string, unknown>, plain: string): number {
@@ -790,7 +791,7 @@ describe("组合与边界", () => {
   it("max_depth 对渲染后的 Adaptive Card 树生效,不是只限制输入 block 深度", () => {
     const caps = {
       ...FULL_CAPS,
-      maxDepth: 3,
+      maxDepth: 2,
     } as CardCaps & { maxDepth: number };
     const { card } = buildDisplayCard({
       blocks: [{

@@ -5,6 +5,7 @@ import {
   setCardContext,
   finalizeCard,
   registerCardProgress,
+  bindCardRun,
   _resetCardProgressForTests,
 } from "./card-progress.js";
 
@@ -760,6 +761,44 @@ describe("card-progress 状态机 + hook + 节流", () => {
       .join(" || ");
     expect(allText).toContain("写入文件"); // B 自己的步骤渲染出来了
     expect(allText).not.toContain("执行命令"); // A 迟到的 exec 步骤从未进入任何帧
+  });
+
+  it("bindCardRun 缺标识/无 entry/skip 时 no-op,且既有 owner 不可被覆盖", async () => {
+    const { fn, calls } = mockFetch();
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi();
+
+    bindCardRun(undefined, "run-a");
+    bindCardRun("missing", undefined);
+    bindCardRun("missing", "run-a");
+    setCardContext("skipped", {
+      apiUrl: "https://owner.test",
+      botToken: "bf",
+      channelId: "g",
+      channelType: ChannelType.Group,
+      onBehalfOf: "grantor",
+    });
+    bindCardRun("skipped", "run-a");
+
+    setCardContext("owned", {
+      apiUrl: "https://owner.test",
+      botToken: "bf",
+      channelId: "g",
+      channelType: ChannelType.Group,
+    });
+    bindCardRun("owned", "run-a");
+    bindCardRun("owned", "run-b");
+    handlers.before_tool_call({ toolName: "exec", toolCallId: "b1" }, { sessionKey: "owned", runId: "run-b" });
+    handlers.before_tool_call({ toolName: "read", toolCallId: "a1" }, { sessionKey: "owned", runId: "run-a" });
+    await vi.advanceTimersByTimeAsync(900);
+
+    const send = calls.find((c) => c.url.includes("/sendMessage"));
+    expect(send).toBeTruthy();
+    const rendered = progressCardText((send!.body!.payload as {
+      card: { body: Array<Record<string, unknown>> };
+    }).card);
+    expect(rendered).toContain("读取文件");
+    expect(rendered).not.toContain("执行命令");
   });
 
   it("entry 等待 profile 时被新身份替换,恢复后不得向旧频道发送占位卡", async () => {

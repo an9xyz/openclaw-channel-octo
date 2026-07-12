@@ -27,14 +27,15 @@ export function countCardNodes(value: unknown, root = true): number {
     .reduce<number>((sum, item) => sum + countCardNodes(item, false), 0);
 }
 
-/** Object nesting depth; arrays are transparent containers, matching the recursive walker. */
-export function cardMaxDepth(value: unknown, depth = 0): number {
+/** Object nesting depth; root AdaptiveCard is depth 0 and arrays are transparent. */
+export function cardMaxDepth(value: unknown, depth = 0, root = true): number {
   if (Array.isArray(value)) {
-    return value.reduce((max, item) => Math.max(max, cardMaxDepth(item, depth)), depth);
+    return value.reduce((max, item) => Math.max(max, cardMaxDepth(item, depth, root)), depth);
   }
   if (!value || typeof value !== "object") return depth;
+  const currentDepth = root ? depth : depth + 1;
   return Object.values(value as Record<string, unknown>)
-    .reduce<number>((max, item) => Math.max(max, cardMaxDepth(item, depth + 1)), depth);
+    .reduce<number>((max, item) => Math.max(max, cardMaxDepth(item, currentDepth, false)), currentDepth);
 }
 
 /** UTF-8 size of the complete type-17 payload envelope, not just card JSON. */

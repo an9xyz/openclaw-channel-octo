@@ -175,6 +175,15 @@ describe("execute:发展示卡", () => {
     expect(res.content[0].text).toContain("m1"); // 返回 message_id
   });
 
+  it("服务端成功响应缺 message_id 时保持稳定空值结果", async () => {
+    vi.mocked(sendCardMessage).mockResolvedValue({} as never);
+    const res = await getTool().execute("missing-message-id", {
+      blocks: [{ type: "text", text: "sent without id" }],
+    });
+    expect(sendCardMessage).toHaveBeenCalledTimes(1);
+    expect(res.details).toMatchObject({ message_id: "" });
+  });
+
   it("当前 thread 从可信 deliveryContext 合成 CommunityTopic 目标", async () => {
     const t = getTool({ channel: "octo", to: "group:g1", threadId: "topic-7", accountId: "default" });
     await t.execute("thread-call", {
@@ -213,6 +222,20 @@ describe("execute:发展示卡", () => {
     expect(res.content[0].text.toLowerCase()).toMatch(/error|not (available|enabled)|unavailable/);
   });
 
+  it("gate available:false + 显式 env opt-in → 按 legacy baseline 发送", async () => {
+    vi.mocked(getCardProfile).mockResolvedValue({ available: false, enabled: false } as never);
+    process.env.OCTO_CARD_MESSAGE_ENABLED = "1";
+    try {
+      const res = await getTool().execute("legacy-opt-in", {
+        blocks: [{ type: "text", text: "legacy deployment" }],
+      });
+      expect(sendCardMessage).toHaveBeenCalledTimes(1);
+      expect(res.content[0].text).toContain("sent display card");
+    } finally {
+      delete process.env.OCTO_CARD_MESSAGE_ENABLED;
+    }
+  });
+
   it("gate enabled:false → 拒绝", async () => {
     vi.mocked(getCardProfile).mockResolvedValue({ available: true, enabled: false } as never);
     const t = getTool();
@@ -232,6 +255,95 @@ describe("execute:发展示卡", () => {
     const res = await t.execute("c5", { channelId: "group:g1", title: "T", blocks: [{ type: "text", text: "a" }] });
     expect(sendCardMessage).not.toHaveBeenCalled();
     expect(res.content[0].text.toLowerCase()).toMatch(/profile|不兼容/);
+  });
+
+  it("card_version 不兼容 → fail closed", async () => {
+    vi.mocked(getCardProfile).mockResolvedValue({
+      available: true,
+      enabled: true,
+      profiles: ["octo/v1"],
+      card_version: "1.4",
+    } as never);
+    const res = await getTool().execute("bad-version", {
+      blocks: [{ type: "text", text: "must not send" }],
+    });
+    expect(sendCardMessage).not.toHaveBeenCalled();
+    expect(res.content[0].text).toMatch(/card_version|compatible/i);
+  });
+
+  it("无 accountId 时仅允许唯一配置账号回退；多账号歧义则拒绝", async () => {
+    const single = createDisplayCardTool({
+      cfg: mockCfg,
+      deliveryContext: { channel: "octo", to: "group:g1" },
+      messageChannel: "octo",
+    } as DisplayToolParams)[0];
+    await single.execute("single-account", { blocks: [{ type: "text", text: "ok" }] });
+    expect(sendCardMessage).toHaveBeenCalledTimes(1);
+
+    vi.mocked(sendCardMessage).mockClear();
+    vi.mocked(listOctoAccountIds).mockReturnValue(["a", "b"]);
+    const ambiguous = createDisplayCardTool({
+      cfg: mockCfg,
+      deliveryContext: { channel: "octo", to: "group:g1" },
+      messageChannel: "octo",
+    } as DisplayToolParams)[0];
+    const res = await ambiguous.execute("ambiguous-account", {
+      blocks: [{ type: "text", text: "must not send" }],
+    });
+    expect(sendCardMessage).not.toHaveBeenCalled();
+    expect(res.content[0].text).toMatch(/no configured Octo account/i);
+  });
+
+  it("可信 delivery account 与 active agent 不一致时拒绝", async () => {
+    const res = await getTool({
+      channel: "octo",
+      to: "group:g1",
+      accountId: "other",
+    }).execute("account-mismatch", { blocks: [{ type: "text", text: "must not send" }] });
+    expect(sendCardMessage).not.toHaveBeenCalled();
+    expect(res.content[0].text).toMatch(/account.*does not match/i);
+  });
+
+  it("目标账号未完整配置或缺 apiUrl 时拒绝", async () => {
+    vi.mocked(listOctoAccountIds).mockReturnValue(["default", "bad"]);
+    vi.mocked(resolveOctoAccount).mockImplementation(({ accountId }: { accountId?: string }) => ({
+      accountId: accountId ?? "default",
+      enabled: accountId !== "bad",
+      configured: accountId !== "bad",
+      config: {
+        botToken: accountId === "bad" ? "" : "tok",
+        apiUrl: "https://api.test",
+      },
+    }) as never);
+    const bad = createDisplayCardTool({
+      cfg: mockCfg,
+      agentAccountId: "bad",
+      deliveryContext: { channel: "octo", to: "group:g1", accountId: "bad" },
+    } as DisplayToolParams)[0];
+    const badResult = await bad.execute("bad-account", { blocks: [{ type: "text", text: "x" }] });
+    expect(badResult.content[0].text).toMatch(/not fully configured/i);
+
+    setupOk();
+    vi.mocked(resolveOctoAccount).mockReturnValue({
+      accountId: "default",
+      enabled: true,
+      configured: true,
+      config: { botToken: "tok", apiUrl: "" },
+    } as never);
+    const missingUrl = await getTool().execute("missing-url", { blocks: [{ type: "text", text: "x" }] });
+    expect(missingUrl.content[0].text).toMatch(/apiUrl not configured/i);
+    expect(sendCardMessage).not.toHaveBeenCalled();
+  });
+
+  it("profile probe 与 send 的非 Error 异常都转成稳定工具错误", async () => {
+    vi.mocked(getCardProfile).mockRejectedValue("profile unavailable");
+    const probe = await getTool().execute("probe-failure", { blocks: [{ type: "text", text: "x" }] });
+    expect(probe.content[0].text).toContain("profile unavailable");
+
+    setupOk();
+    vi.mocked(sendCardMessage).mockRejectedValue({ reason: "send rejected" });
+    const send = await getTool().execute("send-failure", { blocks: [{ type: "text", text: "x" }] });
+    expect(send.content[0].text).toContain("[object Object]");
   });
 
   it("能力协商生效:advertise 不含 FactSet → 卡里 FactSet 被降级(不 400,不拒绝)", async () => {
