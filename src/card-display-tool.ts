@@ -171,9 +171,10 @@ export function createDisplayCardTool(params: Params): Array<{
       "facts / columns / table / link / group / collapsible / copy); the server's advertised element/action set is negotiated " +
       "automatically and unsupported types degrade to plain text — you never need to check " +
       "compatibility yourself. " +
-      "For visual emphasis, wrap key sections in a `group` block with `style: 'good' | " +
-      "'warning' | 'attention' | 'emphasis'` (tinted background — the client renders them as green / " +
-      "amber / pink zones); highlight important tokens with `rich` segment colors instead " +
+      "For visual emphasis, use `group` block styles sparingly: `emphasis` for neutral callouts, " +
+      "`good` / `warning` / `attention` only for real success, pending, or risk states. Do not wrap " +
+      "ordinary information cards, weather summaries, or copy buttons in a large green/amber/pink block; " +
+      "highlight important tokens with `rich` segment colors instead " +
       "of recoloring whole lines. Design for IM: the visible first screen should be a " +
       "3-6 line summary, not a log dump. Prefer ONE title, one compact process summary, " +
       "answer summary content, and folded details. Put 2-3 `reasoning_sections` inside " +
