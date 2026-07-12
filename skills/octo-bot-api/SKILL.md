@@ -157,15 +157,16 @@ When replying, always use the `channel_id` and `channel_type` from the received 
 
 Do not overuse card messages. Plain text is the default. Use cards only when structure materially improves comprehension, such as weather, status, lists, comparisons, or detail fields; use plain text for ordinary chat, short answers, and follow-up replies.
 
-Card details are intentionally kept out of this main skill file. Before sending or editing card messages, using `octo_send_display_card`, designing normal information cards, or touching agent progress cards, read [references/card-messages.md](references/card-messages.md). It contains the octo/v1/v2 contract, feature detection, DisplayBlock schema, normal-card visual rules, agent progress layout, transient edit envelope, and security guardrails.
+Interactive-card details are intentionally kept out of this main skill file. Before sending or editing `payload.type=17` messages, using `octo_send_display_card`, designing normal information cards, or touching agent progress cards, read [references/interactive-card-messages.md](references/interactive-card-messages.md). It contains the octo/v1/v2 boundary, branch availability, feature detection, DisplayBlock schema, normal-card visual rules, agent progress layout, transient edit envelope, and security guardrails.
 
 Hard rules to remember even before opening the reference:
 
 - Display cards (`payload.type=17`, `profile="octo/v1"`) are structured, non-callback output. Submit/click-back cards use `octo/v2` and require event polling.
-- Feature-detect with `GET /v1/bot/card/profile`; if cards are unavailable or disabled, fall back to text.
+- Feature-detect with `GET /v1/bot/card/profile`. `available:true, enabled:false` is an explicit disable; `available:false` is a legacy-endpoint absence and may use the adapter compatibility switch documented in the reference. Otherwise fall back to text.
 - Keep one title, a compact first screen, truthful `plain`, and no raw logs or secrets.
 - Normal information cards should be quiet IM content: avoid large `good/warning/attention` blocks, excessive Bolder headings, and strong CTA-looking copy buttons.
-- Agent progress cards use `metadata.octo_layout = "agent_progress_v1"` and the fixed `[ColumnSet, Container#timeline_detail]` top-level body shape described in the reference.
+- Agent progress cards use `metadata.octo_layout = "agent_progress_v1"` with `[ColumnSet, Container#timeline_detail]` only when those elements are supported. The reference defines the flat-card fallback.
+- `octo/v2` callback cards and `octo_send_card` are not delivered by the current P1 branch; their implementation lives on the separate local `feat/card-interaction-c2` branch.
 
 ## Real-time Features
 

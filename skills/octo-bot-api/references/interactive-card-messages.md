@@ -1,6 +1,13 @@
-# Card Messages Reference
+# Interactive Card Messages Reference
 
-Use this reference when sending or editing `payload.type=17` card messages, using `octo_send_display_card`, designing normal information cards, or working on agent progress cards.
+Use this reference when sending or editing `payload.type=17` InteractiveCard messages, using `octo_send_display_card`, designing normal information cards, or working on agent progress cards. Content type 17 is unrelated to the legacy contact/name card at `MessageType.Card = 7`.
+
+## Scope And Branch Availability
+
+- `octo/v1` display cards and agent progress cards are implemented on `feat/interactive-card-progress`, including `octo_send_display_card`, send/edit primitives, negotiated rendering, and text fallback.
+- `octo/v2` submit-interactive cards are a separate delivery line. Their adapter implementation lives on the local `feat/card-interaction-c2` branch and is not part of `feat/interactive-card-progress`.
+- On the current P1 branch, `octo_send_card`, `card_action` polling, and callback-driven agent continuation are unavailable. Mentions of `octo/v2` below describe the protocol boundary, not a tool shipped by this branch.
+- The local E2E SOP and callback design under `.context/` are handoff material. They are gitignored and do not ship with the plugin.
 
 ## When To Use Cards
 
@@ -20,6 +27,7 @@ Important profile fields:
 
 ```jsonc
 {
+  "available": true,
   "enabled": true,
   "card_version": "1.5",
   "profiles": ["octo/v1", "octo/v2"],
@@ -30,11 +38,12 @@ Important profile fields:
 }
 ```
 
-- If `available` is false or `enabled` is false, do not send cards.
-- `elements` / `inputs` / `actions` are authoritative. Missing support can produce server 400.
+- `available:true` with `enabled:false` is an explicit server-side disable. Do not send cards.
+- `available:false` means the profile endpoint is not deployed, not that card delivery is explicitly disabled. P1 compatibility code may send only when `OCTO_CARD_MESSAGE_ENABLED=1`; otherwise fall back to text.
+- `elements` / `inputs` / `actions` are authoritative when present, including an explicitly empty array. Missing support can produce server 400.
 - `elements` lists renderable card elements such as `ColumnSet` and `Table`; it does not need to list child schemas such as `Column`, `TableRow`, or `TableCell`.
 - Old deployments may omit capability lists; fall back to `TextBlock` / `Container` / `ColumnSet` / `FactSet` / `Image`, and no actions.
-- Respect `limits.max_nodes` and `max_depth`.
+- Respect `limits.max_nodes`, `limits.max_depth`, and `limits.max_payload_bytes` recursively. A top-level `body.length` check is not sufficient for nested containers, tables, rich-text inlines, or long UTF-8 text.
 
 ## Canonical Structure
 
@@ -119,8 +128,8 @@ Normal information cards should look like quiet IM content, not status banners.
 
 | Block | Renders to | Purpose | Degrades to |
 |---|---|---|---|
-| `heading` (text, size?) | Bolder TextBlock | Section title | Always available |
-| `text` (text) | TextBlock | Body paragraph | Always available |
+| `heading` (text, size?) | Bolder TextBlock | Section title | Requires `TextBlock`; otherwise no safe card fallback |
+| `text` (text) | TextBlock | Body paragraph | Requires `TextBlock`; otherwise no safe card fallback |
 | `rich` (segments[]) | RichTextBlock + TextRun inlines (`bold`, `color`, `fontType:"Monospace"`) | One-line multi-style text | TextBlock, segments joined |
 | `facts` (items[]) | FactSet | Key-value rows | TextBlock `label:value` rows |
 | `columns` (columns[].blocks[]) | ColumnSet | Summary/KPI strip | One TextBlock line joined with pipes |
@@ -141,7 +150,7 @@ Capability rules:
 
 ## Agent Progress Cards
 
-Agent response progress cards use a separate renderer contract:
+When `ColumnSet` and `Container` are advertised, agent response progress cards use the enhanced renderer contract:
 
 ```jsonc
 {
@@ -161,7 +170,8 @@ Agent response progress cards use a separate renderer contract:
 Rules:
 
 - Renderers match known `metadata.octo_layout` values and treat unknown values as ordinary Adaptive Cards.
-- Top-level `body` must be `[ColumnSet, Container#timeline_detail]`.
+- A card marked `metadata.octo_layout="agent_progress_v1"` must have top-level `body = [ColumnSet, Container#timeline_detail]`.
+- Producers must not emit that marked layout when `ColumnSet` or `Container` is unsupported. Degrade to an ordinary flat `TextBlock` card without `agent_progress_v1` metadata; if `TextBlock` is also unsupported or the minimum card exceeds a negotiated hard limit, skip the progress card and keep the normal text reply.
 - Running cards keep `timeline_detail.isVisible: true`.
 - Terminal cards (`done` / `error`) default collapsed when toggle is available: `timeline_detail:false`, `btn_collapse:false`, `btn_expand:true`.
 - Do not set `style` on `timeline_detail`. Put `style: "warning"` / `"attention"` only on child step containers.
@@ -207,3 +217,4 @@ POST /v1/bot/message/edit
 - Hidden collapsible content and copy text are still stored in card JSON. Treat them as public group-visible data.
 - `plain` is what non-card clients and history search see. Keep it truthful and do not include anything absent from the card.
 - `buildDisplayCard` degrades embedded URLs to `scheme://<registrable-domain>` and drops blocks matching known secret shapes; hand-written clients must implement equivalent guardrails.
+- Agent tools that reply to the current conversation must derive the target from trusted runtime delivery context. A model-supplied `channelId`, group id, uid, or thread id is routing input, not authorization, and must not enable cross-conversation sends.
