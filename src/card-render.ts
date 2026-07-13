@@ -81,6 +81,7 @@ const TOOL_META: Record<string, { icon: string; label: string }> = {
   ls: { icon: "📂", label: "浏览目录" },
   fetch: { icon: "🌐", label: "抓取网页" },
   web_search: { icon: "🌐", label: "联网搜索" },
+  update_plan: { icon: "🗺️", label: "更新计划" },
   octo_management: { icon: "💬", label: "Octo 操作" },
 };
 
