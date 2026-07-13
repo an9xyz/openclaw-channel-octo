@@ -335,7 +335,7 @@ describe("inbound mention-gate 免@ relaxation (human-only)", () => {
     expect(sends.length).toBeGreaterThan(0);
   });
 
-  it("§4.2: 最终答复引用用户触发消息(Q→A)—— payload.reply.message_id === 触发消息 id", async () => {
+  it("最终答复不自动引用用户触发消息,避免客户端显示无法解析的空引用", async () => {
     installRuntimeStub();
     const { sends } = installFetchStub();
     const msg = makeTextMessage(HUMAN_UID, "@SelfBot please answer");
@@ -352,10 +352,11 @@ describe("inbound mention-gate 免@ relaxation (human-only)", () => {
       groupCacheTimestamps: new Map(),
     });
 
-    // 发出去的最终答复(content="hi there")必须 reply 到触发消息 m1
+    // 最终文本仍正常发送，但不得仅因它属于 inbound turn 就制造 reply 关系。
+    // 显式 reply-mode 由 channel.ts 的 ctx.replyToId 路径单独处理。
     const reply = sends.find((s: any) => s?.payload?.content === "hi there");
     expect(reply).toBeTruthy();
-    expect(reply.payload.reply).toEqual({ message_id: "m1" });
+    expect(reply.payload.reply).toBeUndefined();
   });
 
   it("does NOT reply to a CROSS-PROCESS bot (robot:true in member list, NOT registerKnownBot'd)", async () => {
