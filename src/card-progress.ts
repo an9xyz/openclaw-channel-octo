@@ -14,7 +14,8 @@
  */
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { ChannelType, CARD_PROFILE, CARD_VERSION } from "./types.js";
-import { sendCardMessage, editCardMessage, getCardProfile, httpStatusFromApiFetchError, type CardProfileManifest } from "./api-fetch.js";
+import { sendCardMessage, editCardMessage, getCardProfile, httpStatusFromApiFetchError } from "./api-fetch.js";
+import { deriveCardCaps } from "./card-caps.js";
 import { renderProgressCard, summarizeToolParams, type CardStep, type CardProgressState, type CardCaps } from "./card-render.js";
 import { DISPLAY_CARD_TOOL_NAME } from "./constants.js";
 
@@ -68,21 +69,6 @@ const gateCache = new Map<string, boolean>();
  * 走保守默认(等同今天行为)。
  */
 const capsCache = new Map<string, CardCaps>();
-
-/** manifest → 渲染 caps。显式空 capability 数组同样是权威结果,不得回退 baseline。 */
-function deriveCaps(m: CardProfileManifest): CardCaps {
-  const caps: CardCaps = {};
-  if (Array.isArray(m.elements)) caps.elements = new Set(m.elements);
-  if (Array.isArray(m.inputs)) caps.inputs = new Set(m.inputs);
-  if (Array.isArray(m.actions)) caps.actions = new Set(m.actions);
-  const maxNodes = m.limits?.max_nodes;
-  if (typeof maxNodes === "number" && maxNodes > 0) caps.maxNodes = maxNodes;
-  const maxDepth = m.limits?.max_depth;
-  if (typeof maxDepth === "number" && maxDepth > 0) caps.maxDepth = maxDepth;
-  const maxPayloadBytes = m.limits?.max_payload_bytes;
-  if (typeof maxPayloadBytes === "number" && maxPayloadBytes > 0) caps.maxPayloadBytes = maxPayloadBytes;
-  return caps;
-}
 
 const FLUSH_DEBOUNCE_MS = 800;
 const EDIT_TIMEOUT_MS = 10_000;
@@ -152,7 +138,7 @@ async function gateEnabled(ctx: CardContext, signal?: AbortSignal): Promise<bool
   try {
     const m = await getCardProfile({ apiUrl: ctx.apiUrl, botToken: ctx.botToken, signal });
     // 能力清单是部署级事实(与 enabled 无关),探到就缓存供渲染裁剪。
-    capsCache.set(ctx.apiUrl, deriveCaps(m));
+    capsCache.set(ctx.apiUrl, deriveCardCaps(m));
     let enabled = m.available ? m.enabled : process.env.OCTO_CARD_MESSAGE_ENABLED === "1";
     // 版本协商:manifest **明确 advertise** 了 profiles/card_version 却不含我们出站发送的
     // octo/v1 + 1.5 时,判定不兼容 → 关闭,避免协议演进后 send/edit 撞 400(字段缺省则不设限,

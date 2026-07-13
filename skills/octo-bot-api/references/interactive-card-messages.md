@@ -2,12 +2,11 @@
 
 Use this reference when sending or editing `payload.type=17` InteractiveCard messages, using `octo_send_display_card`, designing normal information cards, or working on agent progress cards. Content type 17 is unrelated to the legacy contact/name card at `MessageType.Card = 7`.
 
-## Scope And Branch Availability
+## Scope And Supported Profiles
 
-- `octo/v1` display cards and agent progress cards are implemented on `feat/interactive-card-progress`, including `octo_send_display_card`, send/edit primitives, negotiated rendering, and text fallback.
-- `octo/v2` submit-interactive cards are a separate delivery line. Their adapter implementation lives on the local `feat/card-interaction-c2` branch and is not part of `feat/interactive-card-progress`.
-- On the current P1 branch, `octo_send_card`, `card_action` polling, and callback-driven agent continuation are unavailable. Mentions of `octo/v2` below describe the protocol boundary, not a tool shipped by this branch.
-- The local E2E SOP and callback design under `.context/` are handoff material. They are gitignored and do not ship with the plugin.
+- `octo/v1` provides display cards and agent progress cards, including `octo_send_display_card`, send/edit primitives, negotiated rendering, and text fallback.
+- `octo/v2` submit-interactive cards use a separate callback workflow. Mentions of `octo/v2` below describe the protocol boundary, not a tool provided by the `octo/v1` display-card surface.
+- `octo_send_card`, `card_action` polling, and callback-driven agent continuation require an `octo/v2` producer and callback consumer; do not infer them from `octo/v1` availability.
 
 ## When To Use Cards
 

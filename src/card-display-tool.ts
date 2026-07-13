@@ -26,6 +26,7 @@ import { appendFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { sendCardMessage, getCardProfile, generateClientMsgNo, type CardProfileManifest } from "./api-fetch.js";
 import { buildDisplayCard, validateDisplayBlocks } from "./card-blocks.js";
+import { deriveCardCaps } from "./card-caps.js";
 import { isSensitive, reduceUrlsInText } from "./card-render.js";
 import { resolveOutboundOctoTarget } from "./actions.js";
 import type { CardCaps } from "./card-render.js";
@@ -48,25 +49,6 @@ function ok(msg: string, details?: unknown): ToolResult {
 
 function err(msg: string): ToolResult {
   return { content: [{ type: "text", text: `Error: ${msg}` }], details: null };
-}
-
-/** manifest → CardCaps，包含权威 capability 集与递归结构/字节 hard limits。 */
-function deriveCaps(m: CardProfileManifest): CardCaps {
-  const limits = m.limits as Record<string, unknown> | undefined;
-  return {
-    ...(m.elements !== undefined ? { elements: new Set(m.elements) } : {}),
-    ...(m.inputs !== undefined ? { inputs: new Set(m.inputs) } : {}),
-    ...(m.actions !== undefined ? { actions: new Set(m.actions) } : {}),
-    ...(typeof limits?.max_nodes === "number"
-      ? { maxNodes: limits.max_nodes }
-      : {}),
-    ...(typeof limits?.max_depth === "number"
-      ? { maxDepth: limits.max_depth }
-      : {}),
-    ...(typeof limits?.max_payload_bytes === "number"
-      ? { maxPayloadBytes: limits.max_payload_bytes }
-      : {}),
-  };
 }
 
 function redactDebugValue(value: unknown): unknown {
@@ -288,7 +270,7 @@ export function createDisplayCardTool(params: Params): Array<{
         const { card, plain } = buildDisplayCard({
           title: rawTitle,
           blocks: validated,
-          caps: deriveCaps(manifest),
+          caps: deriveCardCaps(manifest),
         });
         // body 空 = 校验后无合法 block 且无有效 title → 空卡无意义。
         const body = (card.body as unknown[]) ?? [];
