@@ -5,6 +5,7 @@ import {
   renderProgressCard,
   resolveToolMeta,
   summarizeToolParams,
+  sanitizeErrorText,
   fmtDuration,
   stepLine,
   cardSupports,
@@ -37,6 +38,39 @@ function progressDetailItems(card: Record<string, unknown>): Array<Record<string
 function progressDetailText(card: Record<string, unknown>): string {
   return progressDetailItems(card).map(elementText).join("\n");
 }
+
+const ERROR_REDACTION_CASES = [
+  {
+    name: "standard base64",
+    value: "driver failed: " + "AbCdEf012345678901234567890" + "+ghIjKl/mnOpQr==",
+    hidden: "AbCdEf012345678901234567890+ghIjKl/mnOpQr==",
+  },
+  {
+    name: "unlabelled long hex",
+    value: "driver failed: " + "0123456789abcdef0123" + "456789abcdef01234567",
+    hidden: "0123456789abcdef0123456789abcdef01234567",
+  },
+  {
+    name: "scheme glued to a word character",
+    value: "conn_https://my-relay.example.com/h/aB3cD9xQ",
+    hidden: "/h/aB3cD9xQ",
+  },
+  {
+    name: "protocol-relative URL after an equals sign",
+    value: "endpoint=//cdn.example.com/deliver/aB3cD9xQ",
+    hidden: "/deliver/aB3cD9xQ",
+  },
+  {
+    name: "schemeless host and path",
+    value: "my-relay.example.com/h/aB3cD9xQ",
+    hidden: "/h/aB3cD9xQ",
+  },
+  {
+    name: "schemeless DSN with an at sign in the password",
+    value: "admin:p@ss@db.example.com:5432/app",
+    hidden: "admin:p@ss",
+  },
+] as const;
 
 describe("resolveToolMeta", () => {
   it("已知工具 → 图标 + 中文标签", () => {
@@ -209,6 +243,22 @@ describe("fmtDuration", () => {
   it("<1s 用 ms", () => expect(fmtDuration(200)).toBe("200ms"));
   it(">=1s 用 x.xs", () => expect(fmtDuration(10165)).toBe("10.2s"));
   it("undefined → 空", () => expect(fmtDuration(undefined)).toBe(""));
+});
+
+describe("sanitizeErrorText adversarial boundaries", () => {
+  it.each(ERROR_REDACTION_CASES)("redacts $name at the helper boundary", ({ value, hidden }) => {
+    expect(sanitizeErrorText(value)).not.toContain(hidden);
+  });
+
+  it.each(ERROR_REDACTION_CASES)("keeps $name out of progress-card JSON and plain", ({ value, hidden }) => {
+    const { card, plain } = renderProgressCard({
+      phase: "error",
+      errorText: value,
+      steps: [{ tool: "exec", status: "error", error: value }],
+    });
+    expect(JSON.stringify(card)).not.toContain(hidden);
+    expect(plain).not.toContain(hidden);
+  });
 });
 
 describe("stepLine", () => {

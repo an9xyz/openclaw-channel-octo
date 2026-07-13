@@ -819,6 +819,25 @@ describe("组合与边界", () => {
 });
 
 describe("validateDisplayBlocks 结构上限(不可信输入)", () => {
+  it("无效 heading.size 仅丢弃可选属性,保留有效 heading", () => {
+    const out = validateDisplayBlocks([{ type: "heading", text: "保留标题", size: "huge" }]);
+    expect(out).toEqual([{ type: "heading", text: "保留标题" }]);
+    expect(buildDisplayCard({ blocks: out }).plain).toBe("保留标题");
+  });
+
+  it("无效 group.style 仅丢弃可选属性,保留 group 与有效子块", () => {
+    const out = validateDisplayBlocks([{
+      type: "group",
+      style: "invalid",
+      blocks: [{ type: "text", text: "保留子块" }],
+    }]);
+    expect(out).toEqual([{
+      type: "group",
+      blocks: [{ type: "text", text: "保留子块" }],
+    }]);
+    expect(buildDisplayCard({ blocks: out }).plain).toBe("保留子块");
+  });
+
   it("F6: 超深嵌套不 RangeError(深度耗尽 → 该层丢弃)", () => {
     let deep: unknown = { type: "text", text: "leaf" };
     for (let i = 0; i < 5000; i++) deep = { type: "group", blocks: [deep] };
