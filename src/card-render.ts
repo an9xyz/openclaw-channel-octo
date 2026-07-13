@@ -132,14 +132,17 @@ const SECRET_PREFIX_RES: RegExp[] = [
 const LONG_HEX_RE = /\b[0-9a-fA-F]{32,}\b/;
 
 /**
- * 通用高熵串:32+ 位连续 base64url 段且**同时含字母与数字**(随机 token 特征)。会误伤
+ * 通用高熵串:32+ 位连续 base64/base64url 段。会误伤
  * webpack 缓存名/UUID 目录等常见路径,故与长 hex 一样**仅用于 query/url**(裸 token 的场景),
- * 不套用到 path/shell。只按长度会误伤长英文(如 80 个 `x`),故要求字母数字混合。
+ * 不套用到 path/shell。只按长度会误伤长英文(如 80 个 `x`),故要求字母数字混合,
+ * 或出现 base64/base64url 特有的 `+ / = _ -` 信号。
  */
 function hasGenericSecretShape(s: string): boolean {
   if (LONG_HEX_RE.test(s)) return true;
-  const runs = s.match(/[A-Za-z0-9_-]{32,}/g);
-  return !!runs && runs.some((r) => /[0-9]/.test(r) && /[A-Za-z]/.test(r));
+  const runs = s.match(/[A-Za-z0-9_+\/=-]{32,}/g);
+  return !!runs && runs.some((r) => (
+    (/[0-9]/.test(r) && /[A-Za-z]/.test(r)) || /[+\/_=-]/.test(r)
+  ));
 }
 
 /**
@@ -253,35 +256,35 @@ function originDomain(rawUrl: string): string | null {
   }
 }
 
-/** 已知 webhook 主机 + 路径形态(密钥整段嵌在 path 里,无 scheme 也要降级)。 */
-const SCHEMELESS_WEBHOOK_RE =
-  /\b(?:hooks\.slack\.com\/services|discord(?:app)?\.com\/api\/webhooks|[a-z0-9.-]+\.webhook\.office\.com|outlook\.office\.com\/webhook)\/[^\s]+/gi;
 /** 协议相对 URL(`//host/path`):按 https 处理。 */
-const PROTOCOL_RELATIVE_RE = /(^|[\s(])\/\/[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?::\d+)?\/[^\s]*/g;
-/** 无 scheme 的 userinfo DSN(`user:pass@host[:port][/path]`):userinfo 即明文口令。要求主机含 TLD 以免误伤 `a:b@c`。 */
+const PROTOCOL_RELATIVE_RE =
+  /(^|[^A-Za-z0-9/:])\/\/[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?::\d+)?(?:\/[^\s]*)?/g;
+/** 无 scheme 的 userinfo DSN(`user:pass@host[:port][/path]`):userinfo 即明文口令。密码可含 `@`,按最后一个 `@` 分隔主机。 */
 const SCHEMELESS_USERINFO_RE =
-  /\b[A-Za-z0-9._%+-]+:[^\s:@/]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::\d+)?(?:\/[^\s]*)?/g;
+  /\b[A-Za-z0-9._%+-]+:[^\s/]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::\d+)?(?:\/[^\s]*)?/g;
+/** 任意无 scheme 的 `host.tld/path`:path 常承载 webhook token、签名或对象凭据。 */
+const SCHEMELESS_HOST_PATH_RE =
+  /(^|[^A-Za-z0-9@._/:+-])([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?::\d+)?\/[^\s]+)/g;
 
 /** 把文本里内嵌的 URI 就地降级为 scheme://注册域(解析失败则整段抹除)。 */
 export function reduceUrlsInText(s: string): string {
   // 1. 任意 `scheme://…`,不止 http(s):DB/AMQP/ssh DSN(postgres://user:pass@host 等)也常
   //    出现在 query/shell/错误文本里,userinfo 即明文密码。要求 `://` 故不误伤 Windows 盘符(C:/)。
-  let out = s.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s]+/gi, (m) => originDomain(m) ?? "");
+  let out = s.replace(/[a-z][a-z0-9+.-]*:\/\/[^\s]+/gi, (m) => originDomain(m) ?? "");
   // 2. 协议相对 `//host/path`:补 https 后降级(secret 可能在 path)。
   out = out.replace(PROTOCOL_RELATIVE_RE, (_m, p1: string) => {
     const url = _m.slice(p1.length); // 去掉前导分隔符
     return p1 + (originDomain(`https:${url}`) ?? "");
   });
-  // 3. 无 scheme 的已知 webhook 主机+路径(Slack/Discord/Teams):主机保留、path 抹掉。
-  out = out.replace(SCHEMELESS_WEBHOOK_RE, (m) => {
-    const host = m.split("/")[0];
-    return originDomain(`https://${host}`) ?? "";
-  });
-  // 4. 无 scheme 的 userinfo DSN(`user:pass@host…`):只留注册域,丢 userinfo/path。
+  // 3. 无 scheme 的 userinfo DSN(`user:pass@host…`):只留注册域,丢 userinfo/path。
   out = out.replace(SCHEMELESS_USERINFO_RE, (m) => {
-    const host = m.slice(m.indexOf("@") + 1).split(/[/:]/)[0];
+    const host = m.slice(m.lastIndexOf("@") + 1).split(/[/:]/)[0];
     return originDomain(`https://${host}`) ?? "";
   });
+  // 4. 任意无 scheme 的 `host.tld/path`:保留注册域,统一抹掉可能承载凭据的 path。
+  out = out.replace(SCHEMELESS_HOST_PATH_RE, (_m, prefix: string, hostAndPath: string) => (
+    prefix + (originDomain(`https://${hostAndPath}`) ?? "")
+  ));
   return out;
 }
 
@@ -335,8 +338,8 @@ const ERROR_MAX = 120;
  *   1. 折叠空白;
  *   2. **内嵌 URL 降级为 scheme://注册域**(与参数路径 summarizeUrl 对称)—— 否则 webhook
  *      路径/隧道主机等短、无关键词的密钥会绕过下面的 isSensitive 直接泄露;
- *   3. 关键词/明确前缀命中则整串隐藏(generic=false:**不**套用长 hex/高熵,否则会把含 git SHA/
- *      docker digest/UUID 的普通运维错误整条吞掉 —— webhook 类已由步骤 2 兜住);
+ *   3. 关键词/明确前缀/通用高熵命中则整串隐藏。带 `commit`/`sha`/`digest` 标签的普通构建
+ *      哈希先从高熵检测中排除,兼顾错误可读性与裸凭据 fail-closed;
  *   4. 截断到 ERROR_MAX。
  */
 export function sanitizeErrorText(err?: string): string {
@@ -344,8 +347,17 @@ export function sanitizeErrorText(err?: string): string {
   let s = err.replace(/\s+/g, " ").trim();
   if (!s) return "";
   s = reduceUrlsInText(s).replace(/\s+/g, " ").trim(); // URL 降级可能留下空隙
-  if (!s || isSensitive(s, false)) return ""; // 关键词/明确前缀命中 → 不展示错误详情
+  if (!s || isSensitiveErrorText(s)) return "";
   return s.length > ERROR_MAX ? s.slice(0, ERROR_MAX) + "…" : s;
+}
+
+/** 错误文本允许明确标注的构建哈希,但未标注的长 hex/base64 一律按凭据处理。 */
+const BENIGN_ERROR_HASH_RE =
+  /\b(?:commit|revision|rev|digest|sha(?:-?(?:1|256))?)\b\s*(?:at\s+)?(?::|=|#)?\s*(?:sha256:)?[0-9a-fA-F]{32,64}\b/gi;
+
+function isSensitiveErrorText(s: string): boolean {
+  if (isSensitive(s, false)) return true;
+  return hasGenericSecretShape(s.replace(BENIGN_ERROR_HASH_RE, ""));
 }
 
 /** 工具名 label 展示上限。MCP 工具名可能很长,防其撑爆卡片。 */

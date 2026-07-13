@@ -759,8 +759,10 @@ function validateOneBlock(raw: unknown, depth: number, budget: { count: number }
     case "heading": {
       if (typeof r.text !== "string") return null;
       const size = r.size;
-      if (size !== undefined && (typeof size !== "string" || !HEADING_SIZES.has(size))) return null;
-      return size ? { type: "heading", text: r.text, size: size as "medium" | "large" } : { type: "heading", text: r.text };
+      const validSize = typeof size === "string" && HEADING_SIZES.has(size)
+        ? size as "medium" | "large"
+        : undefined;
+      return validSize ? { type: "heading", text: r.text, size: validSize } : { type: "heading", text: r.text };
     }
     case "text": {
       if (typeof r.text !== "string") return null;
@@ -877,9 +879,11 @@ function validateOneBlock(raw: unknown, depth: number, budget: { count: number }
       const inner = validateBlockList(r.blocks, depth - 1, budget);
       if (inner.length === 0) return null;
       const style = r.style;
-      if (style !== undefined && (typeof style !== "string" || !GROUP_STYLES.has(style))) return null;
-      return style
-        ? { type: "group", style: style as GroupStyle, blocks: inner }
+      const validStyle = typeof style === "string" && GROUP_STYLES.has(style)
+        ? style as GroupStyle
+        : undefined;
+      return validStyle
+        ? { type: "group", style: validStyle, blocks: inner }
         : { type: "group", blocks: inner };
     }
     case "collapsible": {
