@@ -2685,9 +2685,6 @@ export async function handleInboundMessage(params: {
       ...(replyMentionUids.length > 0 ? { mentionUids: replyMentionUids } : {}),
       ...(replyMentionEntities.length > 0 ? { mentionEntities: replyMentionEntities } : {}),
       mentionAll: hasAtAll || undefined,
-      // 引用用户原始触发消息(Q→A):即便进度卡与答复之间被他人插话,客户端仍能把答复与提问连起来。
-      // 只在有触发消息 id 时附带;OBO/转发等场景 message_id 仍是本 turn 的触发消息,语义正确。
-      ...(message.message_id ? { replyMsgId: message.message_id } : {}),
       ...(effectiveOnBehalfOf ? { onBehalfOf: effectiveOnBehalfOf } : {}),
       ...(signal ? { signal } : {}),
     });
