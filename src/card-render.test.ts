@@ -44,6 +44,15 @@ describe("resolveToolMeta", () => {
     expect(resolveToolMeta("exec")).toEqual({ icon: "⌨️", label: "执行命令" });
     expect(resolveToolMeta("process")).toEqual({ icon: "⚙️", label: "运行进程" });
   });
+  it("OpenClaw update_plan → 专属地图图标 + 中文标签", () => {
+    expect(resolveToolMeta("update_plan")).toEqual({ icon: "🗺️", label: "更新计划" });
+    const { card } = renderProgressCard({
+      phase: "tool",
+      steps: [{ tool: "update_plan", status: "done", durationMs: 29 }],
+    });
+    expect(progressDetailText(card)).toContain("🗺️ 更新计划");
+    expect(progressDetailText(card)).not.toContain("🔧 update_plan");
+  });
   it("MCP 工具解析 server / tool", () => {
     expect(resolveToolMeta("mcp__github__create_issue")).toEqual({
       icon: "🔌",
