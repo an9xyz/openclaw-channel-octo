@@ -149,20 +149,23 @@ export function createDisplayCardTool(params: Params): Array<{
   if (ambientChannel && ambientChannel !== CHANNEL_ID) return [];
   try {
     const ids = listOctoAccountIds(cfg);
-    const hasConfigured = ids.some((id) => {
-      const acct = resolveOctoAccount({ cfg, accountId: id });
-      return acct.enabled && acct.configured && !!acct.config.botToken;
-    });
-    if (!hasConfigured) return [];
+    const configuredAccounts = ids
+      .map((id) => resolveOctoAccount({ cfg, accountId: id }))
+      .filter((acct) => acct.enabled && acct.configured && !!acct.config.botToken);
+    if (configuredAccounts.length === 0) return [];
     // Best-effort discovery filtering: when the runtime identifies the current
     // account, do not offer a tool that account explicitly disabled. Execution
-    // checks again because config may hot-reload after tool discovery.
+    // checks again because config may hot-reload after tool discovery. When a
+    // multi-account discovery has no current account, hide only if every usable
+    // account disables the tool; a mixed set must keep it available.
     const discoveryAccountId = deliveryContext?.accountId
       ?? agentAccountId
       ?? (ids.length === 1 ? ids[0] : undefined);
     if (discoveryAccountId) {
       const discoveryAccount = resolveOctoAccount({ cfg, accountId: discoveryAccountId });
       if (discoveryAccount.config.cardDisplay === false) return [];
+    } else if (configuredAccounts.every((account) => account.config.cardDisplay === false)) {
+      return [];
     }
   } catch {
     return [];

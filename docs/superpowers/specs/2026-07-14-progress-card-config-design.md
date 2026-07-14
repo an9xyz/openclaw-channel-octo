@@ -56,7 +56,7 @@ config `true` 永远不能把 `existingCardGate === false` 翻成 `true`。
    - 配置禁用只属于 per-account / per-session 决策,**绝不能写入**当前按 `apiUrl` 共享的 `gateCache` / `capsCache`。否则账号 A 关闭会污染同部署账号 B。共享缓存仍只保存服务端能力事实。
 
 5. **`src/card-display-tool.ts`(`createDisplayCardTool`)** —— 已接收 `cfg` / `agentAccountId`,同源解析 `cardDisplay`,同时做两层守卫:
-   - discovery 阶段能可靠解析当前账号且其 `cardDisplay === false` 时,不注册工具,避免向模型 offer 不可用能力;多账号且当前账号不明确时允许保留工具。
+   - discovery 阶段能可靠解析当前账号且其 `cardDisplay === false` 时,不注册工具,避免向模型 offer 不可用能力。多账号且当前账号不明确时,若所有可用账号均解析为 `false` 则隐藏;只要至少一个账号允许展示卡就保留工具,避免误伤混合配置。
    - `execute` 内以可信 `deliveryContext.accountId` / `agentAccountId` 解析账号后,在 manifest 探测前再次检查;显式关闭则立即 `err(...)` 提示改用纯文本。执行时检查是最终权威,用于覆盖 tool schema 缓存、热更新和直接调用场景。
 
 6. **`README.md`** —— 在账号配置说明与示例中增加两个字段及三态语义,让运维侧可发现。
@@ -90,6 +90,7 @@ config `true` 永远不能把 `existingCardGate === false` 翻成 `true`。
 `src/card-display-tool.test.ts`:
 
 - 已知当前账号 `cardDisplay:false` → discovery 不注册工具。
+- 多账号且 discovery 无法确定当前账号时,所有可用账号均为 `false` → 不注册工具;任一账号为省略 / `true` → 保留工具。
 - discovery 无法确定账号但 execute 解析到 `cardDisplay:false` → 返回 `err`(提示改用纯文本),且不探测 manifest、不发送。
 - 省略 → 现有行为不变(回归)。
 
