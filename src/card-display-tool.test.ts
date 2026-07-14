@@ -123,6 +123,24 @@ describe("createDisplayCardTool 骨架", () => {
     } as DisplayToolParams)).toEqual([]);
   });
 
+  it("无当前账号上下文但只有一个配置账号时也按 cardDisplay:false 隐藏工具", () => {
+    vi.mocked(resolveOctoAccount).mockReturnValue({
+      accountId: "only-account",
+      enabled: true,
+      configured: true,
+      config: {
+        botToken: "tok",
+        apiUrl: "https://api.test",
+        pollIntervalMs: 2000,
+        heartbeatIntervalMs: 30000,
+        cardDisplay: false,
+      },
+    } as never);
+    vi.mocked(listOctoAccountIds).mockReturnValue(["only-account"]);
+
+    expect(createDisplayCardTool({ cfg: mockCfg } as DisplayToolParams)).toEqual([]);
+  });
+
   it("tool 元数据:name=octo_send_display_card,description 涵盖『展示型』『不回流』", () => {
     const t = getTool();
     expect(t.name).toBe("octo_send_display_card");
