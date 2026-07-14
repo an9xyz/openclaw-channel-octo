@@ -8,6 +8,13 @@ Use this reference when sending or editing `payload.type=17` InteractiveCard mes
 - `octo/v2` submit-interactive cards use a separate callback workflow. Mentions of `octo/v2` below describe the protocol boundary, not a tool provided by the `octo/v1` display-card surface.
 - `octo_send_card`, `card_action` polling, and callback-driven agent continuation require an `octo/v2` producer and callback consumer; do not infer them from `octo/v1` availability.
 
+### Two Integration Paths
+
+Read the rest of this file according to how you send cards — the manual steps below apply to only one of them:
+
+- **Tool path (`octo_send_display_card`).** The tool probes the profile, fail-closed rejects on an unusable deployment, degrades unsupported elements to plain text, and redacts secrets for you. You do **not** need to `curl` the profile endpoint, check capability lists, or enforce `limits.*` yourself — pass `{ title?, blocks[] }` and read the outcome. The DisplayBlock schema below is exactly this tool's `blocks` input.
+- **Raw API path (hand-written HTTP client).** You own everything the tool would otherwise do: feature-detect, respect `limits.*` recursively, degrade unsupported elements, and implement the security guardrails at the end of this file. The manual "always feature-detect" / "respect limits" instructions target this path.
+
 ## When To Use Cards
 
 - Plain text (`payload.type=1`): conversational replies, short answers, follow-ups.
@@ -16,7 +23,7 @@ Use this reference when sending or editing `payload.type=17` InteractiveCard mes
 
 Do not overuse card messages. Plain text is the default. Use cards only when structure materially improves comprehension, such as weather, status, lists, comparisons, or detail fields. Keep ordinary chat, short answers, and follow-up replies as plain text. Do not use a blanket "use cards whenever possible" rule.
 
-Always feature-detect before sending cards:
+On the **raw API path**, always feature-detect before sending cards (the `octo_send_display_card` tool already does this for you — skip it there):
 
 ```bash
 curl <apiUrl>/v1/bot/card/profile -H "Authorization: Bearer $TOKEN"
@@ -38,7 +45,8 @@ Important profile fields:
 ```
 
 - `available:true` with `enabled:false` is an explicit server-side disable. Do not send cards.
-- `available:false` means the profile endpoint is not deployed, not that card delivery is explicitly disabled. P1 compatibility code may send only when `OCTO_CARD_MESSAGE_ENABLED=1`; otherwise fall back to text.
+- `available:false` means the profile endpoint is not deployed, not that card delivery is explicitly disabled. In this case sending is governed by the `OCTO_CARD_MESSAGE_ENABLED=1` environment switch (the same gate the tool and the hook progress-card path use); when it is unset, fall back to text.
+- `card_version` is matched **exactly**: the client is pinned to `1.5` (Decision 10), so a server advertising any other version — including a higher one such as `1.6` — is rejected fail-closed rather than assumed backward-compatible. Fall back to text on any mismatch.
 - `elements` / `inputs` / `actions` are authoritative when present, including an explicitly empty array. Missing support can produce server 400.
 - `elements` lists renderable card elements such as `ColumnSet` and `Table`; it does not need to list child schemas such as `Column`, `TableRow`, or `TableCell`.
 - Old deployments may omit capability lists; fall back to `TextBlock` / `Container` / `ColumnSet` / `FactSet` / `Image`, and no actions.
@@ -48,7 +56,7 @@ Important profile fields:
 
 Think IM summary card + expandable details, not logs converted into a card.
 
-For final answers, prefer one display card message. If the answer needs a process affordance, put process as the first block inside that same card; do not send or leave a separate final process-only card.
+For final answers, prefer one display card message. If the answer needs a process affordance, put process as the first block inside that same card; do not send or leave a separate final process-only card. A card is a side effect, not the conversational reply — after sending it you must still close the turn with a short text message stating the result (see "Always Close the Turn with Text" in SKILL.md).
 
 Visible first screen should normally be 3-6 lines. If process information is included, show only a compact process summary plus answer content; detailed process opens under `查看过程`.
 
@@ -63,6 +71,8 @@ Do not send raw `tool_events` as the card structure. Convert them into `reasonin
 `plain` is first-class output. Generate it from the same source as the card, keep exactly one title, and do not dump raw logs into it.
 
 ## Preferred DisplayBlock Shape
+
+This `{ title?, blocks[] }` object is the `octo_send_display_card` tool input, and `blocks` uses the [DisplayBlock schema](#displayblock-reference) below. The tool runs it through `buildDisplayCard`, which compiles the high-level `blocks` into the low-level AdaptiveCard `card.body` shown under [Low-Level Payload](#low-level-payload) and derives the truthful `plain` fallback. Author `blocks` (not raw `card.body`) unless you are on the raw API path and building AdaptiveCards by hand.
 
 ```jsonc
 {
@@ -183,8 +193,8 @@ Rules:
 ```jsonc
 POST /v1/bot/sendMessage
 {
-  "channel_id": "<groupId or uid>",
-  "channel_type": 2,
+  "channel_id": "<groupId, uid, or thread channel_id>",
+  "channel_type": 2,               // must match the target: 1=DM, 2=group, 5=thread — take both from the received event
   "payload": {
     "type": 17,
     "profile": "octo/v1",
@@ -217,3 +227,4 @@ POST /v1/bot/message/edit
 - `plain` is what non-card clients and history search see. Keep it truthful and do not include anything absent from the card.
 - `buildDisplayCard` degrades embedded URLs to `scheme://<registrable-domain>` and drops blocks matching known secret shapes; hand-written clients must implement equivalent guardrails.
 - Agent tools that reply to the current conversation must derive the target from trusted runtime delivery context. A model-supplied `channelId`, group id, uid, or thread id is routing input, not authorization, and must not enable cross-conversation sends.
+- Display cards always send under the bot's own identity. Sender identity / OBO (persona-clone) is never taken from model input; a hand-written client must likewise not let untrusted model output pick the sending persona, or a group-visible card becomes a persona-impersonation sink.

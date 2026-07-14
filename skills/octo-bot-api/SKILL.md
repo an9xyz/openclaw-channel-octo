@@ -162,11 +162,11 @@ Interactive-card details are intentionally kept out of this main skill file. Bef
 Hard rules to remember even before opening the reference:
 
 - Display cards (`payload.type=17`, `profile="octo/v1"`) are structured, non-callback output. Submit/click-back cards use `octo/v2` and require event polling.
-- Feature-detect with `GET /v1/bot/card/profile`. `available:true, enabled:false` is an explicit disable; `available:false` is a legacy-endpoint absence and may use the adapter compatibility switch documented in the reference. Otherwise fall back to text.
+- The `octo_send_display_card` tool feature-detects, degrades, and fail-closed rejects on its own — just pass `{ title?, blocks[] }`. On the raw API path, feature-detect with `GET /v1/bot/card/profile`: `available:true, enabled:false` is an explicit disable; `available:false` (endpoint not deployed) sends only when `OCTO_CARD_MESSAGE_ENABLED=1`; `card_version` must match `1.5` exactly. Otherwise fall back to text.
 - Keep one title, a compact first screen, truthful `plain`, and no raw logs or secrets.
 - Normal information cards should be quiet IM content: avoid large `good/warning/attention` blocks, excessive Bolder headings, and strong CTA-looking copy buttons.
 - Agent progress cards use `metadata.octo_layout = "agent_progress_v1"` with `[ColumnSet, Container#timeline_detail]` only when those elements are supported. The reference defines the flat-card fallback.
-- `octo/v2` callback cards and `octo_send_card` are not delivered by the current P1 branch; their implementation lives on the separate local `feat/card-interaction-c2` branch.
+- `octo/v2` callback cards and `octo_send_card` are not delivered by the current release; they require an `octo/v2` producer plus callback consumer, which the display-card surface does not provide.
 
 ## Real-time Features
 
