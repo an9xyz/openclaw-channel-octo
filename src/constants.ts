@@ -17,6 +17,13 @@ export const PLUGIN_ID = "octo";
 export const CHANNEL_ID = "octo";
 
 /**
+ * P1-e agent 展示卡工具名(见 `card-display-tool.ts`)。card-progress 侧据此把它排除
+ * 出进度追踪:展示卡 turn 的产出**就是那张卡本身**,不该再有旁边的"正在处理/已中断"
+ * 进度卡噪音。集中定义避免字面量漂移。
+ */
+export const DISPLAY_CARD_TOOL_NAME = "octo_send_display_card";
+
+/**
  * Separator between parent group_no and thread short_id in Octo's CommunityTopic
  * channel ID format (`<groupNo>____<shortId>`, 4 underscores). Centralized here
  * to avoid drift across modules that need to split or compose thread refs.

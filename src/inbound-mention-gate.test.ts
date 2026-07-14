@@ -335,6 +335,30 @@ describe("inbound mention-gate 免@ relaxation (human-only)", () => {
     expect(sends.length).toBeGreaterThan(0);
   });
 
+  it("最终答复不自动引用用户触发消息,避免客户端显示无法解析的空引用", async () => {
+    installRuntimeStub();
+    const { sends } = installFetchStub();
+    const msg = makeTextMessage(HUMAN_UID, "@SelfBot please answer");
+    (msg.payload as any).mention = { uids: [BOT_UID] };
+
+    await handleInboundMessage({
+      account: makeAccount(),
+      message: msg,
+      botUid: BOT_UID,
+      groupHistories: new Map(),
+      lastBotReplySeqMap: new Map(),
+      memberMap: new Map(),
+      uidToNameMap: new Map(),
+      groupCacheTimestamps: new Map(),
+    });
+
+    // 最终文本仍正常发送，但不得仅因它属于 inbound turn 就制造 reply 关系。
+    // 显式 reply-mode 由 channel.ts 的 ctx.replyToId 路径单独处理。
+    const reply = sends.find((s: any) => s?.payload?.content === "hi there");
+    expect(reply).toBeTruthy();
+    expect(reply.payload.reply).toBeUndefined();
+  });
+
   it("does NOT reply to a CROSS-PROCESS bot (robot:true in member list, NOT registerKnownBot'd)", async () => {
     // Regression: the loop guard must use the
     // server-authoritative GroupMember.robot signal, not just the local

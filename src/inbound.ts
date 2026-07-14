@@ -26,7 +26,8 @@ import { getMentionPrefFromCache, invalidateMentionPref } from "./mention-prefs.
 import { normalizeAccountId } from "./account-id.js";
 import type { ResolvedOctoAccount } from "./accounts.js";
 import type { BotMessage } from "./types.js";
-import { ChannelType, MessageType, RICH_TEXT_BLOCK_IMAGE, RICH_TEXT_BLOCK_TEXT, RICH_TEXT_IMAGE_PLACEHOLDER } from "./types.js";
+import { setCardContext, finalizeCard } from "./card-progress.js";
+import { ChannelType, MessageType, RICH_TEXT_BLOCK_IMAGE, RICH_TEXT_BLOCK_TEXT, RICH_TEXT_IMAGE_PLACEHOLDER, CARD_PLACEHOLDER } from "./types.js";
 import type { RichTextBlock } from "./types.js";
 import { getOctoRuntime } from "./runtime.js";
 import { CHANNEL_ID, MAX_UPLOAD_SIZE } from "./constants.js";
@@ -504,6 +505,19 @@ export function buildMediaUrl(relUrl?: string, apiUrl?: string, cdnUrl?: string)
   return `${baseUrl}/file/${storagePath}`;
 }
 
+/**
+ * 提取 InteractiveCard(=17) 的服务端权威 `plain` 作为 LLM/展示文本。
+ *
+ * 服务端在 dispatch 出口重算 `plain`（octo-server Decision 8：never empty，
+ * 空 body 时回退 `[卡片]`）。adapter 只读它并防御性兜底：非字符串或空串 →
+ * `CARD_PLACEHOLDER`。adapter **不解析 `card` 树**（AC1.5 schema 由服务端
+ * `pkg/cardmsg` 权威）。
+ */
+export function resolveCardPlain(payload: { plain?: unknown } | undefined): string {
+  const plain = typeof payload?.plain === "string" ? payload.plain.trim() : "";
+  return plain !== "" ? plain : CARD_PLACEHOLDER;
+}
+
 /** Resolve inner message type to display text for MultipleForward */
 export function resolveInnerMessageText(
   payload: ForwardMessage["payload"],
@@ -537,6 +551,9 @@ export function resolveInnerMessageText(
       const rt = resolveRichTextContent(payload as any, buildUrl);
       return rt.text || "[图文消息]";
     }
+    case MessageType.InteractiveCard:
+      // 交互卡片（引用/转发预览）：取服务端权威 plain。
+      return resolveCardPlain(payload as { plain?: unknown });
     default:
       return payload.content ?? "[消息]";
   }
@@ -699,6 +716,9 @@ function resolveContent(payload: BotMessage["payload"], apiUrl?: string, log?: C
         ...(mediaUrls.length > 0 ? { mediaType: guessMime(mediaUrls[0], "image/jpeg") } : {}),
       };
     }
+    case MessageType.InteractiveCard:
+      // 交互卡片：仅取服务端权威 plain 喂 LLM（不解析 card 树）。
+      return { text: resolveCardPlain(payload as { plain?: unknown }) };
     default:
       return { text: payload.content ?? payload.url ?? "" };
   }
@@ -1205,6 +1225,7 @@ export function resolveApiMessagePlaceholder(type?: number, name?: string): stri
     case MessageType.Card: return "[名片]";
     case MessageType.MultipleForward: return "[合并转发]";
     case MessageType.RichText: return "[图文消息]";
+    case MessageType.InteractiveCard: return CARD_PLACEHOLDER;
     default: return "[消息]";
   }
 }
@@ -1990,6 +2011,11 @@ export async function handleInboundMessage(params: {
             const apiResolved = resolveContent(m.payload, account.config.apiUrl, log, account.config.cdnUrl);
             if (apiResolved.text) body = apiResolved.text;
           }
+          // For InteractiveCard(=17), backfill the server-authoritative plain text (never the
+          // card tree), same as live inbound — otherwise the card contributes only "[卡片]" to ctx.
+          if (m.type === MessageType.InteractiveCard && m.payload) {
+            body = resolveCardPlain(m.payload);
+          }
           const entry: any = {
             sender: m.from_uid,
             body,
@@ -2507,6 +2533,16 @@ export async function handleInboundMessage(params: {
   const apiUrl = account.config.apiUrl;
   const botToken = account.config.botToken ?? "";
 
+  // 波 B:登记进度卡发送上下文(hook 侧懒发/更新时用)。route.sessionKey 桥接
+  // dispatch↔hook(H1 实证一致)。OBO(persona-clone)场景由 setCardContext 内部标记跳过。
+  setCardContext(route.sessionKey, {
+    apiUrl,
+    botToken,
+    channelId: replyChannelId,
+    channelType: replyChannelType,
+    ...(effectiveOnBehalfOf ? { onBehalfOf: effectiveOnBehalfOf } : {}),
+  });
+
   // 已读回执 + 正在输入 — fire-and-forget
   if (isOBOv2) {
     // v2: send typing to origin group with grantor identity (skip readReceipt)
@@ -2879,6 +2915,9 @@ export async function handleInboundMessage(params: {
       }
     }
     clearInterval(typingInterval);
+    // 波 B:收尾进度卡(终态帧 + 清理);fire-and-forget，不阻塞 dispatch 结束/会话释放。
+    // finalizeCard 内部同步删 Map(立即释放关联),终态 edit 后台异步发送。
+    void finalizeCard(route.sessionKey, { success: replySucceeded });
     // Safety net: clean up pending inbound context in case the hook didn't fire
     pendingInboundContext.delete(route.sessionKey);
 

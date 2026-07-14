@@ -26,7 +26,9 @@ import { resolvePersonaHintForSession } from "./src/persona-prompt.js";
 import { setOctoRuntime } from "./src/runtime.js";
 import { octoPlugin } from "./src/channel.js";
 import { createOctoManagementTools } from "./src/agent-tools.js";
-import { CHANNEL_ID } from "./src/constants.js";
+import { createDisplayCardTool } from "./src/card-display-tool.js";
+import { CHANNEL_ID, DISPLAY_CARD_TOOL_NAME } from "./src/constants.js";
+import { bindCardRun, registerCardProgress } from "./src/card-progress.js";
 
 // ---------------------------------------------------------------------------
 // Tool-availability self-diagnostic (issue #137)
@@ -142,6 +144,23 @@ export default defineBundledChannelEntry({
       { names: ['octo_management'] },
     );
 
+    // P1-e:agent 展示卡工具(顶层无 actions、不回流,发展示型 InteractiveCard 17)。
+    // 与 octo_management 一样,tool-discovery 阶段就注册,便于 profile 过滤评估。
+    api.registerTool(
+      (ctx: OpenClawPluginToolContext) => {
+        const cfg = ctx.getRuntimeConfig?.() ?? ctx.runtimeConfig ?? ctx.config;
+        if (!cfg) return null;
+        return createDisplayCardTool({
+          cfg,
+          agentAccountId: ctx.agentAccountId,
+          agentId: ctx.agentId,
+          deliveryContext: ctx.deliveryContext,
+          messageChannel: ctx.messageChannel,
+        });
+      },
+      { names: [DISPLAY_CARD_TOOL_NAME] },
+    );
+
     // Manual setOctoRuntime + registerChannel — kept as a defensive call even
     // though contract's `runtime: {}` / `plugin: {}` would auto-invoke them.
     //
@@ -168,6 +187,10 @@ export default defineBundledChannelEntry({
 
     console.log('[octo] registering before_prompt_build hook');
     api.on('before_prompt_build', (_event, ctx) => {
+      // Bind progress ownership before any model/tool event. before_agent_run repeats this on
+      // newer hosts; the prompt hook preserves compatibility where that gate is unavailable.
+      // Provider gating prevents a same-key non-Octo session from claiming an Octo entry.
+      if (ctx.messageProvider === CHANNEL_ID) bindCardRun(ctx.sessionKey, ctx.runId);
       // Sections destined for the user-prompt context block (group MD,
       // member list, inbound history). These belong to the conversation
       // surface, not the LLM's system identity.
@@ -236,5 +259,9 @@ export default defineBundledChannelEntry({
         ...(systemSections.length > 0 ? { prependSystemContext: systemSections.join('\n\n') } : {}),
       };
     });
+
+    // 波 B:注册卡片进度 hook(before/after_tool_call、model_call_started)。
+    // 只处理 dispatch 经 setCardContext 登记的 octo session(见 src/card-progress.ts)。
+    registerCardProgress(api);
   },
 });

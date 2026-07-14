@@ -1,0 +1,844 @@
+/**
+ * InteractiveCard(=17) 进度卡渲染 —— 把 agent 运行状态渲染成 Adaptive Cards 1.5
+ * JSON（octo/v1 profile 白名单:TextBlock/Container 等）。纯函数、无副作用、无
+ * `Date.now`（耗时由 state.elapsedMs 传入），便于单测。
+ *
+ * 波 B(卡片进度帧):卡仅承载过程/状态(C2 决策),最终答案走文本。
+ * 帧内容:工具名友好化 + 参数摘要 + 耗时,让用户看清 agent 在做什么。
+ * 视觉属性仅用端到端验证过的(weight/spacing/size/wrap),不用未验证的 color 以规避白名单。
+ */
+import { CARD_PLACEHOLDER, CARD_VERSION } from "./types.js";
+import { buildDisplayCard, type DisplayBlock, type RichSegment } from "./card-blocks.js";
+import { cardFitsLimits, type CardLimits } from "./card-limits.js";
+
+export const OCTO_CARD_LAYOUTS = {
+  agentProgressV1: "agent_progress_v1",
+} as const;
+
+const AGENT_PROGRESS_DETAIL_ID = "timeline_detail";
+const AGENT_PROGRESS_COLLAPSE_ID = "btn_collapse";
+const AGENT_PROGRESS_EXPAND_ID = "btn_expand";
+
+export type OctoCardLayout = (typeof OCTO_CARD_LAYOUTS)[keyof typeof OCTO_CARD_LAYOUTS];
+
+const KNOWN_OCTO_CARD_LAYOUTS = new Set<string>(Object.values(OCTO_CARD_LAYOUTS));
+
+export function detectOctoCardLayout(card: Record<string, unknown>): OctoCardLayout | undefined {
+  const metadata = card.metadata;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return undefined;
+  const layout = (metadata as { octo_layout?: unknown }).octo_layout;
+  return typeof layout === "string" && KNOWN_OCTO_CARD_LAYOUTS.has(layout)
+    ? (layout as OctoCardLayout)
+    : undefined;
+}
+
+/** 单个工具步骤的状态。 */
+export interface CardStep {
+  tool: string;
+  status: "running" | "done" | "error";
+  durationMs?: number;
+  error?: string;
+  /** 参数摘要(在读哪个文件 / 执行什么命令),来自 before_tool_call 的 params。 */
+  summary?: string;
+  /**
+   * SDK 提供的工具调用唯一 id(before/after_tool_call 都带)。用于把 after 事件
+   * 精确回填到对应步骤 —— 并发同名工具(两个 exec/process)乱序完成时,按 id 匹配
+   * 避免把 duration/error 标到错误行。缺失(旧 host)时回退按 toolName 匹配。
+   */
+  toolCallId?: string;
+  /**
+   * hook 侧记录的开始时间(ms epoch)。目前只对 P1-g 的 __thinking__ 步骤有意义:
+   * SDK 无 `model_call_ended` hook,thinking 结束时机由外部信号(before_tool_call / finalize)
+   * 决定,duration = now - startedAt。渲染层只看 durationMs,该字段仅 hook 侧内部使用。
+   */
+  startedAt?: number;
+}
+
+/** 进度卡的渲染状态。 */
+export interface CardProgressState {
+  phase: "thinking" | "tool" | "done" | "error";
+  steps: CardStep[];
+  elapsedMs?: number;
+  errorText?: string;
+}
+
+const MCP_TOOL_PREFIX = "mcp__";
+
+/** 常见工具 → 图标 + 中文标签;未知工具用通用图标 + 原名。 */
+const TOOL_META: Record<string, { icon: string; label: string }> = {
+  read: { icon: "📖", label: "读取文件" },
+  write: { icon: "✏️", label: "写入文件" },
+  edit: { icon: "✏️", label: "编辑文件" },
+  apply_patch: { icon: "✏️", label: "修改代码" },
+  exec: { icon: "⌨️", label: "执行命令" },
+  bash: { icon: "⌨️", label: "执行命令" },
+  shell: { icon: "⌨️", label: "执行命令" },
+  process: { icon: "⚙️", label: "运行进程" },
+  search: { icon: "🔍", label: "搜索" },
+  grep: { icon: "🔍", label: "搜索内容" },
+  find: { icon: "🔍", label: "查找文件" },
+  glob: { icon: "🔍", label: "查找文件" }, // 别名兜底;host 内建工具名是 find(见 SDK ToolName)
+  ls: { icon: "📂", label: "浏览目录" },
+  fetch: { icon: "🌐", label: "抓取网页" },
+  web_search: { icon: "🌐", label: "联网搜索" },
+  update_plan: { icon: "🗺️", label: "更新计划" },
+  octo_management: { icon: "💬", label: "Octo 操作" },
+};
+
+/** 工具名 → 图标 + 标签。MCP 工具(`mcp__server__tool`)解析 server/tool。 */
+export function resolveToolMeta(tool: string): { icon: string; label: string } {
+  // 特殊内部 tool 名:agent 一轮 model_call = 一步"思考"(P1-g)。以 __ 前缀,agent 侧无冲突可能。
+  if (tool === "__thinking__") return { icon: "💭", label: "思考" };
+  if (tool.startsWith(MCP_TOOL_PREFIX)) {
+    const rest = tool.slice(MCP_TOOL_PREFIX.length).replace(/__/g, " / ");
+    return { icon: "🔌", label: `MCP ${rest}` };
+  }
+  return TOOL_META[tool] ?? { icon: "🔧", label: tool };
+}
+
+const SUMMARY_MAX = 64;
+
+/**
+ * 敏感串守卫模式。群卡片对全体成员可见 —— 摘要一旦命中即整串隐藏(fail-safe:
+ * 宁可误伤含 "token" 字样的正常文本,也不泄露 token/密钥/口令)。
+ */
+const SECRET_RE =
+  /token|api[_-]?key|secret|password|passwd|pwd|authorization|bearer|access[_-]?key|client[_-]?secret|credential/i;
+
+/**
+ * 明确前缀式凭据形状(AKIA/GitHub/Slack/OpenAI/JWT)。这些格式**在任何位置都几乎不可能
+ * 是正常内容**,故对所有策略(含 path/shell)都应用 —— 关键词正则只认密钥名字,认不出这些形状。
+ */
+// 关键:这些前缀模式**不加前导 `\b`/`(?<!\w)` 词界锚点**。词界锚点会被"前面粘一个词字符"
+// (`xAKIA…`、`KeyAKIA…`)绕过 —— 短前缀(AKIA=20 / sk-≈19 / Slack / JWT)又都短于 32 位,
+// 逃过高熵兜底 → 明文密钥渲进群卡片(yujiawei 复现的 P1)。故按**无锚点子串**匹配;`{16,}`/`{20,}`
+// 长度下限仍能把连字符英文(`risk-averse`/`task-force`)挡在外面。宁可过度隐藏,绝不泄露。
+const SECRET_PREFIX_RES: RegExp[] = [
+  /AKIA[0-9A-Z]{12,}/,                                  // AWS access key id
+  /(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}/,         // GitHub token / fine-grained PAT
+  /xox[baprs]-[A-Za-z0-9-]{10,}/,                       // Slack bot/user token
+  /xapp-[0-9]-[A-Za-z0-9-]{10,}/,                       // Slack app-level token
+  /sk-[A-Za-z0-9_-]{16,}/,                              // OpenAI-style secret key
+  /[srp]k_(?:live|test)_[A-Za-z0-9]{10,}/,             // Stripe secret/restricted/publishable
+  /glpat-[A-Za-z0-9_-]{16,}/,                           // GitLab personal access token
+  /AIza[0-9A-Za-z_-]{30,}/,                             // Google API key
+  /npm_[A-Za-z0-9]{30,}/,                               // npm automation token
+  /shpat_[A-Fa-f0-9]{32,}/,                             // Shopify access token
+  /dop_v1_[A-Fa-f0-9]{32,}/,                            // DigitalOcean PAT
+  /eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+/, // JWT
+];
+
+/** 长 hex(md5/sha/hex 密钥)。也命中 git object/docker digest 等常见路径,故仅用于 query/url。 */
+const LONG_HEX_RE = /\b[0-9a-fA-F]{32,}\b/;
+
+/**
+ * 通用高熵串:32+ 位连续 base64/base64url 段。会误伤
+ * webpack 缓存名/UUID 目录等常见路径,故与长 hex 一样**仅用于 query/url**(裸 token 的场景),
+ * 不套用到 path/shell。只按长度会误伤长英文(如 80 个 `x`),故要求字母数字混合,
+ * 或出现 base64/base64url 特有的 `+ / = _ -` 信号。
+ */
+function hasGenericSecretShape(s: string): boolean {
+  if (LONG_HEX_RE.test(s)) return true;
+  const runs = s.match(/[A-Za-z0-9_+\/=-]{32,}/g);
+  return !!runs && runs.some((r) => (
+    (/[0-9]/.test(r) && /[A-Za-z]/.test(r)) || /[+\/_=-]/.test(r)
+  ));
+}
+
+/**
+ * 是否命中敏感串。`generic` 为 true(query/url 策略)时额外套用长 hex/高熵检测;path/shell
+ * 只走关键词 + 明确前缀,避免把 git SHA / docker digest / 缓存哈希等正常路径误伤成空。
+ * 群卡片对全员可见,任一命中即隐藏。
+ */
+export function isSensitive(s: string, generic: boolean): boolean {
+  if (SECRET_RE.test(s)) return true;
+  if (SECRET_PREFIX_RES.some((re) => re.test(s))) return true;
+  return generic && hasGenericSecretShape(s);
+}
+
+/**
+ * 常见多段有效后缀(eTLD),用于计算注册域时多保留一段。非穷举,只覆盖高频场景;
+ * 未命中的按「末两段」处理即可(始终丢掉子域 → 不会泄露子域里的密钥)。
+ */
+const MULTI_PART_TLDS = new Set([
+  "co.uk", "org.uk", "gov.uk", "ac.uk",
+  "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn",
+  "com.au", "com.br", "com.hk", "com.tw", "com.sg", "co.jp", "co.kr",
+]);
+
+/**
+ * 取注册域(丢掉所有子域):隧道/预签名场景**主机名本身就是密钥**(如 ngrok 随机子域、
+ * 预签名 bucket 名),故只保留 eTLD+1。多段后缀(com.cn/co.uk 等)多保留一段。
+ * 纯 IPv4 原样返回。
+ */
+function registrableDomain(host: string): string {
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return host; // IPv4 原样
+  const labels = host.split(".");
+  if (labels.length <= 2) return host;
+  const last2 = labels.slice(-2).join(".");
+  const keep = MULTI_PART_TLDS.has(last2) ? 3 : 2;
+  return labels.slice(-keep).join(".");
+}
+
+/**
+ * 工具 → 摘要提取策略(allowlist)。未列出的工具(含 MCP、未知工具)一律**不显示摘要**,
+ * 杜绝把任意参数直渲到群卡片的泄露面。
+ */
+type SummaryStrategy = "path" | "shell" | "url" | "query";
+const SUMMARY_STRATEGY: Record<string, SummaryStrategy> = {
+  read: "path", write: "path", edit: "path", apply_patch: "path", ls: "path", find: "path", glob: "path",
+  exec: "shell", bash: "shell", shell: "shell", process: "shell",
+  fetch: "url",
+  web_search: "query", search: "query", grep: "query",
+};
+
+/**
+ * 深路径智能压缩 —— 保留末 2 段(倒数第二段 + 文件名),前缀省略号。
+ * 段数 ≤ 3 时原样返回(信息量不大,压缩反而丢上下文);
+ * 末段(文件名/最深目录)永远完整,防止只见 `.../SKILL.md` 分不出是哪个 skill。
+ *
+ * 例:
+ *   /root/.openclaw/workspace/octo-server/modules/bot_api/send.go → …/bot_api/send.go
+ *   /work/README.md                                                → /work/README.md (未压缩)
+ *   docs/card-protocol.md                                          → docs/card-protocol.md (未压缩)
+ *
+ * 家目录/绝对根不做特殊 `~` 标记,保持规则简单一致。空路径原样返回。
+ */
+function shortenPath(p: string): string {
+  if (!p) return p;
+  // 用 posix 分隔符做主判定;Windows `\` 若出现也能处理,但 shell/工具场景以 posix 为主。
+  const segs = p.split("/").filter((s) => s.length > 0);
+  if (segs.length <= 3) return p;
+  return `…/${segs[segs.length - 2]}/${segs[segs.length - 1]}`;
+}
+
+/** 取 keys 中首个非空字符串值。 */
+function firstString(p: Record<string, unknown>, keys: string[]): string {
+  for (const k of keys) {
+    const v = p[k];
+    if (typeof v === "string" && v.trim()) return v;
+  }
+  return "";
+}
+
+/**
+ * shell:只取程序名。跳过前缀式环境变量赋值(`VAR=value cmd ...`)—— 否则会把密钥值
+ * (如 `SLACK_WEBHOOK=https://…`、`MY_CREDS=xxx`)当成程序名原样渲染,且这类变量名多不含
+ * token/secret 等关键词,躲过 SECRET_RE。不渲染任何参数。
+ *
+ * 落定的 program token 再过一层保守形状校验:只接受 `[\w./@:+-]`(程序名/路径的合法字符)。
+ * 空白分词无法解析带引号的多词值(`TOKEN="a b" cmd` 会切成 `TOKEN="a`/`b"`/`cmd`,跳过
+ * 首个后落在片段 `b"`),含引号/空格/等号等异常字符的 token 一律判为可疑值片段 → 不展示。
+ */
+const PROGRAM_TOKEN_RE = /^[A-Za-z0-9_./@:+-]+$/;
+function summarizeShell(p: Record<string, unknown>): string {
+  const cmd = firstString(p, ["command", "cmd"]).trim();
+  if (!cmd) return "";
+  const tokens = cmd.split(/\s+/);
+  let i = 0;
+  while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i])) i++;
+  const prog = tokens[i] ?? "";
+  return PROGRAM_TOKEN_RE.test(prog) ? prog : "";
+}
+
+/**
+ * URL → `scheme://注册域`。丢弃 path/query/userinfo **和所有子域**:凭据既可能在 query,
+ * 也常整段嵌在 path 里(Slack/Discord webhook `/services/T../B../XXXX`),更有隧道/预签名
+ * 场景**主机名本身即密钥**(ngrok 随机子域、预签名 bucket 名)—— 这些随机串不含关键词、躲过
+ * SECRET_RE。故只暴露注册域(eTLD+1)。解析失败返回 null(原串可能含 token,调用方丢弃)。
+ */
+function originDomain(rawUrl: string): string | null {
+  try {
+    const u = new URL(rawUrl);
+    return `${u.protocol}//${registrableDomain(u.hostname)}`;
+  } catch {
+    return null;
+  }
+}
+
+/** 协议相对 URL(`//host/path`):按 https 处理。 */
+const PROTOCOL_RELATIVE_RE =
+  /(^|[^A-Za-z0-9/:])\/\/[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?::\d+)?(?:\/[^\s]*)?/g;
+/** 无 scheme 的 userinfo DSN(`user:pass@host[:port][/path]`):userinfo 即明文口令。密码可含 `@`,按最后一个 `@` 分隔主机。 */
+const SCHEMELESS_USERINFO_RE =
+  /\b[A-Za-z0-9._%+-]+:[^\s/]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::\d+)?(?:\/[^\s]*)?/g;
+/** 任意无 scheme 的 `host.tld/path`:path 常承载 webhook token、签名或对象凭据。 */
+const SCHEMELESS_HOST_PATH_RE =
+  /(^|[^A-Za-z0-9@._/:+-])([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?::\d+)?\/[^\s]+)/g;
+
+/** 把文本里内嵌的 URI 就地降级为 scheme://注册域(解析失败则整段抹除)。 */
+export function reduceUrlsInText(s: string): string {
+  // 1. 任意 `scheme://…`,不止 http(s):DB/AMQP/ssh DSN(postgres://user:pass@host 等)也常
+  //    出现在 query/shell/错误文本里,userinfo 即明文密码。要求 `://` 故不误伤 Windows 盘符(C:/)。
+  let out = s.replace(/[a-z][a-z0-9+.-]*:\/\/[^\s]+/gi, (m) => originDomain(m) ?? "");
+  // 2. 协议相对 `//host/path`:补 https 后降级(secret 可能在 path)。
+  out = out.replace(PROTOCOL_RELATIVE_RE, (_m, p1: string) => {
+    const url = _m.slice(p1.length); // 去掉前导分隔符
+    return p1 + (originDomain(`https:${url}`) ?? "");
+  });
+  // 3. 无 scheme 的 userinfo DSN(`user:pass@host…`):只留注册域,丢 userinfo/path。
+  out = out.replace(SCHEMELESS_USERINFO_RE, (m) => {
+    const host = m.slice(m.lastIndexOf("@") + 1).split(/[/:]/)[0];
+    return originDomain(`https://${host}`) ?? "";
+  });
+  // 4. 任意无 scheme 的 `host.tld/path`:保留注册域,统一抹掉可能承载凭据的 path。
+  out = out.replace(SCHEMELESS_HOST_PATH_RE, (_m, prefix: string, hostAndPath: string) => (
+    prefix + (originDomain(`https://${hostAndPath}`) ?? "")
+  ));
+  return out;
+}
+
+/** url 策略:取 url 参数并降级为注册域。 */
+function summarizeUrl(p: Record<string, unknown>): string {
+  const raw = firstString(p, ["url"]);
+  if (!raw) return "";
+  return originDomain(raw) ?? "";
+}
+
+/**
+ * 从工具参数提取一句人可读摘要 —— 按工具 allowlist 策略取值,未知/MCP 工具不显示,
+ * 命中敏感串则整串隐藏,最后折叠空白并截断。群卡片对全员可见,安全优先于信息量。
+ */
+export function summarizeToolParams(toolName: string | undefined, params: unknown): string {
+  if (!toolName || !params || typeof params !== "object") return "";
+  const strategy = SUMMARY_STRATEGY[toolName];
+  if (!strategy) return ""; // MCP / 未知工具:不渲染任意参数
+  const p = params as Record<string, unknown>;
+  let v: string;
+  switch (strategy) {
+    case "path": v = shortenPath(firstString(p, ["path", "file_path", "file"])); break;
+    case "shell": v = summarizeShell(p); break;
+    case "url": v = summarizeUrl(p); break;
+    case "query": v = firstString(p, ["query", "pattern"]); break;
+  }
+  if (!v) return "";
+  let s = v.replace(/\s+/g, " ").trim();
+  // 单一 choke point:所有策略统一把内嵌 URL 降级为 scheme://注册域。避免逐 sink 加降级时
+  // 漏掉某个策略(query 的 pattern、shell 的 URL-as-program 都会原样渲染 webhook/userinfo/内网主机)。
+  s = reduceUrlsInText(s).replace(/\s+/g, " ").trim();
+  // query/url 是「裸 token」易出没处 → 额外套用通用高熵/长 hex 检测;path/shell 只走关键词
+  // + 明确前缀,避免把 git SHA / docker digest / 缓存哈希等正常路径误伤成空。
+  const generic = strategy === "query" || strategy === "url";
+  if (!s || isSensitive(s, generic)) return "";
+  return s.length > SUMMARY_MAX ? s.slice(0, SUMMARY_MAX) + "…" : s;
+}
+
+/** ms → 友好耗时(<1s 用 ms,否则 x.xs)。 */
+export function fmtDuration(ms?: number): string {
+  if (typeof ms !== "number") return "";
+  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
+/** 错误文本展示上限(比参数摘要略宽,但仍防多 KB 堆栈撑爆卡片)。 */
+const ERROR_MAX = 120;
+
+/**
+ * 清洗工具错误文本后再渲染 —— 错误串是与参数摘要**同等**的泄露 sink:常含 stderr、
+ * 失败命令输出、请求 URL/header、webhook 路径、token、文件片段,且长度不可控。清洗顺序:
+ *   1. 折叠空白;
+ *   2. **内嵌 URL 降级为 scheme://注册域**(与参数路径 summarizeUrl 对称)—— 否则 webhook
+ *      路径/隧道主机等短、无关键词的密钥会绕过下面的 isSensitive 直接泄露;
+ *   3. 关键词/明确前缀/通用高熵命中则整串隐藏。带 `commit`/`sha`/`digest` 标签的普通构建
+ *      哈希先从高熵检测中排除,兼顾错误可读性与裸凭据 fail-closed;
+ *   4. 截断到 ERROR_MAX。
+ */
+export function sanitizeErrorText(err?: string): string {
+  if (!err) return "";
+  let s = err.replace(/\s+/g, " ").trim();
+  if (!s) return "";
+  s = reduceUrlsInText(s).replace(/\s+/g, " ").trim(); // URL 降级可能留下空隙
+  if (!s || isSensitiveErrorText(s)) return "";
+  return s.length > ERROR_MAX ? s.slice(0, ERROR_MAX) + "…" : s;
+}
+
+/** 错误文本允许明确标注的构建哈希,但未标注的长 hex/base64 一律按凭据处理。 */
+const BENIGN_ERROR_HASH_RE =
+  /\b(?:commit|revision|rev|digest|sha(?:-?(?:1|256))?)\b\s*(?:at\s+)?(?::|=|#)?\s*(?:sha256:)?[0-9a-fA-F]{32,64}\b/gi;
+
+function isSensitiveErrorText(s: string): boolean {
+  if (isSensitive(s, false)) return true;
+  return hasGenericSecretShape(s.replace(BENIGN_ERROR_HASH_RE, ""));
+}
+
+/** 工具名 label 展示上限。MCP 工具名可能很长,防其撑爆卡片。 */
+const LABEL_MAX = 40;
+
+/**
+ * 工具名 label 也是群可见 sink(与 params/error 一致):tool 名来自 registry/MCP 配置,长名会
+ * 撑卡片,疑似密钥形状的标识符不应渲出。清洗与其它 sink 对齐:先 URL 降级(注册域),再命中
+ * 敏感 → 回退通用「工具」,否则截断。(label 通常无 URL,reduceUrlsInText 为 no-op;统一以防
+ * MCP/动态工具名里嵌了 webhook/DSN 形状。)
+ */
+function safeLabel(label: string): string {
+  const s = reduceUrlsInText(label);
+  if (isSensitive(s, true)) return "工具";
+  return s.length > LABEL_MAX ? s.slice(0, LABEL_MAX) + "…" : s;
+}
+
+/** 单步 → 一行文案:图标 + 标签 + 参数摘要 + 状态/耗时。错误详情经脱敏+截断,label 经脱敏+截断。 */
+export function stepLine(step: CardStep): string {
+  const { icon, label: rawLabel } = resolveToolMeta(step.tool);
+  const label = safeLabel(rawLabel);
+  const sum = step.summary ? `：${step.summary}` : "";
+  if (step.status === "running") return `⏳ ${label}${sum}`;
+  if (step.status === "error") {
+    const detail = sanitizeErrorText(step.error);
+    return `❌ ${label}${sum}${detail ? ` — ${detail}` : ""}`;
+  }
+  const dur = fmtDuration(step.durationMs);
+  return `${icon} ${label}${sum}${dur ? ` · ${dur}` : ""}`;
+}
+
+function headerText(state: CardProgressState): string {
+  switch (state.phase) {
+    case "thinking":
+      return "🤖 思考中…";
+    case "tool":
+      return "🤖 正在处理…";
+    case "error": {
+      const detail = sanitizeErrorText(state.errorText);
+      return `⚠️ 已中断${detail ? `：${detail}` : ""}`;
+    }
+    case "done": {
+      const n = state.steps.length;
+      const secs = fmtDuration(state.elapsedMs);
+      const parts = ["✅ 已完成"];
+      if (n > 0) parts.push(`${n} 步`);
+      if (secs) parts.push(secs);
+      return parts.join(" · ");
+    }
+  }
+}
+
+/** octo/v1 1.5 已验证可安全渲染的展示元素基线(manifest 未 advertise elements 时用)。 */
+const BASELINE_ELEMENTS: ReadonlySet<string> = new Set([
+  "TextBlock", "Container", "ColumnSet", "FactSet", "Image",
+]);
+
+/**
+ * 输入/动作**没有安全基线** —— server 未 advertise 时消费方**保守视为不支持**(fail-closed),
+ * 避免 producer 乐观发出旧部署不认的 Input.Number/Action.ToggleVisibility 等致 400。
+ */
+const BASELINE_INPUTS: ReadonlySet<string> = new Set();
+const BASELINE_ACTIONS: ReadonlySet<string> = new Set();
+
+/**
+ * 服务端能力(D12 manifest 派生),供渲染按元素/结构上限裁剪。全可选,缺省即保守默认:
+ * 未 advertise elements → 用 BASELINE_ELEMENTS;未 advertise inputs/actions → 空集(fail-closed);
+ * 未给 maxNodes → 用本地 MAX_VISIBLE_STEPS。
+ */
+export interface CardCaps extends CardLimits {
+  /** 服务端 advertise 的元素白名单(pkg/cardmsg 权威)。 */
+  elements?: ReadonlySet<string>;
+  /** 服务端 advertise 的输入白名单(Input.Text/Toggle/ChoiceSet/Number/Date/Time)。 */
+  inputs?: ReadonlySet<string>;
+  /** 服务端 advertise 的动作白名单(v1 本地/导航动作 + v2 Submit 回流动作)。 */
+  actions?: ReadonlySet<string>;
+  /** 递归节点数上限(limits.max_nodes)。 */
+  maxNodes?: number;
+  /** 渲染后 JSON 对象最大深度(limits.max_depth)。 */
+  maxDepth?: number;
+  /** 完整 type-17 payload UTF-8 字节上限(limits.max_payload_bytes)。 */
+  maxPayloadBytes?: number;
+}
+
+/**
+ * 元素/输入/动作是否可安全渲染 —— 按前缀分派到对应 caps 桶。
+ * - `Input.*` → `caps.inputs`(不给则 fail-closed)
+ * - `Action.*` → `caps.actions`(不给则 fail-closed)
+ * - 其它 → `caps.elements`(不给则用保守基线,与旧行为兼容)
+ * 一个函数覆盖三类,调用方无需分派;新增类别只需在此扩前缀即可。
+ */
+export function cardSupports(caps: CardCaps | undefined, kind: string): boolean {
+  if (kind.startsWith("Input.")) return (caps?.inputs ?? BASELINE_INPUTS).has(kind);
+  if (kind.startsWith("Action.")) return (caps?.actions ?? BASELINE_ACTIONS).has(kind);
+  return (caps?.elements ?? BASELINE_ELEMENTS).has(kind);
+}
+
+/**
+ * 展示步骤上限。长任务工具调用不断累积,全量渲染会撑爆卡片、超服务端结构上限致 edit 400。
+ * 优先用服务端权威 max_nodes 推导上限(每步 1 节点),缺省退回本地保守值。
+ */
+const MAX_VISIBLE_STEPS = 12;
+
+function maxVisibleSteps(caps: CardCaps | undefined): number {
+  if (!caps?.maxNodes) return MAX_VISIBLE_STEPS;
+  const reserve = 2; // header + 折叠计数行
+  const byNodes = Math.max(1, caps.maxNodes - reserve); // 每步 = 1 元素(rich 或 TextBlock,同为 1)
+  return Math.min(MAX_VISIBLE_STEPS, byNodes);
+}
+
+/**
+ * 单步 → RichTextBlock 的多段 inlines(供 buildDisplayCard 的 rich block 使用):
+ *   状态图标 | label(Bolder) | :摘要 | · 耗时/— 错误详情(good/attention 着色)
+ * 段拼接后与 `stepLine(step)` 输出完全一致 —— 保证 plain 兜底不变,且降级到 TextBlock 时视觉等价。
+ */
+function stepSegments(step: CardStep): RichSegment[] {
+  const { icon, label: rawLabel } = resolveToolMeta(step.tool);
+  const label = safeLabel(rawLabel);
+  const sum = step.summary ? step.summary : "";
+  if (step.status === "running") {
+    return [
+      { text: "⏳ " },
+      { text: label, bold: true },
+      ...(sum ? [{ text: "：" }, { text: sum, fontType: "Monospace" as const }] : []),
+    ];
+  }
+  if (step.status === "error") {
+    const detail = sanitizeErrorText(step.error);
+    const segs: RichSegment[] = [
+      { text: "❌ " },
+      { text: label, bold: true },
+      ...(sum ? [{ text: "：" }, { text: sum, fontType: "Monospace" as const }] : []),
+    ];
+    if (detail) segs.push({ text: ` — ${detail}`, color: "attention" });
+    return segs;
+  }
+  const dur = fmtDuration(step.durationMs);
+  const segs: RichSegment[] = [
+    { text: `${icon} ` },
+    { text: label, bold: true },
+    ...(sum ? [{ text: "：" }, { text: sum, fontType: "Monospace" as const }] : []),
+  ];
+  if (dur) segs.push({ text: ` · ${dur}`, color: "good" });
+  return segs;
+}
+
+/**
+ * 同类合并的一"组":≥2 个连续同 tool 且全 done 的步骤压成一行,大幅缩视觉噪音。
+ * 显示:`<icon> <label> × N · 共 <总耗时> — 最近: <最后一个 summary>`
+ * running/error 步骤不参与合并(单独调 stepSegments),避免糊掉当前重点。
+ */
+function groupSegments(group: CardStep[]): RichSegment[] {
+  const first = group[0];
+  const { icon, label: rawLabel } = resolveToolMeta(first.tool);
+  const label = safeLabel(rawLabel);
+  // 仅在至少一步有耗时时才展示总耗时,否则不显示(避免全 undefined 渲成误导性的「共 0ms」)。
+  const anyDuration = group.some((s) => typeof s.durationMs === "number");
+  const total = group.reduce((acc, s) => acc + (s.durationMs ?? 0), 0);
+  const dur = anyDuration ? fmtDuration(total) : "";
+  const last = group[group.length - 1];
+  const lastSum = last.summary ? last.summary : "";
+  const segs: RichSegment[] = [
+    { text: `${icon} ` },
+    { text: label, bold: true },
+    { text: ` × ${group.length}` },
+  ];
+  if (dur) segs.push({ text: ` · 共 ${dur}`, color: "good" });
+  if (lastSum) segs.push({ text: " — 最近: " }, { text: lastSum, fontType: "Monospace" });
+  return segs;
+}
+
+/**
+ * 把可见步骤按"相邻同 tool 且全 done"分组:连续 ≥2 个 done → 合并组;单个 done / running / error
+ * → 各自一组(即"单元素组")。返回二维数组,每个内数组是一段。
+ *
+ * 分组只在 done 之间做:running 与 error 不合并 —— 当前重点(还在跑/失败了)必须显眼。
+ */
+function groupSteps(steps: CardStep[]): CardStep[][] {
+  const out: CardStep[][] = [];
+  let i = 0;
+  while (i < steps.length) {
+    const cur = steps[i];
+    if (cur.status !== "done") {
+      out.push([cur]);
+      i++;
+      continue;
+    }
+    let j = i + 1;
+    while (j < steps.length && steps[j].tool === cur.tool && steps[j].status === "done") j++;
+    out.push(steps.slice(i, j));
+    i = j;
+  }
+  return out;
+}
+
+/** 显式 advertise 富布局能力时,把步骤收进 Container 分组;旧部署保持平铺零回归。 */
+function supportsTimelineLayout(caps: CardCaps | undefined): boolean {
+  return !!caps?.elements && cardSupports(caps, "Container") && cardSupports(caps, "RichTextBlock");
+}
+
+/**
+ * 进度视觉分组:每个 thinking 步开启一个阶段,后续 tool call 收在同一阶段里,直到下一次
+ * thinking。SDK 当前不给 thinking 正文,这里只能展示 thinking 耗时 + 工具摘要。
+ */
+function timelineGroups(steps: CardStep[]): CardStep[][] {
+  const groups: CardStep[][] = [];
+  let cur: CardStep[] = [];
+  for (const step of steps) {
+    if (step.tool === "__thinking__" && cur.length > 0) {
+      groups.push(cur);
+      cur = [];
+    }
+    cur.push(step);
+  }
+  if (cur.length > 0) groups.push(cur);
+  return groups;
+}
+
+function timelineGroupStyle(group: CardStep[]): "default" | "warning" | "attention" | undefined {
+  if (group.some((s) => s.status === "error")) return "attention";
+  if (group.some((s) => s.status === "running")) return "warning";
+  return "default";
+}
+
+function renderStepBlocks(steps: CardStep[]): DisplayBlock[] {
+  return groupSteps(steps).map((g) => ({
+    type: "rich" as const,
+    segments: g.length > 1 ? groupSegments(g) : stepSegments(g[0]),
+  }));
+}
+
+function renderProgressDetailBlocks(steps: CardStep[], caps: CardCaps | undefined): DisplayBlock[] {
+  if (supportsTimelineLayout(caps)) {
+    return timelineGroups(steps).map((g) => ({
+      type: "group" as const,
+      style: timelineGroupStyle(g),
+      blocks: renderStepBlocks(g),
+    }));
+  }
+  return renderStepBlocks(steps);
+}
+
+function supportsTerminalCollapse(caps: CardCaps | undefined): boolean {
+  return (
+    cardSupports(caps, "Container") &&
+    cardSupports(caps, "ColumnSet") &&
+    cardSupports(caps, "ActionSet") &&
+    cardSupports(caps, "Action.ToggleVisibility")
+  );
+}
+
+function progressSummary(steps: CardStep[], total: number): string {
+  const thinking = steps.filter((s) => s.tool === "__thinking__").length;
+  const tools = total - thinking;
+  const parts = ["推理与工具调用"];
+  if (thinking > 0) parts.push(`思考 ${thinking}`);
+  if (tools > 0) parts.push(`工具 ${tools}`);
+  if (thinking === 0 && tools === 0) parts.push(`${total} 步`);
+  return parts.join(" · ");
+}
+
+function terminalHeaderSegments(state: CardProgressState): RichSegment[] | null {
+  if (state.phase === "done") {
+    const n = state.steps.length;
+    const secs = fmtDuration(state.elapsedMs);
+    const stats = [n > 0 ? `${n} 步` : "", secs].filter(Boolean).join(" · ");
+    return [
+      { text: "✅ 已完成", bold: true },
+      ...(stats ? [{ text: ` · ${stats}`, subtle: true } satisfies RichSegment] : []),
+    ];
+  }
+  if (state.phase === "error") {
+    const detail = sanitizeErrorText(state.errorText);
+    return [
+      { text: "⚠️ 已中断", bold: true },
+      ...(detail ? [{ text: `：${detail}`, color: "attention" } satisfies RichSegment] : []),
+    ];
+  }
+  return null;
+}
+
+function progressSummarySegments(steps: CardStep[], total: number, visible: string): RichSegment[] {
+  const thinking = steps.filter((s) => s.tool === "__thinking__").length;
+  const tools = total - thinking;
+  const stats: string[] = [];
+  if (thinking > 0) stats.push(`思考 ${thinking}`);
+  if (tools > 0) stats.push(`工具 ${tools}`);
+  stats.push(`${visible} 步`);
+  return [
+    { text: "推理与工具调用", bold: true },
+    { text: ` · ${stats.join(" · ")}`, subtle: true },
+  ];
+}
+
+function richTextBlock(segments: RichSegment[]): Record<string, unknown> {
+  return {
+    type: "RichTextBlock",
+    inlines: segments.map((s) => ({
+      type: "TextRun",
+      text: s.text,
+      ...(s.bold ? { weight: "Bolder" } : {}),
+      ...(s.subtle ? { isSubtle: true } : {}),
+      ...(s.fontType ? { fontType: s.fontType } : {}),
+      ...(s.color && s.color !== "default" ? { color: s.color } : {}),
+    })),
+  };
+}
+
+function textBlock(text: string, opts?: { bold?: boolean; subtle?: boolean; size?: "Medium" }): Record<string, unknown> {
+  return {
+    type: "TextBlock",
+    text,
+    wrap: true,
+    ...(opts?.bold ? { weight: "Bolder" } : {}),
+    ...(opts?.subtle ? { isSubtle: true } : {}),
+    ...(opts?.size ? { size: opts.size } : {}),
+  };
+}
+
+function progressHeaderSegments(state: CardProgressState, fallbackHeader: string): RichSegment[] {
+  return terminalHeaderSegments(state) ?? [{ text: fallbackHeader, bold: true }];
+}
+
+function progressSummaryText(steps: CardStep[], total: number, visible: string): string {
+  return `${progressSummary(steps, total)} · ${visible} 步`;
+}
+
+function progressHeaderItems(
+  state: CardProgressState,
+  header: string,
+  steps: CardStep[],
+  total: number,
+  visible: string,
+  canRichText: boolean,
+): Record<string, unknown>[] {
+  const items: Record<string, unknown>[] = [];
+  if (canRichText) {
+    items.push(richTextBlock(progressHeaderSegments(state, header)));
+    if (total > 0) items.push(richTextBlock(progressSummarySegments(steps, total, visible)));
+    return items;
+  }
+  items.push(textBlock(header, { bold: true, size: "Medium" }));
+  if (total > 0) items.push(textBlock(progressSummaryText(steps, total, visible), { subtle: true }));
+  return items;
+}
+
+function progressToggleColumn(startVisible: boolean): Record<string, unknown> | null {
+  return {
+    type: "Column",
+    width: "auto",
+    items: [
+      {
+        type: "ActionSet",
+        id: AGENT_PROGRESS_COLLAPSE_ID,
+        isVisible: startVisible,
+        actions: [
+          {
+            type: "Action.ToggleVisibility",
+            title: "收起推理",
+            targetElements: [
+              { elementId: AGENT_PROGRESS_DETAIL_ID, isVisible: false },
+              { elementId: AGENT_PROGRESS_COLLAPSE_ID, isVisible: false },
+              { elementId: AGENT_PROGRESS_EXPAND_ID, isVisible: true },
+            ],
+          },
+        ],
+      },
+      {
+        type: "ActionSet",
+        id: AGENT_PROGRESS_EXPAND_ID,
+        isVisible: !startVisible,
+        actions: [
+          {
+            type: "Action.ToggleVisibility",
+            title: "展开推理",
+            targetElements: [
+              { elementId: AGENT_PROGRESS_DETAIL_ID, isVisible: true },
+              { elementId: AGENT_PROGRESS_COLLAPSE_ID, isVisible: true },
+              { elementId: AGENT_PROGRESS_EXPAND_ID, isVisible: false },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+/**
+ * 渲染进度卡 —— header/toggle 使用 agent_progress_v1 专用根结构;步骤明细仍走
+ * buildDisplayCard 底座(吃自己狗粮),复用协商降级与脱敏。
+ * 每步用 rich block(advertise RichTextBlock 时是 RichTextBlock 富行、否则 TextBlock 平铺 —— 一行完整,
+ * 不像 ColumnSet 会被服务端权威 plain 重算成图标/文本两行)。
+ * 可见步数受服务端 max_nodes 权威约束(缺省用本地上限)。
+ *
+ * 返回 `{ card, plain }`:card = AC 1.5 JSON;plain = 纯文本兜底(与布局无关;服务端 Finalize 会
+ * 权威重算)。plain 空则回退 CARD_PLACEHOLDER。
+ */
+export function renderProgressCard(
+  state: CardProgressState,
+  caps?: CardCaps,
+): {
+  card: Record<string, unknown>;
+  plain: string;
+} {
+  const header = headerText(state);
+  const cap = maxVisibleSteps(caps);
+  const total = state.steps.length;
+  // 只展示最近 cap 步;更早的折叠成一行计数,避免卡片无界膨胀。
+  const hidden = Math.max(0, total - cap);
+  const visibleSteps = hidden > 0 ? state.steps.slice(-cap) : state.steps;
+  const canRichText = cardSupports(caps, "RichTextBlock");
+  const visible = hidden > 0 ? `${visibleSteps.length}/${total}` : `${total}`;
+
+  const renderFlatFallback = (): { card: Record<string, unknown>; plain: string } => {
+    // The specialized layout is all-or-nothing. Once either root element is unavailable or
+    // the enhanced tree exceeds a hard limit, use only the universally degradable TextBlock
+    // surface and omit agent_progress_v1 metadata so clients use ordinary AC rendering.
+    const flatCaps: CardCaps = {
+      ...caps,
+      elements: new Set(["TextBlock"]),
+      inputs: new Set(),
+      actions: new Set(),
+    };
+    const flatBlocks: DisplayBlock[] = [];
+    if (total > 0) flatBlocks.push({ type: "text", text: progressSummaryText(state.steps, total, visible) });
+    if (hidden > 0) flatBlocks.push({ type: "text", text: `… 省略前 ${hidden} 步` });
+    flatBlocks.push(...renderProgressDetailBlocks(visibleSteps, flatCaps));
+    const flat = buildDisplayCard({ title: header, blocks: flatBlocks, caps: flatCaps, trusted: true });
+    return { card: flat.card, plain: flat.plain || CARD_PLACEHOLDER };
+  };
+
+  if (!cardSupports(caps, "ColumnSet") || !cardSupports(caps, "Container")) {
+    return renderFlatFallback();
+  }
+
+  const detailBlocks: DisplayBlock[] = [];
+  if (hidden > 0) detailBlocks.push({ type: "text", text: `… 省略前 ${hidden} 步` });
+  detailBlocks.push(...renderProgressDetailBlocks(visibleSteps, caps));
+
+  // trusted:进度卡的每行文案已在上游逐 sink 脱敏(summarizeToolParams/sanitizeErrorText/safeLabel:
+  // URL 已降级、path/shell 按 generic=false 保留 git SHA/digest)。buildDisplayCard 默认 generic=true
+  // 会二次套用长 hex/高熵检测,误删含哈希的正常行、甚至把错误终态帧整卡清空 —— 故此路径关掉严格 generic。
+  const detail = buildDisplayCard({ blocks: detailBlocks, caps, trusted: true });
+  const headerItems = progressHeaderItems(state, header, state.steps, total, visible, canRichText);
+  const canToggle = supportsTerminalCollapse(caps);
+  const isTerminal = state.phase === "done" || state.phase === "error";
+  const detailVisible = !(canToggle && isTerminal);
+  const columns: Record<string, unknown>[] = [
+    {
+      type: "Column",
+      width: "stretch",
+      items: headerItems,
+    },
+  ];
+  if (canToggle) {
+    const toggleColumn = progressToggleColumn(detailVisible);
+    if (toggleColumn) columns.push(toggleColumn);
+  }
+
+  const card: Record<string, unknown> = {
+    type: "AdaptiveCard",
+    version: CARD_VERSION,
+    $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
+    body: [
+      {
+        type: "ColumnSet",
+        columns,
+      },
+      {
+        type: "Container",
+        id: AGENT_PROGRESS_DETAIL_ID,
+        isVisible: detailVisible,
+        items: (detail.card.body as unknown[]) ?? [],
+      },
+    ],
+  };
+  card.metadata = { octo_layout: OCTO_CARD_LAYOUTS.agentProgressV1 };
+  const summaryPlain = total > 0 ? progressSummaryText(state.steps, total, visible) : "";
+  const plain = [header, summaryPlain, detail.plain].filter(Boolean).join("\n");
+  if (!cardFitsLimits(card, plain || CARD_PLACEHOLDER, caps)) {
+    return renderFlatFallback();
+  }
+  return { card, plain: plain || CARD_PLACEHOLDER };
+}

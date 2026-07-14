@@ -150,6 +150,17 @@ export enum MessageType {
    * 顺序即图文穿插顺序；顶层 `plain` 为冗余纯文本，契约上由 server 权威生成。
    */
   RichText = 14,
+  /**
+   * 交互卡片（Adaptive Cards 1.5 子集，"octo/v1" profile）。对应 octo-server
+   * PR #525 P1 `card-message-protocol`，ContentType=17。
+   *
+   * ⚠️ 与 `Card=7`（名片/contact card）语义无关 —— octo-server Decision 1 明确
+   * InteractiveCard(17) ≠ common.Card(7)，不要把新逻辑接到 7 上。
+   *
+   * payload 信封：`{ type:17, card:{标准 AC1.5 JSON}, plain:"(server 权威重算)" }`
+   * + 顶层 `profile`/`card_version`。adapter 入站仅消费服务端权威 `plain`。
+   */
+  InteractiveCard = 17,
 }
 
 /** RichText(=14) 单个 block 类型常量（与 octo-lib RichTextBlockText/Image 对齐）。 */
@@ -188,6 +199,34 @@ export interface RichTextPayload {
   content: RichTextBlock[];
   /** 冗余纯文本，契约上由 server 生成；adapter 出站可附带，server 会覆盖。 */
   plain?: string;
+}
+
+/**
+ * InteractiveCard(=17) 展示/降级占位符（与 octo-server Decision 8 的 `[卡片]`
+ * fallback 对齐）。入站派生 `plain` 为空时使用，保证喂给 LLM 的文本 never empty。
+ */
+export const CARD_PLACEHOLDER = "[卡片]";
+
+/** InteractiveCard(=17) 协议 profile / 版本（octo-server Decision 10 协商值）。 */
+export const CARD_PROFILE = "octo/v1";
+export const CARD_VERSION = "1.5";
+
+/**
+ * InteractiveCard(=17) 消息的 payload 信封（octo-server PR #525 P1）。
+ *
+ *   - `card`  标准 Adaptive Cards 1.5 JSON，服务端按 `octo/v1` 白名单校验；
+ *     adapter 出站原样透传，不在本仓做 schema 校验（服务端 `pkg/cardmsg` 权威）。
+ *   - `plain` 服务端在 dispatch 出口权威重算（Decision 8：never empty，含
+ *     `[卡片]` fallback）。adapter 出站可附带但会被覆盖；**入站只读它**。
+ *   - `profile`/`card_version` 版本协商（Decision 10：非 `octo/v1`+`1.5` → 服务端 400）。
+ */
+export interface InteractiveCardPayload {
+  /** 标准 Adaptive Cards 1.5 JSON（octo/v1 profile）。 */
+  card: Record<string, unknown>;
+  /** 服务端权威纯文本；出站可附带（被覆盖），入站作 LLM 输入。 */
+  plain?: string;
+  profile?: string;
+  card_version?: string;
 }
 
 /**

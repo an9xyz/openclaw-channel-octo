@@ -9,7 +9,7 @@
     "./skills"
   ],
   "contracts": {
-    "tools": ["octo_management"]
+    "tools": ["octo_management", "octo_send_display_card"]
   },
   "activation": {
     "onStartup": true

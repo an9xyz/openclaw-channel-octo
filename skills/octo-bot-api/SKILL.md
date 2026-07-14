@@ -153,6 +153,21 @@ curl -X POST <apiUrl>/v1/bot/sendMessage \
 
 When replying, always use the `channel_id` and `channel_type` from the received event. Do not modify or split the channel_id.
 
+### Sending Cards (Interactive Card, payload.type=17)
+
+Do not overuse card messages. Plain text is the default. Use cards only when structure materially improves comprehension, such as weather, status, lists, comparisons, or detail fields; use plain text for ordinary chat, short answers, and follow-up replies.
+
+Interactive-card details are intentionally kept out of this main skill file. Before sending or editing `payload.type=17` messages, using `octo_send_display_card`, designing normal information cards, or touching agent progress cards, read [references/interactive-card-messages.md](references/interactive-card-messages.md). It contains the octo/v1/v2 boundary, branch availability, feature detection, DisplayBlock schema, normal-card visual rules, agent progress layout, transient edit envelope, and security guardrails.
+
+Hard rules to remember even before opening the reference:
+
+- Display cards (`payload.type=17`, `profile="octo/v1"`) are structured, non-callback output. Submit/click-back cards use `octo/v2` and require event polling.
+- Feature-detect with `GET /v1/bot/card/profile`. `available:true, enabled:false` is an explicit disable; `available:false` is a legacy-endpoint absence and may use the adapter compatibility switch documented in the reference. Otherwise fall back to text.
+- Keep one title, a compact first screen, truthful `plain`, and no raw logs or secrets.
+- Normal information cards should be quiet IM content: avoid large `good/warning/attention` blocks, excessive Bolder headings, and strong CTA-looking copy buttons.
+- Agent progress cards use `metadata.octo_layout = "agent_progress_v1"` with `[ColumnSet, Container#timeline_detail]` only when those elements are supported. The reference defines the flat-card fallback.
+- `octo/v2` callback cards and `octo_send_card` are not delivered by the current P1 branch; their implementation lives on the separate local `feat/card-interaction-c2` branch.
+
 ## Real-time Features
 
 ### Typing Indicator
@@ -279,6 +294,19 @@ if message.channel_id is present               → Group  → reply to (channel_
 - The conversation is casual chatter you weren't asked about — stay out.
 - Someone just said "thanks" or "ok" — no need to respond.
 - You were mentioned but the message is clearly for another user — ignore.
+
+#### Always Close the Turn with Text (CRITICAL)
+
+- **Never end a turn on a tool call.** Tools (including `octo_send_display_card`, `exec`, version checks, etc.) are *actions*, not your reply. After the last tool returns, you **must** still emit a short text message to the user.
+- Sending a display card is a **side effect**, not a conversational answer. If the user asked a question (e.g. "check the versions"), a card alone does not answer it — follow the card with a one-line text reply that states the result (the version numbers, the outcome, or a next step).
+- A turn that finishes with zero text output is judged **incomplete** by the runtime and rendered to the user as an interrupted/failed turn (⚠️ 已中断), even though the tools ran. Always leave a closing sentence so the turn completes cleanly.
+
+#### Never End on a Preamble — Announce Then Actually Do It (CRITICAL)
+
+- A filler / preamble sentence — "我先看看…", "让我查一下…", "稍等，我来处理", "I'll take a look", "let me check" — **must never be the last thing you say in a turn.** It is a promise, not an answer.
+- If you announce an action, you **must** actually perform it **in the same turn**: call the tool(s), then deliver the real result (the file contents, the answer, the outcome). Announcing "我先看看 README" and then ending the turn without reading the file leaves the user staring at an empty promise and asking "然后呢?".
+- Rule of thumb: **either just do it silently and report the result, or say one short "on it" line AND immediately follow with the tool calls + result — never stop after the "on it" line.** When unsure whether more work remains, do the work; do not hand the turn back on a preamble.
+- This is the mirror image of the rule above: there, a turn ended on a tool call with no text; here, a turn ends on text with no follow-through. Both leave the user without the answer they asked for.
 
 ### Conversation Style — Talk Like a Person, Not a Document
 
