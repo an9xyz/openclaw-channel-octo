@@ -28,6 +28,8 @@ export interface OctoAccountConfig {
   botUid?: string;
   historyLimit?: number;  // 群聊历史消息条数限制（默认20）
   historyPromptTemplate?: string;  // Template for group history context injection
+  cardProgress?: boolean;  // false force-disables automatic progress cards; true/unset follows server capabilities
+  cardDisplay?: boolean;  // false force-disables the display-card tool; true/unset follows server capabilities
   onBehalfOf?: string;  // Persona clone: grantor uid — bot acts on behalf of this human
   secretsFileRoot?: string;  // Jail root for write-secret: secret files may only be written under this path. When unset, defaults to the agent's workspace (agents.list[].workspace matched to the agent, else agents.defaults.workspace); if neither resolves, write-secret fails closed (no process.cwd() fallback).
   dispatchTimeoutMs?: number;  // Explicit per-inbound dispatch timeout override (ms). Unset = derived from agents.defaults.timeoutSeconds + 60s buffer (issue #113).
@@ -46,6 +48,8 @@ export interface OctoConfig {
   botUid?: string;
   historyLimit?: number;  // 群聊历史消息条数限制（默认20）
   historyPromptTemplate?: string;  // Template for group history context injection
+  cardProgress?: boolean;  // Top-level default for automatic progress cards
+  cardDisplay?: boolean;  // Top-level default for the display-card tool
   onBehalfOf?: string;  // Persona clone: grantor uid — bot acts on behalf of this human
   secretsFileRoot?: string;  // Jail root for write-secret (see OctoAccountConfig)
   dispatchTimeoutMs?: number;  // Explicit per-inbound dispatch timeout override (ms); see OctoAccountConfig
@@ -71,6 +75,12 @@ export const SECRETS_FILE_ROOT_DESCRIPTION =
 // fires strictly after OpenClaw core's own agent-run timeout.
 export const DISPATCH_TIMEOUT_MS_DESCRIPTION =
   "Per-inbound dispatch timeout in milliseconds (infrastructure backstop that releases the per-group queue when an upstream dispatch hangs). When unset, derived from agents.defaults.timeoutSeconds (default 600) as timeoutSeconds*1000 + 60000, so it always fires after the agent-run timeout. Set explicitly only when you need to decouple it from the agent timeout.";
+
+export const CARD_PROGRESS_DESCRIPTION =
+  "When omitted or true, follow the server card capability gate; false force-disables automatic progress cards. Per-account values override the top-level value.";
+
+export const CARD_DISPLAY_DESCRIPTION =
+  "When omitted or true, follow the server card capability gate; false force-disables the octo_send_display_card tool. Per-account values override the top-level value.";
 
 // Shared description for commands.fork.scope, kept identical to the wording in
 // openclaw.plugin.json (manifest-schema-sync.test.ts asserts key-level sync).
@@ -112,6 +122,8 @@ export const OctoConfigJsonSchema = {
       botUid: { type: "string" },
       historyLimit: { type: "number", minimum: 1, maximum: 100 },
       historyPromptTemplate: { type: "string" },
+      cardProgress: { type: "boolean", description: CARD_PROGRESS_DESCRIPTION },
+      cardDisplay: { type: "boolean", description: CARD_DISPLAY_DESCRIPTION },
       onBehalfOf: { type: "string" },
       secretsFileRoot: { type: "string", description: SECRETS_FILE_ROOT_DESCRIPTION },
       dispatchTimeoutMs: { type: "number", minimum: 1000, description: DISPATCH_TIMEOUT_MS_DESCRIPTION },
@@ -133,6 +145,8 @@ export const OctoConfigJsonSchema = {
             botUid: { type: "string" },
             historyLimit: { type: "number", minimum: 1, maximum: 100 },
             historyPromptTemplate: { type: "string" },
+            cardProgress: { type: "boolean", description: CARD_PROGRESS_DESCRIPTION },
+            cardDisplay: { type: "boolean", description: CARD_DISPLAY_DESCRIPTION },
             onBehalfOf: { type: "string" },
             secretsFileRoot: { type: "string", description: SECRETS_FILE_ROOT_DESCRIPTION },
             dispatchTimeoutMs: { type: "number", minimum: 1000, description: DISPATCH_TIMEOUT_MS_DESCRIPTION },

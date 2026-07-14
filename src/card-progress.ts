@@ -25,6 +25,8 @@ export interface CardContext {
   botToken: string;
   channelId: string;
   channelType: ChannelType;
+  /** false force-disables automatic progress cards for this account/session. */
+  cardProgress?: boolean;
   /** persona-clone 身份;存在则跳过卡片(服务端拒 type-17 OBO)。 */
   onBehalfOf?: string;
 }
@@ -122,7 +124,10 @@ export function setCardContext(sessionKey: string, ctx: CardContext): void {
     startedAt: Date.now(),
     dirty: false,
     inFlight: false,
-    skip: collision || !!ctx.onBehalfOf,
+    // Account config is a per-session narrowing decision. Keep it out of the
+    // apiUrl-keyed gate/caps caches, which contain deployment capability facts
+    // shared by multiple accounts.
+    skip: collision || !!ctx.onBehalfOf || ctx.cardProgress === false,
   });
   dbg(`context set session=${sessionKey} channel=${ctx.channelId} obo=${!!ctx.onBehalfOf} collision=${collision}`);
 }

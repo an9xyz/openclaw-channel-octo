@@ -154,6 +154,14 @@ export function createDisplayCardTool(params: Params): Array<{
       return acct.enabled && acct.configured && !!acct.config.botToken;
     });
     if (!hasConfigured) return [];
+    // Best-effort discovery filtering: when the runtime identifies the current
+    // account, do not offer a tool that account explicitly disabled. Execution
+    // checks again because config may hot-reload after tool discovery.
+    const discoveryAccountId = deliveryContext?.accountId ?? agentAccountId;
+    if (discoveryAccountId) {
+      const discoveryAccount = resolveOctoAccount({ cfg, accountId: discoveryAccountId });
+      if (discoveryAccount.config.cardDisplay === false) return [];
+    }
   } catch {
     return [];
   }
@@ -251,6 +259,9 @@ export function createDisplayCardTool(params: Params): Array<{
         const acct = resolveOctoAccount({ cfg, accountId: requestedAccountId });
         if (!acct.enabled || !acct.configured || !acct.config.botToken) {
           return err("Octo account is not fully configured");
+        }
+        if (acct.config.cardDisplay === false) {
+          return err("display cards are disabled for this Octo account. Send your reply as a plain text message instead.");
         }
         const apiUrl = acct.config.apiUrl;
         const botToken = acct.config.botToken;

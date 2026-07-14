@@ -69,8 +69,27 @@ Configuration fields per account:
 - `wsUrl` (optional): WebSocket URL. Auto-detected from `apiUrl` if omitted.
 - `cdnUrl` (optional): CDN base URL for media files
 - `requireMention` (optional): Only respond when @mentioned in groups
+- `cardProgress` (optional): Set `false` to force-disable automatic progress cards for this account. Omitted or `true` follows the server card capability gate.
+- `cardDisplay` (optional): Set `false` to hide and reject the `octo_send_display_card` tool for this account. Omitted or `true` follows the server card capability gate.
 - `historyLimit` (optional): Group chat history message limit (default: 20)
 - `dispatchTimeoutMs` (optional): Per-inbound dispatch timeout in milliseconds — an infrastructure backstop that releases the per-group message queue if an upstream dispatch hangs. When unset, it is derived from OpenClaw's `agents.defaults.timeoutSeconds` (600 if unset) as `timeoutSeconds * 1000 + 60000`, so it always fires *after* the agent-run timeout: the agent terminates gracefully first, and this timeout only catches genuinely hung dispatches. Set explicitly only if you need to decouple it from the agent timeout.
+
+For example, to suppress intermediate progress frames while keeping final display cards available:
+
+```json
+{
+  "channels": {
+    "octo": {
+      "accounts": {
+        "my_bot": {
+          "cardProgress": false,
+          "cardDisplay": true
+        }
+      }
+    }
+  }
+}
+```
 
 ## Agent tools
 
