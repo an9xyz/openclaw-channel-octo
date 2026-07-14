@@ -110,6 +110,87 @@ describe("card-progress 状态机 + hook + 节流", () => {
     expect(calls.length).toBe(0);
   });
 
+  it("cardProgress:false 在 session 入口直接跳过,不探测 manifest 也不发送", async () => {
+    const { fn, calls } = mockFetch();
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi();
+
+    setCardContext("progress-disabled", {
+      apiUrl: "https://shared-card-gate.test",
+      botToken: "disabled-account",
+      channelId: "g-disabled",
+      channelType: ChannelType.Group,
+      cardProgress: false,
+    });
+    handlers.before_tool_call({ toolName: "read" }, { sessionKey: "progress-disabled" });
+    await vi.advanceTimersByTimeAsync(900);
+
+    expect(calls).toEqual([]);
+  });
+
+  it("账号级关闭不污染同 apiUrl 的共享 gate cache", async () => {
+    const { fn, calls } = mockFetch();
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi();
+
+    setCardContext("progress-disabled-account", {
+      apiUrl: "https://shared-card-gate.test",
+      botToken: "disabled-account",
+      channelId: "g-disabled",
+      channelType: ChannelType.Group,
+      cardProgress: false,
+    });
+    handlers.before_tool_call({ toolName: "read" }, { sessionKey: "progress-disabled-account" });
+    await vi.advanceTimersByTimeAsync(900);
+
+    setCardContext("progress-enabled-account", {
+      apiUrl: "https://shared-card-gate.test",
+      botToken: "enabled-account",
+      channelId: "g-enabled",
+      channelType: ChannelType.Group,
+      cardProgress: true,
+    });
+    handlers.before_tool_call({ toolName: "read" }, { sessionKey: "progress-enabled-account" });
+    await vi.advanceTimersByTimeAsync(900);
+
+    expect(calls.filter((call) => call.url.includes("/card/profile"))).toHaveLength(1);
+    expect(calls.filter((call) => call.url.includes("/sendMessage"))).toHaveLength(1);
+  });
+
+  it("cardProgress:true 仍不能绕过不兼容 card_version", async () => {
+    const calls: Array<{ url: string }> = [];
+    global.fetch = vi.fn().mockImplementation(async (url: string) => {
+      calls.push({ url: String(url) });
+      if (String(url).includes("/card/profile")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            enabled: true,
+            profiles: ["octo/v1"],
+            card_version: "1.6",
+            elements: ["TextBlock"],
+          }),
+        };
+      }
+      return { ok: true, status: 200, text: async () => JSON.stringify({ message_id: "must-not-send" }) };
+    }) as unknown as typeof fetch;
+    const { handlers } = makeApi();
+
+    setCardContext("progress-incompatible", {
+      apiUrl: "https://incompatible-card-version.test",
+      botToken: "enabled-account",
+      channelId: "g-enabled",
+      channelType: ChannelType.Group,
+      cardProgress: true,
+    });
+    handlers.before_tool_call({ toolName: "read" }, { sessionKey: "progress-incompatible" });
+    await vi.advanceTimersByTimeAsync(900);
+
+    expect(calls.some((call) => call.url.includes("/card/profile"))).toBe(true);
+    expect(calls.some((call) => call.url.includes("/sendMessage"))).toBe(false);
+  });
+
   it("未登记 session 的事件 no-op(天然过滤非 octo run)", async () => {
     const { fn, calls } = mockFetch();
     global.fetch = fn as unknown as typeof fetch;

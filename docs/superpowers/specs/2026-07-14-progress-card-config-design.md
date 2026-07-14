@@ -25,7 +25,7 @@
 
 ## 设计
 
-新增两个**三态布尔**账号级配置项(顶层默认 + `accounts.<id>` 覆盖,与现有 `requireMention` / `ignoreMentionAll` 同款分层):
+新增两个**三态布尔**账号级配置项(顶层默认 + `accounts.<id>` 覆盖,与现有 `requireMention` 同款分层):
 
 | 配置项 | 作用面 | 语义 |
 |---|---|---|
@@ -34,30 +34,38 @@
 
 **三态语义(关键):** 只有显式 `false` 才关;`true` 与省略都等价于「跟随服务端」,不改变现状。命名为 kill-switch 而非 enable-switch —— 默认行为与今天完全一致,升级无感。
 
-**最终门 = `serverGate && configAllows`(与运算,只收窄):**
+**最终门 = `existingCardGate && configAllows`(与运算,只收窄):** `existingCardGate` 指现有完整门控,包括 manifest 能力判断,以及 `available:false` 时保留的 env 兼容回退。
 
 ```
-finalEnabled = serverManifestGate(...) && (config.cardProgress !== false)
+finalEnabled = existingCardGate(...) && (config.cardProgress !== false)
 ```
 
-config `true` 永远不能把 `serverManifestGate === false` 翻成 `true`。
+config `true` 永远不能把 `existingCardGate === false` 翻成 `true`。
 
 ### 改动点
 
-1. **`openclaw.plugin.json`** —— 配置 schema 加 `cardProgress` / `cardDisplay`(`boolean`,可选,无 default = 三态),顶层与 `accounts.*` 两处都加,附 description 说明「省略/true=跟随服务端,false=强制关」。
+1. **`openclaw.plugin.json` + `src/config-schema.ts`** —— manifest schema、运行时 TypeScript 配置类型与 `OctoConfigJsonSchema` 同步加 `cardProgress` / `cardDisplay`(`boolean`,可选,无 default = 三态),顶层与 `accounts.*` 两处都加,附 description 说明「省略/true=跟随服务端,false=强制关」。两套 schema 必须保持 key 与 description 一致,继续通过 `manifest-schema-sync.test.ts`。
 
-2. **`src/inbound.ts:2538`(`setCardContext`)** —— 该处已持有 `account.config`,把解析后的 `cardProgress` 结果(顶层默认与账号覆盖合并后)塞进 `CardContext`。
+2. **`src/accounts.ts`** —— `ResolvedOctoAccount.config` 加两个可选字段,在 `resolveOctoAccount` 用 `accountConfig.cardProgress ?? channel.cardProgress` / `cardDisplay` 做顶层默认 + 账号覆盖。显式 `true` 必须能覆盖顶层 `false`,显式 `false` 也必须能覆盖顶层 `true`。
 
-3. **`src/card-progress.ts`**
-   - `CardContext` 加可选字段(如 `progressDisabled?: boolean`)。
-   - `gateEnabled` 开头:配置显式关 → 直接返回 `false` 且**可缓存/skip**(与「明确禁用」同级),连 manifest 探测都省。
+3. **`src/inbound.ts:2538`(`setCardContext`)** —— 该处已持有解析完成的 `account.config`,把 `cardProgress` 原值塞进 `CardContext`。
 
-4. **`src/card-display-tool.ts`(`createDisplayCardTool`)** —— 已接收 `cfg` / `agentAccountId`,同源解析 `cardDisplay`:关闭时工具在 discovery 阶段不注册 / 或调用即返回 `err(...)` 提示改用纯文本(与现有 gate 拒绝路径一致)。
+4. **`src/card-progress.ts`**
+   - `CardContext` 加可选字段 `cardProgress?: boolean`,保留三态原值,避免正反语义转换。
+   - `setCardContext` 创建本 session entry 时,`cardProgress === false` 直接置 `skip`;连 manifest 探测都省。
+   - 配置禁用只属于 per-account / per-session 决策,**绝不能写入**当前按 `apiUrl` 共享的 `gateCache` / `capsCache`。否则账号 A 关闭会污染同部署账号 B。共享缓存仍只保存服务端能力事实。
+
+5. **`src/card-display-tool.ts`(`createDisplayCardTool`)** —— 已接收 `cfg` / `agentAccountId`,同源解析 `cardDisplay`,同时做两层守卫:
+   - discovery 阶段能可靠解析当前账号且其 `cardDisplay === false` 时,不注册工具,避免向模型 offer 不可用能力;多账号且当前账号不明确时允许保留工具。
+   - `execute` 内以可信 `deliveryContext.accountId` / `agentAccountId` 解析账号后,在 manifest 探测前再次检查;显式关闭则立即 `err(...)` 提示改用纯文本。执行时检查是最终权威,用于覆盖 tool schema 缓存、热更新和直接调用场景。
+
+6. **`README.md`** —— 在账号配置说明与示例中增加两个字段及三态语义,让运维侧可发现。
 
 ### 不改
 
 - manifest 探测、`deriveCardCaps`、版本协商(精确匹配 `octo/v1` + `1.5`,Decision 10)全部保留,配置只在其结果上做 `&&`。
-- OBO(persona-clone)仍无条件跳过卡片,不受本开关影响。
+- 进度卡继续在当前 turn 的可信 `effectiveOnBehalfOf` 存在时无条件 skip,不受本开关影响。
+- 展示卡维持当前身份边界:始终以 bot 自身身份发送,不接受/透传模型提供的 OBO 身份。它当前并非「所有 persona 账号一律 skip」;若未来要求 OBO turn 禁止展示卡,需另行把可信 turn 级 OBO 上下文接入工具。
 
 ## 备选(已否决)
 
@@ -66,13 +74,23 @@ config `true` 永远不能把 `serverManifestGate === false` 翻成 `true`。
 
 ## 测试
 
+`src/__tests__/accounts.test.ts` 新增配置继承用例:
+
+- 顶层 `cardProgress/cardDisplay:false` + 账号省略 → 解析为 `false`。
+- 顶层 `false` + 账号显式 `true` → 解析为 `true`。
+- 顶层 `true` + 账号显式 `false` → 解析为 `false`。
+
 `src/card-progress.test.ts` 新增门控用例:
 
-- `cardProgress: false` + 服务端 `enabled:true` → `gateEnabled` 返回 `false`(强制关,回归 fail-closed)。
+- `cardProgress:false` → session 直接 skip,`getCardProfile` / send / edit 均不调用。
 - `cardProgress` 省略 + 服务端 `enabled:true` → 返回 `true`(跟随服务端,现状不变)。
 - `cardProgress: true` + 服务端不兼容(`card_version` 不匹配)→ 仍 `false`(配置不能强开,守住 400 底线)。
+- 同一 `apiUrl` 下账号 A `false`、账号 B 省略 / `true` + 服务端兼容 → B 仍正常发卡(证明配置禁用未污染共享 gate cache)。
 
 `src/card-display-tool.test.ts`:
 
-- `cardDisplay: false` → 工具调用返回 `err`(提示改用纯文本),不发送。
+- 已知当前账号 `cardDisplay:false` → discovery 不注册工具。
+- discovery 无法确定账号但 execute 解析到 `cardDisplay:false` → 返回 `err`(提示改用纯文本),且不探测 manifest、不发送。
 - 省略 → 现有行为不变(回归)。
+
+`src/manifest-schema-sync.test.ts` 保持通过,并覆盖两个新字段在 manifest / 运行时 schema 的顶层与账号层 description 一致。
