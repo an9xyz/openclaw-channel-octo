@@ -157,7 +157,9 @@ export function createDisplayCardTool(params: Params): Array<{
     // Best-effort discovery filtering: when the runtime identifies the current
     // account, do not offer a tool that account explicitly disabled. Execution
     // checks again because config may hot-reload after tool discovery.
-    const discoveryAccountId = deliveryContext?.accountId ?? agentAccountId;
+    const discoveryAccountId = deliveryContext?.accountId
+      ?? agentAccountId
+      ?? (ids.length === 1 ? ids[0] : undefined);
     if (discoveryAccountId) {
       const discoveryAccount = resolveOctoAccount({ cfg, accountId: discoveryAccountId });
       if (discoveryAccount.config.cardDisplay === false) return [];
