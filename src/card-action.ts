@@ -1,4 +1,4 @@
-import { ChannelType } from "./types.js";
+import { ChannelType, MessageType, type BotMessage } from "./types.js";
 
 export interface BotEvent {
   event_id: number;
@@ -84,4 +84,32 @@ export function parseCardAction(event: BotEvent): CardAction | null {
     action.actedAt = data.acted_at;
   }
   return action;
+}
+
+/** Keep user-controlled input inside a JSON value instead of interpolating it as control text. */
+export function formatCardActionText(action: CardAction): string {
+  const lines = [
+    "[Octo card action]",
+    `action_id=${action.actionId}`,
+    `inputs=${JSON.stringify(action.inputs)}`,
+  ];
+  if (action.data) lines.push(`data=${JSON.stringify(action.data)}`);
+  return lines.join("\n");
+}
+
+/** Translate a verified card action into the same message shape used by the normal inbound path. */
+export function synthesizeCardActionMessage(action: CardAction, botUid: string): BotMessage {
+  return {
+    message_id: `card_action:${action.eventId}`,
+    message_seq: 0,
+    from_uid: action.operatorUid,
+    channel_id: action.channelId,
+    channel_type: action.channelType,
+    timestamp: action.actedAt ?? Math.floor(Date.now() / 1000),
+    payload: {
+      type: MessageType.Text,
+      content: formatCardActionText(action),
+      mention: { uids: [botUid] },
+    },
+  };
 }

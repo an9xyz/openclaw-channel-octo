@@ -32,6 +32,14 @@ import { WKSocket } from "./socket.js";
 import { handleInboundMessage, type OctoStatusSink, sanitizeFilename } from "./inbound.js";
 import { runWithSessionInitRetry, isSessionInitConflict } from "./session-retry.js";
 import { notifyInboundConflictDropped } from "./inbound-conflict-notice.js";
+import { enqueueInbound, getInboundQueueKey } from "./inbound-queue.js";
+import {
+  createFileEventCursorStore,
+  setCardEventPollStarter,
+  startEventPoller,
+  type EventPoller,
+} from "./events-poll.js";
+import { synthesizeCardActionMessage } from "./card-action.js";
 
 /**
  * 会话初始化冲突(core CAS)兜底重试参数。同群紧挨两条消息时,turn N 的 session 收尾写
@@ -157,67 +165,6 @@ function getOrCreateLastBotReplySeqMap(accountId: string): Map<string, number> {
     _lastBotReplySeq.set(id, m);
   }
   return m;
-}
-
-const _inboundQueues = new Map<string, Promise<void>>();
-
-function getInboundQueueKey(accountId: string, msg: BotMessage): string {
-  const id = normalizeAccountId(accountId);
-  const isGroup =
-    typeof msg.channel_id === "string" &&
-    msg.channel_id.length > 0 &&
-    (msg.channel_type === ChannelType.Group ||
-     msg.channel_type === ChannelType.CommunityTopic);
-
-  if (isGroup) {
-    return `${id}:group:${msg.channel_id}`;
-  }
-
-  let spaceId = "";
-  const effectiveChannelId = msg.from_uid;
-
-  // DM channel_id format: "s{spaceId}_{peerId}" or "s{spaceId}_{peerId}@{suffix}"
-  if (msg.channel_id?.startsWith("s")) {
-    const atIdx = msg.channel_id.indexOf("@");
-    const firstPart = atIdx > 0
-      ? msg.channel_id.substring(0, atIdx)
-      : msg.channel_id;
-    const lastUnderscore = firstPart.lastIndexOf("_");
-    if (lastUnderscore > 0) {
-      spaceId = firstPart.substring(1, lastUnderscore);
-    }
-  }
-
-  const sessionId = spaceId
-    ? `${spaceId}:${effectiveChannelId}`
-    : effectiveChannelId;
-  return `${id}:dm:${sessionId}`;
-}
-
-function enqueueInbound(
-  key: string,
-  task: () => Promise<void>,
-  log?: { error?: (msg: string) => void },
-): void {
-  const previous = _inboundQueues.get(key) ?? Promise.resolve();
-
-  const next = previous
-    .catch(() => undefined)
-    .then(task)
-    .catch((err) => {
-      log?.error?.(
-        `octo: inbound handler failed: ${
-          err instanceof Error ? err.stack ?? String(err) : String(err)
-        }`,
-      );
-    })
-    .finally(() => {
-      if (_inboundQueues.get(key) === next) {
-        _inboundQueues.delete(key);
-      }
-    });
-
-  _inboundQueues.set(key, next);
 }
 
 // Module-level member mapping: displayName -> uid
@@ -1461,6 +1408,63 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
       let consecutiveHeartbeatFailures = 0;
       const MAX_HEARTBEAT_FAILURES = 3;
 
+      const dispatchInboundMessage = (msg: BotMessage): Promise<void> =>
+        enqueueInbound(getInboundQueueKey(account.accountId, msg), async () => {
+          try {
+            await runWithSessionInitRetry(
+              () =>
+                handleInboundMessage({
+                  account,
+                  message: msg,
+                  botUid: credentials.robot_id,
+                  groupHistories,
+                  lastBotReplySeqMap,
+                  memberMap,
+                  uidToNameMap,
+                  groupCacheTimestamps,
+                  memberRobotMap,
+                  currentGroupMembersMap,
+                  groupMdCache,
+                  log,
+                  statusSink,
+                }),
+              { ...SESSION_INIT_RETRY, log },
+            );
+          } catch (err) {
+            if (isSessionInitConflict(err)) {
+              await notifyInboundConflictDropped({
+                err,
+                msg,
+                accountId: account.accountId,
+                apiUrl: account.config.apiUrl,
+                botToken: account.config.botToken,
+                log,
+              });
+              return;
+            }
+            throw err;
+          }
+        });
+
+      let cardEventPoller: EventPoller | undefined;
+      const startCardEventPoller = (): void => {
+        if (cardEventPoller || stopped) return;
+        cardEventPoller = startEventPoller({
+          apiUrl: account.config.apiUrl,
+          botToken: account.config.botToken ?? "",
+          intervalMs: account.config.pollIntervalMs,
+          cursorStore: createFileEventCursorStore({ accountId: account.accountId }),
+          log,
+          onCardAction: async (action) => {
+            const message = synthesizeCardActionMessage(action, credentials.robot_id);
+            await dispatchInboundMessage(message);
+          },
+        });
+        log?.info?.(`octo: [${account.accountId}] card_action poller started`);
+      };
+      setCardEventPollStarter(account.accountId, startCardEventPoller);
+      if (process.env.OCTO_CARD_POLL_FORCE === "1") startCardEventPoller();
+
       // 6. Connect WebSocket — pure real-time
       const socket = new WKSocket({
         wsUrl,
@@ -1513,52 +1517,11 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
             }
           }
 
-          const inboundQueueKey = getInboundQueueKey(account.accountId, msg);
-
-          enqueueInbound(
-            inboundQueueKey,
-            async () => {
-              try {
-                await runWithSessionInitRetry(
-                  () =>
-                    handleInboundMessage({
-                      account,
-                      message: msg,
-                      botUid: credentials.robot_id,
-                      groupHistories,
-                      lastBotReplySeqMap,
-                      memberMap,
-                      uidToNameMap,
-                      groupCacheTimestamps,
-                      memberRobotMap,
-                      currentGroupMembersMap,
-                      groupMdCache,
-                      log,
-                      statusSink,
-                    }),
-                  { ...SESSION_INIT_RETRY, log },
-                );
-              } catch (err) {
-                // 重试耗尽仍是 core 会话初始化冲突(已知 skillsSnapshot revision bug,
-                // upstream openclaw#101848):不再静默丢,发用户可见回执 + 独立告警打点,
-                // 然后正常返回 —— 避免 enqueueInbound 的通用失败日志再重复记录一遍。
-                // 其它错误照旧抛给 enqueueInbound 的通用失败路径。
-                if (isSessionInitConflict(err)) {
-                  await notifyInboundConflictDropped({
-                    err,
-                    msg,
-                    accountId: account.accountId,
-                    apiUrl: account.config.apiUrl,
-                    botToken: account.config.botToken,
-                    log,
-                  });
-                  return;
-                }
-                throw err;
-              }
-            },
-            log,
-          );
+          void dispatchInboundMessage(msg).catch((err) => {
+            log?.error?.(
+              `octo: inbound handler failed: ${err instanceof Error ? err.stack ?? err.message : String(err)}`,
+            );
+          });
         },
 
         onConnected: () => {
@@ -1644,6 +1607,8 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
           if (stopped) return;
           stopped = true;
           socket.disconnect();
+          cardEventPoller?.stop();
+          setCardEventPollStarter(account.accountId, undefined);
           if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
           if (cooldownReconnectTimer) { clearTimeout(cooldownReconnectTimer); cooldownReconnectTimer = null; }
           stopPersonaPromptCache(account.accountId);

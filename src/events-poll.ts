@@ -62,6 +62,18 @@ export interface EventPoller {
   cursor(): number;
 }
 
+const pollStarters = new Map<string, () => void>();
+
+export function setCardEventPollStarter(accountId: string, starter: (() => void) | undefined): void {
+  const id = normalizeAccountId(accountId);
+  if (starter) pollStarters.set(id, starter);
+  else pollStarters.delete(id);
+}
+
+export function requestCardEventPolling(accountId: string): void {
+  pollStarters.get(normalizeAccountId(accountId))?.();
+}
+
 /**
  * Start one non-overlapping short-poll loop. Cursor persistence happens before ack so a process
  * crash can at worst replay an action; it cannot acknowledge an event that it forgot locally.
