@@ -14,6 +14,7 @@ function freezeInput(
   element: Record<string, unknown>,
   inputs: Record<string, string>,
   selections: string[],
+  selectedChoices: string[],
 ): Record<string, unknown> | null {
   const id = typeof element.id === "string" ? element.id : "";
   if (!id || !Object.hasOwn(inputs, id)) return null;
@@ -24,6 +25,7 @@ function freezeInput(
       choice && typeof choice === "object" && (choice as { value?: unknown }).value === rawValue
     )) as { title?: unknown } | undefined;
     if (typeof selected?.title === "string") displayValue = selected.title;
+    selectedChoices.push(displayValue);
   }
   const label = typeof element.label === "string" && element.label.trim() ? element.label.trim() : id;
   const text = `${label}：${displayValue}`;
@@ -35,16 +37,17 @@ function freezeElement(
   element: Record<string, unknown>,
   inputs: Record<string, string>,
   selections: string[],
+  selectedChoices: string[],
 ): Record<string, unknown> | null {
   if (typeof element.type === "string" && element.type.startsWith("Input.")) {
-    return freezeInput(element, inputs, selections);
+    return freezeInput(element, inputs, selections, selectedChoices);
   }
   const frozen: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(element)) {
     if (Array.isArray(value)) {
       frozen[key] = value.flatMap((item) => {
         if (!item || typeof item !== "object" || Array.isArray(item)) return [item];
-        const child = freezeElement(item as Record<string, unknown>, inputs, selections);
+        const child = freezeElement(item as Record<string, unknown>, inputs, selections, selectedChoices);
         return child ? [child] : [];
       });
     } else {
@@ -56,19 +59,21 @@ function freezeElement(
 
 /** Preserve the authored card body, freeze submitted inputs, remove actions, and append status. */
 export function renderCardActionStatus(params: StatusParams): { card: Record<string, unknown>; plain: string } {
-  const statusLine = params.status === "processing"
-    ? `⏳ ${params.operator} 正在处理「${params.actionLabel}」`
-    : params.status === "completed"
-      ? `✅ ${params.operator} 已选择「${params.actionLabel}」`
-      : `⚠️ ${params.errorText ?? "处理失败"}`;
   const selections: string[] = [];
+  const selectedChoices: string[] = [];
   const inputs = params.inputs ?? {};
   const sourceBody = Array.isArray(params.card.body) ? params.card.body : [];
   const body = sourceBody.flatMap((element) => {
     if (!element || typeof element !== "object" || Array.isArray(element)) return [];
-    const frozen = freezeElement(element as Record<string, unknown>, inputs, selections);
+    const frozen = freezeElement(element as Record<string, unknown>, inputs, selections, selectedChoices);
     return frozen ? [frozen] : [];
   });
+  const selectedLabel = selectedChoices.length > 0 ? selectedChoices.join(" / ") : params.actionLabel;
+  const statusLine = params.status === "processing"
+    ? `⏳ ${params.operator} 正在处理「${params.actionLabel}」`
+    : params.status === "completed"
+      ? `✅ ${params.operator} 已选择「${selectedLabel}」`
+      : `⚠️ ${params.errorText ?? "处理失败"}`;
   body.push({ type: "TextBlock", text: statusLine, wrap: true, spacing: "Medium", separator: true });
 
   const { actions: _actions, ...cardWithoutActions } = params.card;
