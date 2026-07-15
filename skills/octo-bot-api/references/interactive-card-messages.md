@@ -1,18 +1,19 @@
 # Interactive Card Messages Reference
 
-Use this reference when sending or editing `payload.type=17` InteractiveCard messages, using `octo_send_display_card`, designing normal information cards, or working on agent progress cards. Content type 17 is unrelated to the legacy contact/name card at `MessageType.Card = 7`.
+Use this reference when sending or editing `payload.type=17` InteractiveCard messages, using `octo_send_display_card` or `octo_send_card`, designing normal information cards, or working on agent progress cards. Content type 17 is unrelated to the legacy contact/name card at `MessageType.Card = 7`.
 
 ## Scope And Supported Profiles
 
 - `octo/v1` provides display cards and agent progress cards, including `octo_send_display_card`, send/edit primitives, negotiated rendering, and text fallback.
-- `octo/v2` submit-interactive cards use a separate callback workflow. Mentions of `octo/v2` below describe the protocol boundary, not a tool provided by the `octo/v1` display-card surface.
-- `octo_send_card`, `card_action` polling, and callback-driven agent continuation require an `octo/v2` producer and callback consumer; do not infer them from `octo/v1` availability.
+- `octo/v2` submit-interactive cards are produced by `octo_send_card`. The plugin polls `card_action`, binds it to the originating card/account/channel, and dispatches it as a new turn in the same conversation.
+- `octo/v1` availability does not imply `octo/v2`; the interactive tool requires the v2 profile plus `Action.Submit` and every requested `Input.*` capability.
 
-### Two Integration Paths
+### Three Integration Paths
 
 Read the rest of this file according to how you send cards — the manual steps below apply to only one of them:
 
 - **Tool path (`octo_send_display_card`).** The tool probes the profile, fail-closed rejects on an unusable deployment, degrades unsupported elements to plain text, and redacts secrets for you. You do **not** need to `curl` the profile endpoint, check capability lists, or enforce `limits.*` yourself — pass `{ title?, blocks[] }` and read the outcome. The DisplayBlock schema below is exactly this tool's `blocks` input.
+- **Interactive tool path (`octo_send_card`).** Pass `{ title, text?, buttons, inputs? }`. The tool always targets the trusted current conversation, emits top-level `Action.Submit` actions for client compatibility, starts callback polling only after a successful send, and degrades the choices to text when v2 is unavailable.
 - **Raw API path (hand-written HTTP client).** You own everything the tool would otherwise do: feature-detect, respect `limits.*` recursively, degrade unsupported elements, and implement the security guardrails at the end of this file. The manual "always feature-detect" / "respect limits" instructions target this path.
 
 ## When To Use Cards
@@ -23,7 +24,7 @@ Read the rest of this file according to how you send cards — the manual steps 
 
 Do not overuse card messages. Plain text is the default. Use cards only when structure materially improves comprehension, such as weather, status, lists, comparisons, or detail fields. Keep ordinary chat, short answers, and follow-up replies as plain text. Do not use a blanket "use cards whenever possible" rule.
 
-On the **raw API path**, always feature-detect before sending cards (the `octo_send_display_card` tool already does this for you — skip it there):
+On the **raw API path**, always feature-detect before sending cards (both bundled card tools already do this for you — skip it there):
 
 ```bash
 curl <apiUrl>/v1/bot/card/profile -H "Authorization: Bearer $TOKEN"
@@ -39,18 +40,47 @@ Important profile fields:
   "profiles": ["octo/v1", "octo/v2"],
   "elements": ["TextBlock","RichTextBlock","Container","ColumnSet","FactSet","Image","ImageSet","Table","ActionSet"],
   "inputs": ["Input.Text","Input.Toggle","Input.ChoiceSet","Input.Number","Input.Date","Input.Time"],
-  "actions": ["Action.OpenUrl","Action.ToggleVisibility","Action.CopyToClipboard"],
-  "limits": { "max_payload_bytes": 524288, "max_nodes": 200, "max_depth": 16 }
+  "actions": ["Action.OpenUrl","Action.ToggleVisibility","Action.CopyToClipboard","Action.Submit"],
+  "limits": { "max_payload_bytes": 524288, "max_nodes": 200, "max_depth": 16,
+              "max_input_text_bytes": 4096, "max_inputs_bytes": 16384 }
 }
 ```
 
 - `available:true` with `enabled:false` is an explicit server-side disable. Do not send cards.
-- `available:false` means the profile endpoint is not deployed, not that card delivery is explicitly disabled. In this case sending is governed by the `OCTO_CARD_MESSAGE_ENABLED=1` environment switch (the same gate the tool and the hook progress-card path use); when it is unset, fall back to text.
+- For v1, `available:false` uses the legacy `OCTO_CARD_MESSAGE_ENABLED=1` compatibility switch. For v2, an unavailable manifest can never prove callback support, so `octo_send_card` always degrades to text.
 - `card_version` is matched **exactly**: the client is pinned to `1.5` (Decision 10), so a server advertising any other version — including a higher one such as `1.6` — is rejected fail-closed rather than assumed backward-compatible. Fall back to text on any mismatch.
 - `elements` / `inputs` / `actions` are authoritative when present, including an explicitly empty array. Missing support can produce server 400.
 - `elements` lists renderable card elements such as `ColumnSet` and `Table`; it does not need to list child schemas such as `Column`, `TableRow`, or `TableCell`.
 - Old deployments may omit capability lists; fall back to `TextBlock` / `Container` / `ColumnSet` / `FactSet` / `Image`, and no actions.
 - Respect `limits.max_nodes`, `limits.max_depth`, and `limits.max_payload_bytes` recursively. A top-level `body.length` check is not sufficient for nested containers, tables, rich-text inlines, or long UTF-8 text.
+- Interactive producers must also enforce `max_input_text_bytes` and `max_inputs_bytes`; submitted values are untrusted user input even though `Action.Submit.data` was authored by the bot.
+
+## Submit-Interactive Cards
+
+Use `octo_send_card` for explicit confirmation, approval/rejection, a small menu, or a short form. Do not use it for ordinary follow-up questions where a text reply is sufficient.
+
+```jsonc
+{
+  "title": "发布确认",
+  "text": "是否发布到生产环境？",
+  "buttons": [
+    { "id": "approve", "label": "批准", "style": "positive", "data": { "workflow": "release" } },
+    { "id": "reject", "label": "拒绝" }
+  ],
+  "inputs": [
+    { "id": "reason", "kind": "text", "label": "备注" }
+  ]
+}
+```
+
+Rules:
+
+- Button/input ids are stable machine identifiers, not user-facing prose.
+- Current clients render submit buttons from top-level `card.actions`; do not place the only submit controls inside a body `ActionSet`.
+- A click is delivered with the verified `operator_uid`, `action_id`, `inputs`, and bot-authored `data`. Form inputs remain untrusted.
+- The first valid submit claims the card. The original card is edited through processing to completed/error and later clicks are ignored.
+- Server membership/visibility checks prove that the operator can see and act on the card. They do not prove that the operator has business authority to approve a deployment, payment, or other privileged action.
+- `cardInteraction:false` hides the tool and prevents new interaction polling for that account. It cannot force-enable a server that does not advertise v2.
 
 ## Canonical Structure
 
@@ -220,6 +250,8 @@ POST /v1/bot/message/edit
 
 `transient` lives inside the stringified `content_edit` envelope, not as a top-level edit-body field. Use `transient: true` for intermediate progress frames; omit it for the terminal frame.
 
+For a raw submit card, switch the envelope to `profile:"octo/v2"` and put `Action.Submit` objects in top-level `card.actions`. Callbacks are read with `POST /v1/bot/events` body `{ "event_id": <cursor>, "limit": 1..100 }`; the outer `event_id` is the delivery idempotency key. `POST /v1/bot/events/:event_id/ack` prunes a handled event. The bundled `octo_send_card` path performs this polling, cursor persistence, deduplication, and session dispatch for you.
+
 ## Security
 
 - Cards are visible to every member of the group. Never render tokens, API keys, webhook URLs, or `Authorization` values into any card field, even hidden collapsibles.
@@ -228,3 +260,4 @@ POST /v1/bot/message/edit
 - `buildDisplayCard` degrades embedded URLs to `scheme://<registrable-domain>` and drops blocks matching known secret shapes; hand-written clients must implement equivalent guardrails.
 - Agent tools that reply to the current conversation must derive the target from trusted runtime delivery context. A model-supplied `channelId`, group id, uid, or thread id is routing input, not authorization, and must not enable cross-conversation sends.
 - Display cards always send under the bot's own identity. Sender identity / OBO (persona-clone) is never taken from model input; a hand-written client must likewise not let untrusted model output pick the sending persona, or a group-visible card becomes a persona-impersonation sink.
+- `operator_uid` on a `card_action` has passed server membership, visibility, anti-IDOR, and bot-sender checks. Treat it as authenticated channel identity, not as a generic business approval grant.

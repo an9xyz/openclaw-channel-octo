@@ -99,10 +99,14 @@ export function startEventPoller(options: EventPollerOptions): EventPoller {
         sinceEventId: cursor,
         limit,
       });
+      let cardActions = 0;
       for (const event of [...events].sort((a, b) => a.event_id - b.event_id)) {
         if (!Number.isSafeInteger(event.event_id) || event.event_id <= cursor) continue;
         const action = parseCardAction(event);
-        if (action) await options.onCardAction(action);
+        if (action) {
+          cardActions += 1;
+          await options.onCardAction(action);
+        }
 
         await options.cursorStore.save(event.event_id);
         cursor = event.event_id;
@@ -120,6 +124,11 @@ export function startEventPoller(options: EventPollerOptions): EventPoller {
             );
           }
         }
+      }
+      if (events.length > 0) {
+        options.log?.info?.(
+          `octo: event poll batch events=${events.length} card_actions=${cardActions} cursor=${cursor}`,
+        );
       }
     } catch (error) {
       options.log?.error?.(

@@ -1,4 +1,4 @@
-# 新增卡片开关配置项(进度卡 / 展示卡)
+# 新增卡片开关配置项(进度卡 / 展示卡 / 交互卡)
 
 ## 背景
 
@@ -25,12 +25,13 @@
 
 ## 设计
 
-新增两个**三态布尔**账号级配置项(顶层默认 + `accounts.<id>` 覆盖,与现有 `requireMention` 同款分层):
+新增三个**三态布尔**账号级配置项(顶层默认 + `accounts.<id>` 覆盖,与现有 `requireMention` 同款分层):
 
 | 配置项 | 作用面 | 语义 |
 |---|---|---|
 | `cardProgress` | 自动进度卡(hook 链路) | `false` = 强制关;`true` / 省略 = 跟随服务端 manifest |
 | `cardDisplay` | `octo_send_display_card` 工具 | `false` = 工具不 offer / 直接拒;`true` / 省略 = 跟随服务端 manifest |
+| `cardInteraction` | `octo_send_card` + 新交互回调 poller | `false` = 工具不 offer且不启动新回调轮询;`true` / 省略 = 跟随服务端 octo/v2 manifest |
 
 **三态语义(关键):** 只有显式 `false` 才关;`true` 与省略都等价于「跟随服务端」,不改变现状。命名为 kill-switch 而非 enable-switch —— 默认行为与今天完全一致,升级无感。
 
@@ -44,9 +45,9 @@ config `true` 永远不能把 `existingCardGate === false` 翻成 `true`。
 
 ### 改动点
 
-1. **`openclaw.plugin.json` + `src/config-schema.ts`** —— manifest schema、运行时 TypeScript 配置类型与 `OctoConfigJsonSchema` 同步加 `cardProgress` / `cardDisplay`(`boolean`,可选,无 default = 三态),顶层与 `accounts.*` 两处都加,附 description 说明「省略/true=跟随服务端,false=强制关」。两套 schema 必须保持 key 与 description 一致,继续通过 `manifest-schema-sync.test.ts`。
+1. **`openclaw.plugin.json` + `src/config-schema.ts`** —— manifest schema、运行时 TypeScript 配置类型与 `OctoConfigJsonSchema` 同步加 `cardProgress` / `cardDisplay` / `cardInteraction`(`boolean`,可选,无 default = 三态),顶层与 `accounts.*` 两处都加,附 description 说明「省略/true=跟随服务端,false=强制关」。两套 schema 必须保持 key 与 description 一致,继续通过 `manifest-schema-sync.test.ts`。
 
-2. **`src/accounts.ts`** —— `ResolvedOctoAccount.config` 加两个可选字段,在 `resolveOctoAccount` 用 `accountConfig.cardProgress ?? channel.cardProgress` / `cardDisplay` 做顶层默认 + 账号覆盖。显式 `true` 必须能覆盖顶层 `false`,显式 `false` 也必须能覆盖顶层 `true`。
+2. **`src/accounts.ts`** —— `ResolvedOctoAccount.config` 加三个可选字段,在 `resolveOctoAccount` 用 account 值 `??` channel 值做顶层默认 + 账号覆盖。显式 `true` 必须能覆盖顶层 `false`,显式 `false` 也必须能覆盖顶层 `true`。
 
 3. **`src/inbound.ts:2538`(`setCardContext`)** —— 该处已持有解析完成的 `account.config`,把 `cardProgress` 原值塞进 `CardContext`。
 

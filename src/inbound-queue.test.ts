@@ -22,6 +22,10 @@ describe("shared inbound queue", () => {
       .toBe("bot-a:group:g1____t1");
     expect(getInboundQueueKey("Bot-B", message("g1", ChannelType.Group)))
       .toBe("bot-b:group:g1");
+    expect(getInboundQueueKey("Bot-A", message("s123_u1@bot", ChannelType.DM)))
+      .toBe("bot-a:dm:123:u1");
+    expect(getInboundQueueKey("Bot-A", { ...message("u1", ChannelType.DM), channel_id: undefined }))
+      .toBe("bot-a:dm:u1");
   });
 
   it("同一 key 串行执行，并返回当前任务完成的 Promise", async () => {

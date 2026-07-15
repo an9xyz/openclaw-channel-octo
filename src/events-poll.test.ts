@@ -1,9 +1,11 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createFileEventCursorStore,
+  requestCardEventPolling,
+  setCardEventPollStarter,
   startEventPoller,
   type EventCursorStore,
 } from "./events-poll.js";
@@ -51,11 +53,13 @@ describe("event poller", () => {
     }) as typeof fetch;
     const cursor = memoryCursor(10);
     const seen: number[] = [];
+    const info: string[] = [];
     const poller = startEventPoller({
       apiUrl: "https://api.test",
       botToken: "bf_x",
       intervalMs: 1000,
       cursorStore: cursor,
+      log: { info: (message) => info.push(message) },
       onCardAction: async (action: CardAction) => { seen.push(action.eventId); },
     });
 
@@ -71,6 +75,7 @@ describe("event poller", () => {
         "https://api.test/v1/bot/events/12/ack",
       ]);
     expect(poller.cursor()).toBe(12);
+    expect(info).toContain("octo: event poll batch events=2 card_actions=2 cursor=12");
     poller.stop();
   });
 
@@ -138,6 +143,106 @@ describe("event poller", () => {
     await vi.advanceTimersByTimeAsync(5000);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("ack:false 只保存 cursor；ack 失败只告警不回退 cursor", async () => {
+    const errors: string[] = [];
+    global.fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (String(url).endsWith("/ack")) return new Response("down", { status: 503 });
+      return Response.json({ results: [actionEvent(41)] });
+    }) as typeof fetch;
+    const withoutAck = memoryCursor(40);
+    const poller1 = startEventPoller({
+      apiUrl: "https://api.test", botToken: "bf", intervalMs: 500,
+      cursorStore: withoutAck, ack: false, onCardAction: async () => {},
+    });
+    await poller1.ready;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(withoutAck.saved).toEqual([41]);
+    poller1.stop();
+
+    const withAck = memoryCursor(40);
+    const poller2 = startEventPoller({
+      apiUrl: "https://api.test", botToken: "bf", intervalMs: 500,
+      cursorStore: withAck, onCardAction: async () => {}, log: { error: (message) => errors.push(message) },
+    });
+    await poller2.ready;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(withAck.saved).toEqual([41]);
+    expect(errors.some((message) => message.includes("ack event 41 failed"))).toBe(true);
+    poller2.stop();
+  });
+
+  it("fetch 失败后保留 cursor 并在下一 tick 恢复", async () => {
+    let calls = 0;
+    const errors: string[] = [];
+    global.fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (String(url).endsWith("/ack")) return new Response("");
+      calls += 1;
+      if (calls === 1) return new Response("down", { status: 503 });
+      return Response.json({ results: [actionEvent(51)] });
+    }) as typeof fetch;
+    const cursor = memoryCursor(50);
+    const poller = startEventPoller({
+      apiUrl: "https://api.test", botToken: "bf", intervalMs: 500,
+      cursorStore: cursor, onCardAction: async () => {}, log: { error: (message) => errors.push(message) },
+    });
+    await poller.ready;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(cursor.saved).toEqual([]);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(cursor.saved).toEqual([51]);
+    expect(errors.some((message) => message.includes("event poll failed"))).toBe(true);
+    poller.stop();
+  });
+
+  it("忽略非法或旧 event_id，并对空批次保持 cursor", async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(Response.json({
+      results: [actionEvent(Number.NaN), actionEvent(59), actionEvent(60)],
+    })).mockResolvedValue(Response.json({ results: [] })) as typeof fetch;
+    const cursor = memoryCursor(60);
+    const onCardAction = vi.fn();
+    const poller = startEventPoller({
+      apiUrl: "https://api.test", botToken: "bf", intervalMs: 1, limit: 999,
+      cursorStore: cursor, onCardAction,
+    });
+    await poller.ready;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(cursor.saved).toEqual([]);
+    expect(onCardAction).not.toHaveBeenCalled();
+    poller.stop();
+  });
+
+  it("cursor load 失败或返回非法值时从零启动", async () => {
+    const errors: string[] = [];
+    const rejected = startEventPoller({
+      apiUrl: "https://api.test", botToken: "bf",
+      cursorStore: { load: async () => Promise.reject("load down"), save: async () => {} },
+      onCardAction: async () => {}, log: { error: (message) => errors.push(message) },
+    });
+    await rejected.ready;
+    expect(rejected.cursor()).toBe(0);
+    expect(errors.some((message) => message.includes("load down"))).toBe(true);
+    rejected.stop();
+
+    const invalid = startEventPoller({
+      apiUrl: "https://api.test", botToken: "bf", cursorStore: memoryCursor(-1),
+      onCardAction: async () => {},
+    });
+    await invalid.ready;
+    expect(invalid.cursor()).toBe(0);
+    invalid.stop();
+  });
+
+  it("按规范化账号注册、触发和注销懒启动器", () => {
+    const starter = vi.fn();
+    setCardEventPollStarter("Bot-A", starter);
+    requestCardEventPolling("bot-a");
+    expect(starter).toHaveBeenCalledOnce();
+
+    setCardEventPollStarter("BOT-A", undefined);
+    requestCardEventPolling("bot-a");
+    expect(starter).toHaveBeenCalledOnce();
+  });
 });
 
 describe("file event cursor store", () => {
@@ -150,6 +255,20 @@ describe("file event cursor store", () => {
       expect(await createFileEventCursorStore({ accountId: "bot-a", baseDir: root }).load()).toBe(123);
       expect(JSON.parse(await readFile(join(root, "bot-a", "events.cursor.json"), "utf8")))
         .toEqual({ event_id: 123 });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("非法文件回退到零，非法 cursor 拒绝持久化", async () => {
+    const root = await mkdtemp(join(tmpdir(), "octo-events-invalid-"));
+    try {
+      const dir = join(root, "bot-a");
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, "events.cursor.json"), JSON.stringify({ event_id: -1 }), "utf8");
+      const store = createFileEventCursorStore({ accountId: "Bot-A", baseDir: root });
+      expect(await store.load()).toBe(0);
+      await expect(store.save(-1)).rejects.toThrow("invalid event cursor");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

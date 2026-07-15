@@ -14,14 +14,25 @@
  *   再给 CHANNEL → 追加 send/edit 往返（会向该频道发一条真实进度卡）。
  */
 import { describe, it, expect } from "vitest";
-import { getCardProfile, sendCardMessage, editCardMessage } from "./api-fetch.js";
+import {
+  ackBotEvent,
+  editCardMessage,
+  fetchBotEvents,
+  getCardProfile,
+  sendCardMessage,
+} from "./api-fetch.js";
+import { buildInteractiveCard } from "./card-author.js";
+import { deriveCardCaps } from "./card-caps.js";
+import { parseCardAction } from "./card-action.js";
 import { renderProgressCard, type CardCaps } from "./card-render.js";
-import { ChannelType } from "./types.js";
+import { CARD_INTERACTIVE_PROFILE, ChannelType } from "./types.js";
 
 const API = process.env.OCTO_E2E_API_URL;
 const TOKEN = process.env.OCTO_E2E_BOT_TOKEN;
 const CHANNEL = process.env.OCTO_E2E_CHANNEL;
 const CHANNEL_TYPE = Number(process.env.OCTO_E2E_CHANNEL_TYPE ?? ChannelType.Group);
+const CARD_ACTION_E2E = process.env.OCTO_E2E_CARD_ACTION === "1";
+const CARD_ACTION_TIMEOUT_MS = Number(process.env.OCTO_E2E_CARD_ACTION_TIMEOUT_MS ?? 60_000);
 
 const suite = API && TOKEN ? describe : describe.skip;
 
@@ -87,4 +98,49 @@ suite("card E2E（真实 octo-server）", () => {
     // eslint-disable-next-line no-console -- e2e 联调观测
     console.log("[e2e] round-trip ok, message_id =", res!.message_id);
   });
+
+  const actionIt = API && TOKEN && CHANNEL && CARD_ACTION_E2E ? it : it.skip;
+  actionIt("octo/v2 发卡 → 人工点击 → events 收到 card_action", async () => {
+    const manifest = await getCardProfile({ apiUrl: API!, botToken: TOKEN! });
+    expect(manifest.profiles).toContain(CARD_INTERACTIVE_PROFILE);
+    expect(manifest.actions).toContain("Action.Submit");
+    const built = buildInteractiveCard({
+      title: "Octo P2 E2E",
+      text: "请在测试客户端点击下面的按钮",
+      buttons: [{ id: "e2e_confirm", label: "确认 E2E" }],
+    }, deriveCardCaps(manifest));
+    expect(built.ok).toBe(true);
+    if (!built.ok) throw new Error(built.error);
+
+    const existing = await fetchBotEvents({ apiUrl: API!, botToken: TOKEN!, sinceEventId: 0, limit: 100 });
+    let cursor = existing.reduce((max, event) => Math.max(max, event.event_id), 0);
+    const sent = await sendCardMessage({
+      apiUrl: API!,
+      botToken: TOKEN!,
+      channelId: CHANNEL!,
+      channelType: CHANNEL_TYPE,
+      card: built.card,
+      plain: built.plain,
+      profile: CARD_INTERACTIVE_PROFILE,
+    });
+    expect(sent?.message_id).toBeTruthy();
+    // eslint-disable-next-line no-console -- explicit human-in-the-loop E2E instruction
+    console.log(`[e2e] click “确认 E2E” on card message_id=${sent!.message_id} within ${CARD_ACTION_TIMEOUT_MS}ms`);
+
+    const deadline = Date.now() + CARD_ACTION_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const events = await fetchBotEvents({ apiUrl: API!, botToken: TOKEN!, sinceEventId: cursor, limit: 100 });
+      for (const event of events) {
+        cursor = Math.max(cursor, event.event_id);
+        const action = parseCardAction(event);
+        if (action?.messageId === sent!.message_id && action.actionId === "e2e_confirm") {
+          await ackBotEvent({ apiUrl: API!, botToken: TOKEN!, eventId: action.eventId });
+          expect(action.operatorUid).toBeTruthy();
+          return;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    }
+    throw new Error(`card_action not observed for message_id=${sent!.message_id}`);
+  }, CARD_ACTION_TIMEOUT_MS + 10_000);
 });

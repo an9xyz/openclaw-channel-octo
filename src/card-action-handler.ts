@@ -21,7 +21,7 @@ interface Params {
   botToken: string;
   operatorName?: string;
   dispatch: () => Promise<void>;
-  log?: { warn?: (message: string) => void };
+  log?: { info?: (message: string) => void; warn?: (message: string) => void };
 }
 
 async function updateStatus(params: {
@@ -33,7 +33,7 @@ async function updateStatus(params: {
   status: CardActionStatus;
   errorText?: string;
   transient?: boolean;
-  log?: { warn?: (message: string) => void };
+  log?: { info?: (message: string) => void; warn?: (message: string) => void };
 }): Promise<void> {
   const rendered = renderCardActionStatus({
     title: params.session.title,
@@ -84,7 +84,10 @@ export async function handleCardAction(params: Params): Promise<CardActionHandle
 
   const claim = claimCardSession(action.messageId, action.eventId);
   if (claim.status === "missing") return "ignored";
-  if (claim.status === "duplicate") return "duplicate";
+  if (claim.status === "duplicate") {
+    params.log?.info?.(`octo: duplicate card_action ignored message=${action.messageId} event=${action.eventId}`);
+    return "duplicate";
+  }
   const session = claim.session;
 
   const inputs = validateCardActionInputs(action, session);
@@ -100,6 +103,7 @@ export async function handleCardAction(params: Params): Promise<CardActionHandle
       errorText: inputs.error,
       log: params.log,
     });
+    params.log?.warn?.(`octo: card_action rejected message=${action.messageId} reason=${inputs.error}`);
     return "rejected";
   }
 
@@ -125,6 +129,7 @@ export async function handleCardAction(params: Params): Promise<CardActionHandle
       status: "completed",
       log: params.log,
     });
+    params.log?.info?.(`octo: card_action completed message=${action.messageId} event=${action.eventId}`);
     return "completed";
   } catch (error) {
     releaseCardSessionClaim(action.messageId, action.eventId);

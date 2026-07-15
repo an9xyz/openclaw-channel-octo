@@ -3,6 +3,7 @@ import {
   _resetCardSessionsForTests,
   claimCardSession,
   completeCardSession,
+  forgetCardSession,
   lookupCardSession,
   nextCardSessionSeq,
   registerCardSession,
@@ -63,5 +64,37 @@ describe("card session registry", () => {
     }
     expect(lookupCardSession("m0")).toBeNull();
     expect(lookupCardSession("m1000")).not.toBeNull();
+  });
+
+  it("空 message_id 不登记；同 id 重登会替换旧 session", () => {
+    registerCardSession("   ", session());
+    expect(requestCardEventPolling).not.toHaveBeenCalled();
+
+    registerCardSession("m1", session("-old"));
+    registerCardSession("m1", session("-new"));
+    expect(lookupCardSession("m1")?.sessionKey).toBe("s-new");
+  });
+
+  it("登记新卡时清理过期项，且支持显式忘记", () => {
+    registerCardSession("expired", session("-expired"));
+    vi.advanceTimersByTime(24 * 60 * 60 * 1000 + 1);
+    registerCardSession("current", session("-current"));
+    expect(lookupCardSession("expired")).toBeNull();
+
+    forgetCardSession("current");
+    expect(lookupCardSession("current")).toBeNull();
+  });
+
+  it("缺失或 claim 不匹配时状态操作是安全空操作", () => {
+    expect(claimCardSession("missing", 1)).toEqual({ status: "missing" });
+    expect(nextCardSessionSeq("missing")).toBeUndefined();
+
+    registerCardSession("m1", session());
+    releaseCardSessionClaim("m1", 1);
+    completeCardSession("m1", 1);
+    expect(claimCardSession("m1", 2).status).toBe("claimed");
+    releaseCardSessionClaim("m1", 999);
+    completeCardSession("m1", 999);
+    expect(claimCardSession("m1", 3).status).toBe("duplicate");
   });
 });
