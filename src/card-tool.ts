@@ -6,6 +6,7 @@ import {
   buildInteractiveCard,
   type CardButtonSpec,
   type CardInputSpec,
+  type InteractiveCardBlockSpec,
   type InteractiveCardSpec,
 } from "./card-author.js";
 import { deriveInteractiveCardCaps } from "./card-caps.js";
@@ -69,6 +70,49 @@ function normalizeInputs(value: unknown): CardInputSpec[] | undefined {
   });
 }
 
+function normalizeBlocks(value: unknown): InteractiveCardBlockSpec[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => {
+    const raw = item && typeof item === "object" ? item as Record<string, unknown> : {};
+    if (raw.type === "section") {
+      const facts = Array.isArray(raw.facts)
+        ? raw.facts.map((fact) => {
+            const candidate = fact && typeof fact === "object" ? fact as Record<string, unknown> : {};
+            return {
+              title: typeof candidate.title === "string" ? candidate.title : "",
+              value: typeof candidate.value === "string" ? candidate.value : "",
+            };
+          })
+        : undefined;
+      return {
+        type: "section",
+        ...(typeof raw.title === "string" ? { title: raw.title } : {}),
+        ...(typeof raw.text === "string" ? { text: raw.text } : {}),
+        ...(facts ? { facts } : {}),
+      };
+    }
+    if (raw.type === "options") {
+      const options = Array.isArray(raw.options)
+        ? raw.options.map((option) => {
+            const candidate = option && typeof option === "object" ? option as Record<string, unknown> : {};
+            return {
+              title: typeof candidate.title === "string" ? candidate.title : "",
+              value: typeof candidate.value === "string" ? candidate.value : "",
+            };
+          })
+        : [];
+      return {
+        type: "options",
+        id: typeof raw.id === "string" ? raw.id : "",
+        ...(typeof raw.label === "string" ? { label: raw.label } : {}),
+        options,
+      };
+    }
+    return { type: String(raw.type ?? "") } as never;
+  });
+}
+
 function interactiveGateReason(manifest: CardProfileManifest): string | null {
   if (!manifest.available) return "interactive card manifest is unavailable";
   if (!manifest.enabled) return "card sending is disabled by the server";
@@ -117,12 +161,50 @@ export function createInteractiveCardTool(params: Params): any[] {
       "Send an interactive Adaptive Card to the current trusted Octo conversation for confirmations, approvals, " +
       "small menus, or short forms. Buttons use Action.Submit and the click returns as a new message in this same " +
       "conversation. The destination cannot be selected in tool arguments. Unsupported deployments automatically " +
-      "receive the same choices as plain text. Never include secrets or use a click as proof of business authorization.",
+      "receive the same choices as plain text. For structured choices, use controlled blocks: one section per option " +
+      "and an options block for the Input.ChoiceSet, then keep the submit button label short. " +
+      "Never include secrets or use a click as proof of business authorization.",
     parameters: {
       type: "object",
       properties: {
         title: { type: "string" },
         text: { type: "string" },
+        blocks: {
+          type: "array",
+          maxItems: 20,
+          description:
+            "Controlled Slack-style body blocks. section={type:'section',title?,text?,facts?:[{title,value}]}; " +
+            "options={type:'options',id,label?,options:[{title,value}]} renders an expanded Input.ChoiceSet.",
+          items: {
+            type: "object",
+            properties: {
+              type: { type: "string", enum: ["section", "options"] },
+              title: { type: "string" },
+              text: { type: "string" },
+              facts: {
+                type: "array",
+                maxItems: 50,
+                items: {
+                  type: "object",
+                  properties: { title: { type: "string" }, value: { type: "string" } },
+                  required: ["title", "value"],
+                },
+              },
+              id: { type: "string" },
+              label: { type: "string" },
+              options: {
+                type: "array",
+                maxItems: 128,
+                items: {
+                  type: "object",
+                  properties: { title: { type: "string" }, value: { type: "string" } },
+                  required: ["title", "value"],
+                },
+              },
+            },
+            required: ["type"],
+          },
+        },
         buttons: {
           type: "array",
           minItems: 1,
@@ -183,6 +265,7 @@ export function createInteractiveCardTool(params: Params): any[] {
       const spec: InteractiveCardSpec = {
         title: typeof args.title === "string" ? args.title : "",
         ...(typeof args.text === "string" ? { text: args.text } : {}),
+        ...(args.blocks !== undefined ? { blocks: normalizeBlocks(args.blocks) } : {}),
         buttons: normalizeButtons(args.buttons),
         ...(args.inputs !== undefined ? { inputs: normalizeInputs(args.inputs) } : {}),
       };
@@ -247,6 +330,8 @@ export function createInteractiveCardTool(params: Params): any[] {
           channelId: target.channelId,
           channelType: target.channelType as ChannelType,
           title: built.title,
+          card: built.card,
+          plain: built.plain,
           actionLabels: built.actionLabels,
           inputIds: built.inputIds,
           ...(negotiatedCaps?.maxInputTextBytes

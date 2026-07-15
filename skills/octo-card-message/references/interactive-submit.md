@@ -24,14 +24,31 @@ Call `octo_send_card` with this high-level shape:
 {
   "title": "发布确认",                  // required
   "text": "是否发布到生产环境？",       // optional
+  "blocks": [
+    {
+      "type": "section",
+      "title": "方案 A · 稳定发布",
+      "text": "先灰度验证，再逐步扩大范围。",
+      "facts": [{ "title": "风险", "value": "低" }]
+    },
+    {
+      "type": "options",
+      "id": "strategy",
+      "label": "方案",
+      "options": [
+        { "title": "方案 A · 稳定发布", "value": "safe" },
+        { "title": "方案 B · 快速发布", "value": "fast" }
+      ]
+    }
+  ],
   "buttons": [                         // 1..6
     {
-      "id": "approve",
-      "label": "批准",
+      "id": "submit",
+      "label": "确认选择",
       "style": "positive",
       "data": { "workflow": "release" }
     },
-    { "id": "reject", "label": "拒绝", "style": "destructive" }
+    { "id": "cancel", "label": "取消", "style": "destructive" }
   ],
   "inputs": [                          // optional, at most 5
     { "id": "reason", "kind": "text", "label": "备注" },
@@ -50,6 +67,12 @@ Call `octo_send_card` with this high-level shape:
 
 Input `kind` is one of `text`, `number`, `date`, `time`, `toggle`, or `choice`; omitted means `text`. A `choice` input requires non-empty `choices`. Use stable machine ids matching `[A-Za-z0-9_.:-]{1,64}` for buttons and inputs. Labels are user-facing text. Put only non-sensitive, bot-authored routing metadata in `data`; do not put authorization decisions or credentials there.
 
+Use `blocks` when the choice needs readable context instead of a dense paragraph:
+
+- `section` renders a `Container` containing an optional bold title, text, and `FactSet` facts. Use one section per option or concept.
+- `options` renders an expanded `Input.ChoiceSet`. It requires an id and 1–128 `{title,value}` options; every option must contain both fields.
+- Keep the submit button short (`确认选择`, `提交`, `取消`). Put option names and descriptions in sections/options rather than repeating long names in every button.
+
 The plugin builds an octo/v2 Adaptive Card with top-level `Action.Submit` actions. Do not author a raw `ActionSet`: current clients require the submit controls in top-level `card.actions`.
 
 The tool probes exact `card_version=1.5`, the octo/v2 profile, requested `Input.*`, and negotiated limits. The v2 profile itself advertises submit callbacks; the manifest `actions` array lists local/navigation actions and is not required to contain `Action.Submit`. Unsupported deployments receive the same choices as plain text and return `degraded:true`; no callback will arrive in that case, so tell the user to reply in text. A successful interactive send returns a `message_id`.
@@ -58,7 +81,7 @@ The tool probes exact `card_version=1.5`, the octo/v2 profile, requested `Input.
 
 After a successful send, the plugin registers the card against the original account, channel, and agent session, then starts short polling automatically. The agent must not poll `/v1/bot/events` itself.
 
-The first valid submit claims the card. The plugin edits the original card to processing and then completed/error; later clicks are ignored. Input ids are checked against the originating card, sensitive or oversized values are rejected, and callbacks with a mismatched account, channel, action id, or expired card mapping are ignored.
+The first valid submit claims the card. The plugin preserves the authored body, replaces submitted inputs with read-only selected values, removes submit actions, and appends processing then completed/error status; later clicks are ignored. Input ids are checked against the originating card, sensitive or oversized values are rejected, and callbacks with a mismatched account, channel, action id, or expired card mapping are ignored.
 
 The in-memory card-to-session mapping expires after 24 hours and is lost on process restart. Use interactive cards for near-term decisions, not durable workflows or long-lived approvals.
 

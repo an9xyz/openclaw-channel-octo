@@ -8,6 +8,8 @@ export interface CardSession {
   channelId: string;
   channelType: ChannelType;
   title: string;
+  card: Record<string, unknown>;
+  plain: string;
   actionLabels: Record<string, string>;
   inputIds: string[];
   maxInputTextBytes?: number;

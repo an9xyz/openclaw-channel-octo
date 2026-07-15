@@ -102,7 +102,7 @@ This plugin registers three agent tools:
 
 - **`octo_management`** covers group/thread/member management, GROUP.md and THREAD.md, voice-correction context, and `write-secret`.
 - **`octo_send_display_card`** sends structured, non-callback `octo/v1` cards to the current trusted Octo conversation.
-- **`octo_send_card`** sends `octo/v2` confirmation, menu, or short-form cards. A submit click is polled from `/v1/bot/events` and continues the same conversation as a new agent turn. Unsupported deployments receive the choices as plain text.
+- **`octo_send_card`** sends `octo/v2` confirmation, menu, or short-form cards. Controlled `section`/`options` blocks produce structured body sections and `Input.ChoiceSet` choices instead of one dense text paragraph. A submit click is polled from `/v1/bot/events`, preserves the original card body while showing the selected result, and continues the same conversation as a new agent turn. Unsupported deployments receive the choices as plain text.
 
 These are **plugin tools**, and OpenClaw's `tools.profile` presets
 (`minimal`, `coding`, `messaging`, `full`) decide which tools the model sees

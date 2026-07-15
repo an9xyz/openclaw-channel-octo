@@ -25,6 +25,16 @@ function register(): void {
     channelId: "g1",
     channelType: 2,
     title: "发布确认",
+    card: {
+      type: "AdaptiveCard",
+      version: "1.5",
+      body: [
+        { type: "TextBlock", text: "发布确认" },
+        { type: "Input.Text", id: "note", label: "备注" },
+      ],
+      actions: [{ type: "Action.Submit", id: "approve", title: "批准" }],
+    },
+    plain: "发布确认\n[备注]",
     actionLabels: { approve: "批准" },
     inputIds: ["note"],
     maxInputTextBytes: 16,
@@ -61,6 +71,14 @@ describe("handleCardAction", () => {
       profile: "octo/v2",
       cardSeq: 2,
     }));
+    const completed = vi.mocked(editCardMessage).mock.calls[1][0];
+    const completedJson = JSON.stringify(completed.card);
+    expect(completedJson).toContain("发布确认");
+    expect(completedJson).toContain("备注：ok");
+    expect(completedJson).toContain("Alice 已选择");
+    expect(completedJson).not.toContain("Input.Text");
+    expect(completedJson).not.toContain("Action.Submit");
+    expect(completed.plain).not.toContain("可选操作：");
   });
 
   it("重复 event 或第二次点击不再 dispatch", async () => {

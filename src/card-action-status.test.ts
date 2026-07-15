@@ -28,7 +28,7 @@ describe("renderCardActionStatus", () => {
         ],
         actions: [{ type: "Action.Submit", id: "submit", title: "确认选择" }],
       },
-      plain: "选择一个方案\nA · 体验碾压\nC · 生态打法",
+      plain: "选择一个方案\nA · 体验碾压\nC · 生态打法\n可选操作：确认选择",
       inputs: { strategy: "c" },
       operator: "Alice",
       actionLabel: "确认选择",
@@ -44,5 +44,6 @@ describe("renderCardActionStatus", () => {
     expect(json).not.toContain("Input.ChoiceSet");
     expect(rendered.plain).toContain("选择一个方案");
     expect(rendered.plain).toContain("方案：C · 生态打法");
+    expect(rendered.plain).not.toContain("可选操作：");
   });
 });

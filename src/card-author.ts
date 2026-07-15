@@ -17,9 +17,26 @@ export interface CardInputSpec {
   choices?: Array<{ title: string; value: string }>;
 }
 
+export interface CardSectionBlockSpec {
+  type: "section";
+  title?: string;
+  text?: string;
+  facts?: Array<{ title: string; value: string }>;
+}
+
+export interface CardOptionsBlockSpec {
+  type: "options";
+  id: string;
+  label?: string;
+  options: Array<{ title: string; value: string }>;
+}
+
+export type InteractiveCardBlockSpec = CardSectionBlockSpec | CardOptionsBlockSpec;
+
 export interface InteractiveCardSpec {
   title: string;
   text?: string;
+  blocks?: InteractiveCardBlockSpec[];
   buttons: CardButtonSpec[];
   inputs?: CardInputSpec[];
 }
@@ -37,6 +54,9 @@ type BuildFailure = { ok: false; error: string };
 
 const MAX_BUTTONS = 6;
 const MAX_INPUTS = 5;
+const MAX_BLOCKS = 20;
+const MAX_OPTIONS = 128;
+const MAX_FACTS = 50;
 const MAX_TITLE = 200;
 const MAX_TEXT = 2_000;
 const MAX_LABEL = 64;
@@ -124,11 +144,96 @@ export function buildInteractiveCard(
     plainLines.push(text);
   }
 
-  const inputs = spec.inputs ?? [];
-  if (!Array.isArray(inputs)) return failure("inputs must be an array");
-  if (inputs.length > MAX_INPUTS) return failure(`too many inputs (max ${MAX_INPUTS})`);
   const inputIds = new Set<string>();
   const inputNodes: Record<string, unknown>[] = [];
+  const blocks = spec.blocks ?? [];
+  if (!Array.isArray(blocks)) return failure("blocks must be an array");
+  if (blocks.length > MAX_BLOCKS) return failure(`too many blocks (max ${MAX_BLOCKS})`);
+  for (const block of blocks) {
+    if (!block || typeof block !== "object") return failure("block must be an object");
+    if (block.type === "section") {
+      const sectionTitle = block.title === undefined ? null : cleanText(block.title, MAX_TITLE);
+      const sectionText = block.text === undefined ? null : cleanText(block.text, MAX_TEXT);
+      if (block.title !== undefined && !sectionTitle) return failure("section has an invalid title");
+      if (block.text !== undefined && !sectionText) return failure("section has invalid text");
+      const facts = block.facts ?? [];
+      if (!Array.isArray(facts)) return failure("section facts must be an array");
+      if (facts.length > MAX_FACTS) return failure(`too many section facts (max ${MAX_FACTS})`);
+      const cleanFacts: Array<{ title: string; value: string }> = [];
+      for (const fact of facts) {
+        const factTitle = cleanText(fact?.title, MAX_LABEL);
+        const factValue = cleanText(fact?.value, MAX_TEXT);
+        if (!factTitle || !factValue) return failure("section contains invalid facts");
+        cleanFacts.push({ title: factTitle, value: factValue });
+      }
+      if (!sectionTitle && !sectionText && cleanFacts.length === 0) {
+        return failure("section must contain title, text, or facts");
+      }
+      const items: Record<string, unknown>[] = [];
+      if (sectionTitle) {
+        items.push({ type: "TextBlock", text: sectionTitle, weight: "Bolder", wrap: true });
+        plainLines.push(sectionTitle);
+      }
+      if (sectionText) {
+        items.push({ type: "TextBlock", text: sectionText, wrap: true, spacing: "Small" });
+        plainLines.push(sectionText);
+      }
+      if (cleanFacts.length > 0) {
+        if (cardSupports(caps, "FactSet")) {
+          items.push({ type: "FactSet", facts: cleanFacts });
+        } else {
+          items.push(...cleanFacts.map((fact) => ({
+            type: "TextBlock",
+            text: `${fact.title}：${fact.value}`,
+            wrap: true,
+            spacing: "Small",
+          })));
+        }
+        plainLines.push(...cleanFacts.map((fact) => `${fact.title}：${fact.value}`));
+      }
+      if (cardSupports(caps, "Container")) body.push({ type: "Container", items, spacing: "Medium" });
+      else body.push(...items);
+      continue;
+    }
+    if (block.type === "options") {
+      const id = typeof block.id === "string" ? block.id.trim() : "";
+      if (!ID_PATTERN.test(id)) return failure("options id must be 1-64 safe characters");
+      if (inputIds.has(id)) return failure(`duplicate input id: ${id}`);
+      if (caps && !cardSupports(caps, "Input.ChoiceSet")) return failure("Input.ChoiceSet is not supported");
+      if (!Array.isArray(block.options) || block.options.length === 0) {
+        return failure(`options block ${id} requires options`);
+      }
+      if (block.options.length > MAX_OPTIONS) {
+        return failure(`options block ${id} has too many options (max ${MAX_OPTIONS})`);
+      }
+      const choices: Array<{ title: string; value: string }> = [];
+      for (const option of block.options) {
+        const optionTitle = cleanText(option?.title, MAX_LABEL);
+        const optionValue = cleanText(option?.value, MAX_LABEL);
+        if (!optionTitle || !optionValue) return failure(`options block ${id} contains invalid options`);
+        choices.push({ title: optionTitle, value: optionValue });
+      }
+      const label = block.label === undefined ? null : cleanText(block.label, MAX_LABEL);
+      if (block.label !== undefined && !label) return failure(`options block ${id} has an invalid label`);
+      inputIds.add(id);
+      const node: Record<string, unknown> = {
+        type: "Input.ChoiceSet",
+        id,
+        style: "expanded",
+        choices,
+        ...(label ? { label } : {}),
+      };
+      body.push(node);
+      inputNodes.push(node);
+      plainLines.push(`[${label ?? id}] 可选值：${choices.map((choice) => choice.title).join(" / ")}`);
+      continue;
+    }
+    return failure(`unsupported block type: ${String((block as { type?: unknown }).type)}`);
+  }
+
+  const inputs = spec.inputs ?? [];
+  if (!Array.isArray(inputs)) return failure("inputs must be an array");
+  if (inputs.length + inputIds.size > MAX_INPUTS) return failure(`too many inputs (max ${MAX_INPUTS})`);
   for (const input of inputs) {
     const id = typeof input.id === "string" ? input.id.trim() : "";
     if (!ID_PATTERN.test(id)) return failure("input id must be 1-64 safe characters");
@@ -149,8 +254,11 @@ export function buildInteractiveCard(
       if (!Array.isArray(input.choices) || input.choices.length === 0) {
         return failure(`choice input ${id} requires choices`);
       }
+      if (input.choices.length > MAX_OPTIONS) {
+        return failure(`choice input ${id} has too many choices (max ${MAX_OPTIONS})`);
+      }
       const choices: Array<{ title: string; value: string }> = [];
-      for (const choice of input.choices.slice(0, 50)) {
+      for (const choice of input.choices) {
         const choiceTitle = cleanText(choice.title, MAX_LABEL);
         const choiceValue = cleanText(choice.value, MAX_LABEL);
         if (!choiceTitle || !choiceValue) return failure(`choice input ${id} contains invalid choices`);
@@ -167,6 +275,7 @@ export function buildInteractiveCard(
       node.maxLength = Math.max(1, Math.floor(caps.maxInputTextBytes / 4));
     }
     inputNodes.push(node);
+    body.push(node);
     const inputLabel = String(node.label ?? id);
     if (kind === "choice") {
       const choiceLabels = (node.choices as Array<{ title: string }>).map((choice) => choice.title);
@@ -182,7 +291,6 @@ export function buildInteractiveCard(
   ) {
     return failure("input definitions exceed max_inputs_bytes");
   }
-  body.push(...inputNodes);
   plainLines.push(`可选操作：${Object.values(actionLabels).join(" / ")}`);
 
   const card: Record<string, unknown> = {

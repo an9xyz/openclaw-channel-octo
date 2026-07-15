@@ -105,7 +105,22 @@ suite("card E2E（真实 octo-server）", () => {
     expect(manifest.profiles).toContain(CARD_INTERACTIVE_PROFILE);
     const built = buildInteractiveCard({
       title: "Octo P2 E2E",
-      text: "请在测试客户端点击下面的按钮",
+      text: "请选择一个方案并提交",
+      blocks: [
+        { type: "section", title: "A · 体验碾压", text: "优化响应、工具调用和多端体验。" },
+        { type: "section", title: "B · 垂直场景", text: "聚焦企业助手和研发 Agent。" },
+        { type: "section", title: "C · 生态打法", text: "开放插件、技能和工作流模板。" },
+        {
+          type: "options",
+          id: "strategy",
+          label: "方案",
+          options: [
+            { title: "A · 体验碾压", value: "a" },
+            { title: "B · 垂直场景", value: "b" },
+            { title: "C · 生态打法", value: "c" },
+          ],
+        },
+      ],
       buttons: [{ id: "e2e_confirm", label: "确认 E2E" }],
     }, deriveInteractiveCardCaps(manifest));
     expect(built.ok).toBe(true);
@@ -124,7 +139,7 @@ suite("card E2E（真实 octo-server）", () => {
     });
     expect(sent?.message_id).toBeTruthy();
     // eslint-disable-next-line no-console -- explicit human-in-the-loop E2E instruction
-    console.log(`[e2e] click “确认 E2E” on card message_id=${sent!.message_id} within ${CARD_ACTION_TIMEOUT_MS}ms`);
+    console.log(`[e2e] choose a strategy and click “确认 E2E” on card message_id=${sent!.message_id} within ${CARD_ACTION_TIMEOUT_MS}ms`);
 
     const deadline = Date.now() + CARD_ACTION_TIMEOUT_MS;
     while (Date.now() < deadline) {

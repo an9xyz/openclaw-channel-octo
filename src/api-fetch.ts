@@ -3,7 +3,7 @@
  * These are used by inbound/outbound where the full OctoAPI class is not available.
  */
 
-import { ChannelType, MessageType, CARD_PROFILE, CARD_VERSION, type CardProfile, type MentionEntity, type RichTextBlock, type SendMessageResult, type TargetCandidate } from "./types.js";
+import { ChannelType, MessageType, CARD_INTERACTIVE_PROFILE, CARD_PROFILE, CARD_VERSION, type CardProfile, type MentionEntity, type RichTextBlock, type SendMessageResult, type TargetCandidate } from "./types.js";
 import path from "path";
 import { open } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -388,18 +388,35 @@ export async function sendRichTextMessage(params: {
  *   - `card` 由调用方组装为合法 AC1.5 JSON；schema 校验由服务端 `pkg/cardmsg` 权威，
  *     本函数只组包不校验。
  *   - `plain` 出站可附带（老客户端降级用），server 在 dispatch 出口权威重算覆盖。
- *   - `profile`/`card_version` 固定 `octo/v1`/`1.5`（Decision 10；不匹配 server 400）。
+ *   - `card_version` 固定 `1.5`；含任意 `Input.*`/`Action.Submit` 时 profile 自动为
+ *     `octo/v2`，否则使用调用方 profile 或缺省 `octo/v1`。
  *   - `onBehalfOf` 透传保证 persona-clone 身份一致（C3）；注意 OBO + type17 会被
  *     server 在 P1 拒绝（Decision 2b），故仅用于普通 bot 发卡场景。
  *   - 发卡前应先 `getCardProfile` feature-detect（D12）。
  */
+function cardContainsInteraction(value: unknown, seen = new WeakSet<object>()): boolean {
+  if (!value || typeof value !== "object") return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) return value.some((item) => cardContainsInteraction(item, seen));
+  const record = value as Record<string, unknown>;
+  if (typeof record.type === "string" && (
+    record.type.startsWith("Input.") || record.type === "Action.Submit"
+  )) return true;
+  return Object.values(record).some((item) => cardContainsInteraction(item, seen));
+}
+
+function resolveCardProfile(card: Record<string, unknown>, requested?: CardProfile): CardProfile {
+  return cardContainsInteraction(card) ? CARD_INTERACTIVE_PROFILE : (requested ?? CARD_PROFILE);
+}
+
 export async function sendCardMessage(params: {
   apiUrl: string;
   botToken: string;
   channelId: string;
   channelType: ChannelType;
   card: Record<string, unknown>;
-  /** 展示卡默认 octo/v1；交互卡显式传 octo/v2。 */
+  /** 展示卡默认 octo/v1；Input.* / Action.Submit 自动升级 octo/v2。 */
   profile?: CardProfile;
   plain?: string;
   mentionUids?: string[];
@@ -416,7 +433,7 @@ export async function sendCardMessage(params: {
   const payload: Record<string, unknown> = {
     type: MessageType.InteractiveCard,
     card: params.card,
-    profile: params.profile ?? CARD_PROFILE,
+    profile: resolveCardProfile(params.card, params.profile),
     card_version: CARD_VERSION,
   };
   if (typeof params.plain === "string") {
@@ -465,7 +482,7 @@ export async function editCardMessage(params: {
   channelId: string;
   channelType: ChannelType;
   card: Record<string, unknown>;
-  /** 必须与被编辑卡片的 profile 一致；缺省保持 octo/v1。 */
+  /** 缺省 octo/v1；Input.* / Action.Submit 自动升级 octo/v2。 */
   profile?: CardProfile;
   /** 交互卡多帧编辑的单调序号；服务端拒绝旧帧/乱序帧。 */
   cardSeq?: number;
@@ -484,7 +501,7 @@ export async function editCardMessage(params: {
   const envelope: Record<string, unknown> = {
     type: MessageType.InteractiveCard,
     card: params.card,
-    profile: params.profile ?? CARD_PROFILE,
+    profile: resolveCardProfile(params.card, params.profile),
     card_version: CARD_VERSION,
   };
   if (typeof params.plain === "string") {

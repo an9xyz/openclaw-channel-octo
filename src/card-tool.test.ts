@@ -160,6 +160,41 @@ describe("octo_send_card", () => {
     expect(result.details).toEqual(expect.objectContaining({ sent: true, message_id: "m1" }));
   });
 
+  it("把 tool 的 section/options blocks 传给受控构建器并登记原卡快照", async () => {
+    vi.mocked(getCardProfile).mockResolvedValue({
+      available: true,
+      enabled: true,
+      profiles: ["octo/v2"],
+      card_version: "1.5",
+      elements: ["TextBlock", "Container", "FactSet"],
+      inputs: ["Input.ChoiceSet"],
+      actions: ["Action.OpenUrl"],
+    });
+
+    await tool().execute("structured", {
+      title: "选择方案",
+      blocks: [
+        { type: "section", title: "C · 生态打法", text: "开放插件和技能。" },
+        {
+          type: "options",
+          id: "strategy",
+          label: "方案",
+          options: [{ title: "C · 生态打法", value: "c" }],
+        },
+      ],
+      buttons: [{ id: "submit", label: "确认选择" }],
+    });
+
+    const sent = vi.mocked(sendCardMessage).mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(JSON.stringify(sent.card)).toContain("Input.ChoiceSet");
+    expect(JSON.stringify(sent.card)).toContain("C · 生态打法");
+    expect(registerCardSession).toHaveBeenCalledWith("m1", expect.objectContaining({
+      card: sent.card,
+      plain: expect.stringContaining("C · 生态打法"),
+      inputIds: ["strategy"],
+    }));
+  });
+
   it("服务端不支持 octo/v2 时降级为当前会话纯文本，不登记 session", async () => {
     vi.mocked(getCardProfile).mockResolvedValue({
       available: true,

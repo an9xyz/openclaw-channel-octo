@@ -19,6 +19,8 @@ const session = (suffix = "") => ({
   channelId: "g1",
   channelType: 2,
   title: "确认",
+  card: { type: "AdaptiveCard", body: [{ type: "TextBlock", text: "确认" }] },
+  plain: "确认",
   actionLabels: { approve: "批准" },
   inputIds: ["note"],
   maxInputTextBytes: 4096,
@@ -37,6 +39,8 @@ describe("card session registry", () => {
     registerCardSession("m1", session());
     expect(requestCardEventPolling).toHaveBeenCalledWith("a1");
     expect(lookupCardSession("m1")?.sessionKey).toBe("s");
+    expect(lookupCardSession("m1")?.card).toEqual(expect.objectContaining({ type: "AdaptiveCard" }));
+    expect(lookupCardSession("m1")?.plain).toBe("确认");
 
     vi.advanceTimersByTime(24 * 60 * 60 * 1000 + 1);
     expect(lookupCardSession("m1")).toBeNull();

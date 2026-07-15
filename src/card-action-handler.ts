@@ -32,12 +32,15 @@ async function updateStatus(params: {
   botToken: string;
   operator: string;
   status: CardActionStatus;
+  submittedInputs?: Record<string, string>;
   errorText?: string;
   transient?: boolean;
   log?: { info?: (message: string) => void; warn?: (message: string) => void };
 }): Promise<void> {
   const rendered = renderCardActionStatus({
-    title: params.session.title,
+    card: params.session.card,
+    plain: params.session.plain,
+    ...(params.submittedInputs ? { inputs: params.submittedInputs } : {}),
     operator: params.operator,
     actionLabel: params.session.actionLabels[params.action.actionId] ?? params.action.actionId,
     status: params.status,
@@ -115,6 +118,7 @@ export async function handleCardAction(params: Params): Promise<CardActionHandle
     botToken: params.botToken,
     operator: params.operatorName ?? action.operatorUid,
     status: "processing",
+    submittedInputs: action.inputs,
     transient: true,
     log: params.log,
   });
@@ -129,6 +133,7 @@ export async function handleCardAction(params: Params): Promise<CardActionHandle
         botToken: params.botToken,
         operator: params.operatorName ?? action.operatorUid,
         status: "error",
+        submittedInputs: action.inputs,
         errorText: "处理失败，请稍后重试",
         log: params.log,
       });
@@ -143,6 +148,7 @@ export async function handleCardAction(params: Params): Promise<CardActionHandle
       botToken: params.botToken,
       operator: params.operatorName ?? action.operatorUid,
       status: "completed",
+      submittedInputs: action.inputs,
       log: params.log,
     });
     params.log?.info?.(`octo: card_action completed message=${action.messageId} event=${action.eventId}`);
@@ -156,6 +162,7 @@ export async function handleCardAction(params: Params): Promise<CardActionHandle
       botToken: params.botToken,
       operator: params.operatorName ?? action.operatorUid,
       status: "error",
+      submittedInputs: action.inputs,
       errorText: "处理失败，正在重试",
       log: params.log,
     });

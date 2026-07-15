@@ -48,6 +48,16 @@ describe("interactive card local integration", () => {
       channelId: "g1",
       channelType: 2,
       title: "发布确认",
+      card: {
+        type: "AdaptiveCard",
+        version: "1.5",
+        body: [
+          { type: "TextBlock", text: "发布确认" },
+          { type: "Input.Text", id: "reason", label: "原因" },
+        ],
+        actions: [{ type: "Action.Submit", id: "approve", title: "批准" }],
+      },
+      plain: "发布确认\n[原因]",
       actionLabels: { approve: "批准" },
       inputIds: ["reason"],
     });
