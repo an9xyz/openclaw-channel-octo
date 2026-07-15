@@ -16,7 +16,7 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { ChannelType, CARD_PROFILE, CARD_VERSION } from "./types.js";
 import { sendCardMessage, editCardMessage, getCardProfile, httpStatusFromApiFetchError } from "./api-fetch.js";
 import { deriveCardCaps } from "./card-caps.js";
-import { renderProgressCard, summarizeToolParams, type CardStep, type CardProgressState, type CardCaps } from "./card-render.js";
+import { renderProgressCard, renderProgressResponseCard, summarizeToolParams, type CardStep, type CardProgressState, type CardCaps } from "./card-render.js";
 import { DISPLAY_CARD_TOOL_NAME, INTERACTIVE_CARD_TOOL_NAME } from "./constants.js";
 
 /** dispatch 侧登记的发送上下文。 */
@@ -347,6 +347,60 @@ export async function finalizeCard(
     dbg(`finalized session=${sessionKey} phase=${state.phase} steps=${entry.steps.length}`);
   } catch (err: unknown) {
     warn(`finalize failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/**
+ * Try to turn an already-visible progress card into the terminal response.
+ * Returns false without consuming the entry when no card exists, rendering
+ * exceeds negotiated limits, or the edit fails; callers can then send normal
+ * text and let `finalizeCard` close the progress card separately.
+ */
+export async function finalizeCardWithResponse(
+  sessionKey: string,
+  responseText: string,
+): Promise<boolean> {
+  const entry = cards.get(sessionKey);
+  if (!entry) return false;
+  if (entry.flushPromise) {
+    try { await entry.flushPromise; } catch { /* flush already logged */ }
+  }
+  if (entry.flushTimer) {
+    clearTimeout(entry.flushTimer);
+    entry.flushTimer = undefined;
+  }
+  endRunningThinking(entry, Date.now());
+  if (entry.skip || !entry.messageId || cards.get(sessionKey) !== entry) return false;
+
+  const rendered = renderProgressResponseCard({
+    phase: "done",
+    steps: entry.steps,
+    elapsedMs: Date.now() - entry.startedAt,
+  }, responseText, capsCache.get(entry.ctx.apiUrl));
+  if (!rendered) return false;
+
+  // Freeze late hook/debounce activity while the terminal edit is in flight so
+  // no stale transient frame can overwrite the merged response afterward.
+  entry.skip = true;
+  try {
+    await editCardMessage({
+      apiUrl: entry.ctx.apiUrl,
+      botToken: entry.ctx.botToken,
+      messageId: entry.messageId,
+      channelId: entry.ctx.channelId,
+      channelType: entry.ctx.channelType,
+      card: rendered.card,
+      plain: rendered.plain,
+      ...(entry.ctx.onBehalfOf ? { onBehalfOf: entry.ctx.onBehalfOf } : {}),
+      signal: AbortSignal.timeout(EDIT_TIMEOUT_MS),
+    });
+    if (cards.get(sessionKey) === entry) cards.delete(sessionKey);
+    dbg(`merged final response session=${sessionKey} steps=${entry.steps.length}`);
+    return true;
+  } catch (err: unknown) {
+    if (cards.get(sessionKey) === entry) entry.skip = false;
+    warn(`final response merge failed: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
   }
 }
 

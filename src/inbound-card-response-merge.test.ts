@@ -92,6 +92,52 @@ function installFetchStub() {
   return { sends, edits };
 }
 
+function installRuntime(
+  hooks: Record<string, (event: unknown, ctx: unknown) => unknown>,
+  finalText: string,
+) {
+  setOctoRuntime({
+    config: { loadConfig: () => ({}) },
+    channel: {
+      reply: {
+        dispatchReplyWithBufferedBlockDispatcher: async (args: any) => {
+          hooks.before_tool_call({ toolName: "read", toolCallId: "read-1" }, { sessionKey: "sk-merge" });
+          await new Promise((resolve) => setTimeout(resolve, 850));
+          hooks.after_tool_call(
+            { toolName: "read", toolCallId: "read-1", durationMs: 20 },
+            { sessionKey: "sk-merge" },
+          );
+          await args.dispatcherOptions.deliver({ text: finalText }, { kind: "final" });
+        },
+        resolveEnvelopeFormatOptions: () => ({}),
+        formatAgentEnvelope: ({ body }: any) => body,
+        finalizeInboundContext: (ctx: any) => ctx,
+      },
+      routing: {
+        resolveAgentRoute: () => ({ agentId: "agent1", sessionKey: "sk-merge", accountId: "acct1" }),
+      },
+      session: {
+        resolveStorePath: () => "/tmp/store",
+        readSessionUpdatedAt: () => undefined,
+        recordInboundSession: async () => {},
+      },
+    },
+  } as any);
+}
+
+async function runInbound() {
+  await handleInboundMessage({
+    account: makeAccount(),
+    message: makeMessage() as any,
+    botUid: BOT_UID,
+    groupHistories: new Map(),
+    lastBotReplySeqMap: new Map(),
+    memberMap: new Map(),
+    uidToNameMap: new Map(),
+    groupCacheTimestamps: new Map(),
+  });
+}
+
 describe("inbound final response progress-card merge", () => {
   beforeEach(() => {
     _clearKnownBots();
@@ -111,44 +157,8 @@ describe("inbound final response progress-card merge", () => {
     const { sends, edits } = installFetchStub();
     const hooks = collectCardHooks();
     const finalText = "结论\n\n渠道 B 的下降主要来自权益认知不足。";
-    setOctoRuntime({
-      config: { loadConfig: () => ({}) },
-      channel: {
-        reply: {
-          dispatchReplyWithBufferedBlockDispatcher: async (args: any) => {
-            hooks.before_tool_call({ toolName: "read", toolCallId: "read-1" }, { sessionKey: "sk-merge" });
-            await new Promise((resolve) => setTimeout(resolve, 850));
-            hooks.after_tool_call(
-              { toolName: "read", toolCallId: "read-1", durationMs: 20 },
-              { sessionKey: "sk-merge" },
-            );
-            await args.dispatcherOptions.deliver({ text: finalText }, { kind: "final" });
-          },
-          resolveEnvelopeFormatOptions: () => ({}),
-          formatAgentEnvelope: ({ body }: any) => body,
-          finalizeInboundContext: (ctx: any) => ctx,
-        },
-        routing: {
-          resolveAgentRoute: () => ({ agentId: "agent1", sessionKey: "sk-merge", accountId: "acct1" }),
-        },
-        session: {
-          resolveStorePath: () => "/tmp/store",
-          readSessionUpdatedAt: () => undefined,
-          recordInboundSession: async () => {},
-        },
-      },
-    } as any);
-
-    await handleInboundMessage({
-      account: makeAccount(),
-      message: makeMessage() as any,
-      botUid: BOT_UID,
-      groupHistories: new Map(),
-      lastBotReplySeqMap: new Map(),
-      memberMap: new Map(),
-      uidToNameMap: new Map(),
-      groupCacheTimestamps: new Map(),
-    });
+    installRuntime(hooks, finalText);
+    await runInbound();
 
     const cardSends = sends.filter((body) => (body.payload as { type?: number } | undefined)?.type === 17);
     const textSends = sends.filter((body) => (body.payload as { type?: number } | undefined)?.type === 1);
@@ -159,5 +169,16 @@ describe("inbound final response progress-card merge", () => {
     const contentEdit = JSON.parse(edits[0].content_edit as string);
     expect(contentEdit.transient).toBeUndefined();
     expect(JSON.stringify(contentEdit.card)).toContain("渠道 B 的下降主要来自权益认知不足");
+  });
+
+  it("keeps mention-bearing final text on the normal message path", async () => {
+    const { sends } = installFetchStub();
+    installRuntime(collectCardHooks(), "请看，@Alice 的渠道结论。");
+
+    await runInbound();
+
+    const textSends = sends.filter((body) => (body.payload as { type?: number } | undefined)?.type === 1);
+    expect(textSends).toHaveLength(1);
+    expect((textSends[0].payload as { content?: string }).content).toContain("@Alice");
   });
 });

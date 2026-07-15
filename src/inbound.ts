@@ -26,7 +26,7 @@ import { getMentionPrefFromCache, invalidateMentionPref } from "./mention-prefs.
 import { normalizeAccountId } from "./account-id.js";
 import type { ResolvedOctoAccount } from "./accounts.js";
 import type { BotMessage } from "./types.js";
-import { setCardContext, finalizeCard } from "./card-progress.js";
+import { setCardContext, finalizeCard, finalizeCardWithResponse } from "./card-progress.js";
 import { ChannelType, MessageType, RICH_TEXT_BLOCK_IMAGE, RICH_TEXT_BLOCK_TEXT, RICH_TEXT_IMAGE_PLACEHOLDER, CARD_PLACEHOLDER } from "./types.js";
 import type { RichTextBlock } from "./types.js";
 import { getOctoRuntime } from "./runtime.js";
@@ -2801,6 +2801,31 @@ export async function handleInboundMessage(params: {
     return result;
   };
 
+  // Experimental opt-in: when a progress card is already visible, try to put
+  // the final plain-text response into that same message. Mentions and turns
+  // that emitted media keep the normal path because a card edit cannot retain
+  // their notification / attachment semantics. A failed merge is transparent:
+  // the caller still sends text and finally closes the progress card normally.
+  const deliverFinalText = async (
+    content: string,
+    signal?: AbortSignal,
+  ): Promise<{ merged: boolean }> => {
+    const hasPotentialMention = content.includes("@");
+    if (
+      process.env.OCTO_CARD_MERGE_FINAL === "1"
+      && sentMediaUrls.size === 0
+      && !hasPotentialMention
+    ) {
+      const merged = await finalizeCardWithResponse(route.sessionKey, content);
+      if (merged) {
+        statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
+        return { merged: true };
+      }
+    }
+    await resolveAndSendText(content, signal);
+    return { merged: false };
+  };
+
   let replySucceeded = false;
 
   // Timeout guard: see resolveDispatchTimeoutMs at top of file. Without this,
@@ -2894,13 +2919,13 @@ export async function handleInboundMessage(params: {
               return;
             }
 
-            await resolveAndSendText(content, AbortSignal.timeout(DISPATCH_TIMEOUT_APOLOGY_MS));
+            const delivered = await deliverFinalText(content, AbortSignal.timeout(DISPATCH_TIMEOUT_APOLOGY_MS));
             replySucceeded = true;
             userFacingFinalDelivered = true;
             pendingToolWarningFinal = undefined;
             deliverBuffer.lastText = null;
             deliverBuffer.textSent = true;
-            log?.info?.(`octo: [deliver] final text sent immediately (${content.length} chars)`);
+            log?.info?.(`octo: [deliver] final ${delivered.merged ? "merged into progress card" : "text sent immediately"} (${content.length} chars)`);
             return;
           }
 
@@ -2946,7 +2971,7 @@ export async function handleInboundMessage(params: {
           const pending = pendingToolWarningFinal;
           pendingToolWarningFinal = undefined;
           try {
-            await resolveAndSendText(pending.text, AbortSignal.timeout(DISPATCH_TIMEOUT_APOLOGY_MS));
+            await deliverFinalText(pending.text, AbortSignal.timeout(DISPATCH_TIMEOUT_APOLOGY_MS));
             replySucceeded = true;
             log?.info?.(
               `octo: [deliver] pending tool warning sent as fallback (${pending.text.length} chars)`,
@@ -3013,7 +3038,7 @@ export async function handleInboundMessage(params: {
         // on the happy path either — dispatch may have completed normally
         // but if the final POST hangs, handleInboundMessage would never
         // settle. See DISPATCH_TIMEOUT_APOLOGY_MS comment at top of file.
-        await resolveAndSendText(
+        await deliverFinalText(
           deliverBuffer.lastText,
           AbortSignal.timeout(DISPATCH_TIMEOUT_APOLOGY_MS),
         );

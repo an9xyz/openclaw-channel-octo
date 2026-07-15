@@ -842,3 +842,47 @@ export function renderProgressCard(
   }
   return { card, plain: plain || CARD_PLACEHOLDER };
 }
+
+/**
+ * Experimental terminal frame: keep the completed progress panel and append the
+ * normal final text in the same type-17 message. The specialized
+ * `agent_progress_v1` metadata is intentionally removed because its client
+ * contract requires exactly `[ColumnSet, Container#timeline_detail]`; this
+ * combined shape must go through the ordinary Adaptive Card renderer.
+ *
+ * `null` means the answer must be delivered through the normal text path. We
+ * never truncate a user-facing final answer merely to make it fit a card.
+ */
+export function renderProgressResponseCard(
+  state: CardProgressState,
+  responseText: string,
+  caps?: CardCaps,
+): { card: Record<string, unknown>; plain: string } | null {
+  const finalText = responseText.trim();
+  if (state.phase !== "done" || !finalText) return null;
+
+  const progress = renderProgressCard(state, caps);
+  const progressBody = Array.isArray(progress.card.body) ? progress.card.body : [];
+  if (progressBody.length === 0) return null;
+
+  const responseBlock: Record<string, unknown> = {
+    type: "TextBlock",
+    text: finalText,
+    wrap: true,
+    spacing: "Large",
+  };
+  const body = cardSupports(caps, "Container")
+    ? [
+        {
+          type: "Container",
+          style: "emphasis",
+          items: progressBody,
+        },
+        responseBlock,
+      ]
+    : [...progressBody, responseBlock];
+  const { metadata: _progressLayout, ...baseCard } = progress.card;
+  const card: Record<string, unknown> = { ...baseCard, body };
+  if (!cardFitsLimits(card, finalText, caps)) return null;
+  return { card, plain: finalText };
+}
