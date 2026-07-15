@@ -1,5 +1,8 @@
 import type { CardProfileManifest } from "./api-fetch.js";
 import type { CardCaps } from "./card-render.js";
+import { CARD_INTERACTIVE_PROFILE } from "./types.js";
+
+const ACTION_SUBMIT = "Action.Submit";
 
 function positiveFiniteLimit(value: unknown): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return undefined;
@@ -26,4 +29,16 @@ export function deriveCardCaps(manifest: CardProfileManifest): CardCaps {
     ...(maxInputTextBytes !== undefined ? { maxInputTextBytes } : {}),
     ...(maxInputsBytes !== undefined ? { maxInputsBytes } : {}),
   };
+}
+
+/**
+ * D12 reserves `actions` for local/navigation actions. Submit callback support is advertised by
+ * the `octo/v2` profile itself, so translate that profile into the builder's semantic capability.
+ */
+export function deriveInteractiveCardCaps(manifest: CardProfileManifest): CardCaps {
+  const caps = deriveCardCaps(manifest);
+  const actions = new Set(caps.actions ?? []);
+  actions.delete(ACTION_SUBMIT);
+  if (manifest.profiles?.includes(CARD_INTERACTIVE_PROFILE)) actions.add(ACTION_SUBMIT);
+  return { ...caps, actions };
 }

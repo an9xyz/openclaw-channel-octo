@@ -52,7 +52,7 @@ Input `kind` is one of `text`, `number`, `date`, `time`, `toggle`, or `choice`; 
 
 The plugin builds an octo/v2 Adaptive Card with top-level `Action.Submit` actions. Do not author a raw `ActionSet`: current clients require the submit controls in top-level `card.actions`.
 
-The tool probes exact `card_version=1.5`, octo/v2, `Action.Submit`, requested `Input.*`, and negotiated limits. Unsupported deployments receive the same choices as plain text and return `degraded:true`; no callback will arrive in that case, so tell the user to reply in text. A successful interactive send returns a `message_id`.
+The tool probes exact `card_version=1.5`, the octo/v2 profile, requested `Input.*`, and negotiated limits. The v2 profile itself advertises submit callbacks; the manifest `actions` array lists local/navigation actions and is not required to contain `Action.Submit`. Unsupported deployments receive the same choices as plain text and return `degraded:true`; no callback will arrive in that case, so tell the user to reply in text. A successful interactive send returns a `message_id`.
 
 ## Callback lifecycle
 

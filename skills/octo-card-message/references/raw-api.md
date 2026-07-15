@@ -8,7 +8,7 @@ Call `GET <apiUrl>/v1/bot/card/profile` with the bot bearer token.
 
 - Require `enabled:true`, exact `card_version:"1.5"`, and the requested profile (`octo/v1` or `octo/v2`).
 - Treat present `elements`, `inputs`, and `actions` arrays as authoritative, including empty arrays.
-- For octo/v2 require `Action.Submit` and each emitted `Input.*` capability. Never infer v2 from v1 availability.
+- For submit callbacks require the octo/v2 profile and each emitted `Input.*` capability. The `actions` array describes local/navigation actions; do not require it to list `Action.Submit`. Never infer v2 from v1 availability.
 - Enforce `limits.max_nodes`, `max_depth`, `max_payload_bytes`, `max_input_text_bytes`, and `max_inputs_bytes` recursively and in UTF-8 bytes where applicable.
 - An unavailable v1 endpoint may use the legacy `OCTO_CARD_MESSAGE_ENABLED=1` gate. An unavailable v2 manifest cannot prove callback support; fall back to text.
 

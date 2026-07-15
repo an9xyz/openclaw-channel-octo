@@ -22,7 +22,7 @@ import {
   sendCardMessage,
 } from "./api-fetch.js";
 import { buildInteractiveCard } from "./card-author.js";
-import { deriveCardCaps } from "./card-caps.js";
+import { deriveCardCaps, deriveInteractiveCardCaps } from "./card-caps.js";
 import { parseCardAction } from "./card-action.js";
 import { renderProgressCard, type CardCaps } from "./card-render.js";
 import { CARD_INTERACTIVE_PROFILE, ChannelType } from "./types.js";
@@ -103,12 +103,11 @@ suite("card E2E（真实 octo-server）", () => {
   actionIt("octo/v2 发卡 → 人工点击 → events 收到 card_action", async () => {
     const manifest = await getCardProfile({ apiUrl: API!, botToken: TOKEN! });
     expect(manifest.profiles).toContain(CARD_INTERACTIVE_PROFILE);
-    expect(manifest.actions).toContain("Action.Submit");
     const built = buildInteractiveCard({
       title: "Octo P2 E2E",
       text: "请在测试客户端点击下面的按钮",
       buttons: [{ id: "e2e_confirm", label: "确认 E2E" }],
-    }, deriveCardCaps(manifest));
+    }, deriveInteractiveCardCaps(manifest));
     expect(built.ok).toBe(true);
     if (!built.ok) throw new Error(built.error);
 

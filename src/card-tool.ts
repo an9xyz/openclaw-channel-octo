@@ -8,7 +8,7 @@ import {
   type CardInputSpec,
   type InteractiveCardSpec,
 } from "./card-author.js";
-import { deriveCardCaps } from "./card-caps.js";
+import { deriveInteractiveCardCaps } from "./card-caps.js";
 import { registerCardSession } from "./card-session.js";
 import { INTERACTIVE_CARD_TOOL_NAME, CHANNEL_ID } from "./constants.js";
 import { resolveOutboundOctoTarget } from "./actions.js";
@@ -204,7 +204,7 @@ export function createInteractiveCardTool(params: Params): any[] {
 
       let built = baseline;
       if (manifest && !unsupportedReason) {
-        negotiatedCaps = deriveCardCaps(manifest);
+        negotiatedCaps = deriveInteractiveCardCaps(manifest);
         const strict = buildInteractiveCard(spec, negotiatedCaps);
         if (strict.ok) built = strict;
         else unsupportedReason = strict.error;

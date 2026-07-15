@@ -532,9 +532,9 @@ export interface CardProfileManifest {
   elements?: string[];
   inputs?: string[];
   /**
-   * 动作白名单(pkg/cardmsg 权威)。octo/v1 展示卡只消费本地/导航动作
-   * (`Action.ToggleVisibility`/`Action.CopyToClipboard`/`Action.OpenUrl`);回流 `Action.Submit`
-   * 属于 octo/v2 交互卡路径,不得放进展示卡 selectAction。
+   * 本地/导航动作白名单(pkg/cardmsg 权威):`Action.ToggleVisibility`/
+   * `Action.CopyToClipboard`/`Action.OpenUrl`。回流 `Action.Submit` 不在此数组中；它由
+   * `profiles` 包含 `octo/v2` 表示，也不得放进展示卡 selectAction。
    * 旧部署不返该字段(undefined) → 消费方保守视为不支持任何 action。
    */
   actions?: string[];

@@ -432,7 +432,7 @@ export interface CardCaps extends CardLimits {
   elements?: ReadonlySet<string>;
   /** 服务端 advertise 的输入白名单(Input.Text/Toggle/ChoiceSet/Number/Date/Time)。 */
   inputs?: ReadonlySet<string>;
-  /** 服务端 advertise 的动作白名单(v1 本地/导航动作 + v2 Submit 回流动作)。 */
+  /** 服务端 advertise 的本地/导航动作；交互构建器从 octo/v2 profile 派生 Submit。 */
   actions?: ReadonlySet<string>;
   /** 递归节点数上限(limits.max_nodes)。 */
   maxNodes?: number;

@@ -39,7 +39,7 @@ function setup(): void {
     card_version: "1.5",
     elements: ["TextBlock"],
     inputs: ["Input.Text"],
-    actions: ["Action.Submit"],
+    actions: ["Action.OpenUrl", "Action.ToggleVisibility", "Action.CopyToClipboard"],
     limits: { max_nodes: 20, max_depth: 8, max_payload_bytes: 16384 },
   });
   vi.mocked(sendCardMessage).mockResolvedValue({ message_id: "m1" } as never);
@@ -177,7 +177,7 @@ describe("octo_send_card", () => {
     expect(result.details).toEqual(expect.objectContaining({ degraded: true }));
   });
 
-  it("缺 Action.Submit 或请求了未支持 Input 时降级文本", async () => {
+  it("octo/v2 不依赖 actions 列表，但请求未支持 Input 时仍降级文本", async () => {
     vi.mocked(getCardProfile).mockResolvedValue({
       available: true,
       enabled: true,
@@ -191,7 +191,8 @@ describe("octo_send_card", () => {
       title: "确认",
       buttons: [{ id: "ok", label: "确定" }],
     });
-    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendCardMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage).not.toHaveBeenCalled();
 
     vi.mocked(getCardProfile).mockResolvedValue({
       available: true,
@@ -200,14 +201,14 @@ describe("octo_send_card", () => {
       card_version: "1.5",
       elements: ["TextBlock"],
       inputs: [],
-      actions: ["Action.Submit"],
+      actions: ["Action.OpenUrl"],
     });
     await tool().execute("missing-input", {
       title: "确认",
       buttons: [{ id: "ok", label: "确定" }],
       inputs: [{ id: "note", kind: "text" }],
     });
-    expect(sendMessage).toHaveBeenCalledTimes(2);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
   });
 
   it("manifest 不可用、服务端禁用或版本不匹配时均降级", async () => {
@@ -235,7 +236,7 @@ describe("octo_send_card", () => {
       card_version: "1.5",
       elements: ["TextBlock"],
       inputs: ["Input.Text", "Input.Number", "Input.Date", "Input.Toggle", "Input.ChoiceSet"],
-      actions: ["Action.Submit"],
+      actions: ["Action.OpenUrl", "Action.ToggleVisibility", "Action.CopyToClipboard"],
       limits: {
         max_nodes: 50,
         max_depth: 8,
