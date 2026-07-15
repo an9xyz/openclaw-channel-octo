@@ -50,6 +50,7 @@ function tool(context: typeof deliveryContext | null = deliveryContext) {
   const tools = createInteractiveCardTool({
     cfg,
     agentAccountId: "default",
+    agentId: "agent-1",
     sessionKey: "session-1",
     deliveryContext: context ?? undefined,
     messageChannel: context?.channel,
@@ -129,8 +130,10 @@ describe("octo_send_card", () => {
     }));
     expect(registerCardSession).toHaveBeenCalledWith("m1", expect.objectContaining({
       sessionKey: "session-1",
+      agentId: "agent-1",
       accountId: "default",
       channelId: "g1",
+      inputIds: [],
     }));
     expect(result.details).toEqual(expect.objectContaining({ sent: true, message_id: "m1" }));
   });
@@ -203,7 +206,7 @@ describe("octo_send_card", () => {
     expect(sendMessage).toHaveBeenCalledTimes(manifests.length);
   });
 
-  it("规范化按钮 data/style 与 choice，协商输入 limits 并生成默认 sessionKey", async () => {
+  it("规范化按钮/choice、协商 limits，且不伪造缺失的 sessionKey", async () => {
     vi.mocked(getCardProfile).mockResolvedValue({
       available: true,
       enabled: true,
@@ -222,6 +225,7 @@ describe("octo_send_card", () => {
     });
     const current = createInteractiveCardTool({
       cfg,
+      agentId: "agent-1",
       deliveryContext: { channel: "octo", to: "group:g1", accountId: "default" },
     } as never)[0];
     const result = await current.execute("rich", {
@@ -246,10 +250,13 @@ describe("octo_send_card", () => {
 
     expect(result.details).toEqual(expect.objectContaining({ sent: true, message_id: "m1" }));
     expect(registerCardSession).toHaveBeenCalledWith("m1", expect.objectContaining({
-      sessionKey: "default:g1",
+      inputIds: ["note", "amount", "date", "toggle", "env"],
       maxInputTextBytes: 4096,
       maxInputsBytes: 8192,
     }));
+    const registered = vi.mocked(registerCardSession).mock.calls.at(-1)?.[1] as Record<string, unknown>;
+    expect(registered).not.toHaveProperty("sessionKey");
+    expect(registered).not.toHaveProperty("agentId");
   });
 
   it("非结构化核心参数会被拒绝，非法可选 inputs 会被安全忽略", async () => {

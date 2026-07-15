@@ -80,13 +80,14 @@ function interactiveGateReason(manifest: CardProfileManifest): string | null {
 interface Params {
   cfg?: OpenClawConfig;
   agentAccountId?: string;
+  agentId?: string;
   sessionKey?: string;
   deliveryContext?: OpenClawPluginToolContext["deliveryContext"];
   messageChannel?: string;
 }
 
 export function createInteractiveCardTool(params: Params): any[] {
-  const { cfg, agentAccountId, sessionKey, deliveryContext, messageChannel } = params;
+  const { cfg, agentAccountId, agentId, sessionKey, deliveryContext, messageChannel } = params;
   if (!cfg) return [];
   const ambientChannel = deliveryContext?.channel ?? messageChannel;
   if (ambientChannel && ambientChannel !== CHANNEL_ID) return [];
@@ -239,12 +240,15 @@ export function createInteractiveCardTool(params: Params): any[] {
         const messageId = result?.message_id?.trim();
         if (!messageId) return error("interactive card send returned no message_id");
         registerCardSession(messageId, {
-          sessionKey: sessionKey ?? `${accountId}:${target.channelId}`,
+          ...(sessionKey?.trim()
+            ? { sessionKey, ...(agentId ? { agentId } : {}) }
+            : {}),
           accountId,
           channelId: target.channelId,
           channelType: target.channelType as ChannelType,
           title: built.title,
           actionLabels: built.actionLabels,
+          inputIds: built.inputIds,
           ...(negotiatedCaps?.maxInputTextBytes
             ? { maxInputTextBytes: negotiatedCaps.maxInputTextBytes }
             : {}),

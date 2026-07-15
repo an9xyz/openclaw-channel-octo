@@ -64,4 +64,9 @@ describe("shared inbound queue", () => {
     await second;
     expect(order).toEqual(["failed", "next"]);
   });
+
+  it("向调用方返回当前任务的实际结果", async () => {
+    await expect(enqueueInbound("a:dm:u1", async () => "completed" as const))
+      .resolves.toBe("completed");
+  });
 });

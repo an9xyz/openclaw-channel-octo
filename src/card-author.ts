@@ -30,6 +30,7 @@ export interface BuiltInteractiveCard {
   plain: string;
   title: string;
   actionLabels: Record<string, string>;
+  inputIds: string[];
 }
 
 type BuildFailure = { ok: false; error: string };
@@ -166,7 +167,13 @@ export function buildInteractiveCard(
       node.maxLength = Math.max(1, Math.floor(caps.maxInputTextBytes / 4));
     }
     inputNodes.push(node);
-    plainLines.push(`[${String(node.label ?? id)}]`);
+    const inputLabel = String(node.label ?? id);
+    if (kind === "choice") {
+      const choiceLabels = (node.choices as Array<{ title: string }>).map((choice) => choice.title);
+      plainLines.push(`[${inputLabel}] 可选值：${choiceLabels.join(" / ")}`);
+    } else {
+      plainLines.push(`[${inputLabel}]`);
+    }
   }
 
   if (
@@ -189,5 +196,5 @@ export function buildInteractiveCard(
   if (!cardFitsLimits(card, plain, caps, CARD_INTERACTIVE_PROFILE)) {
     return failure("interactive card exceeds negotiated limits");
   }
-  return { ok: true, card, plain, title, actionLabels };
+  return { ok: true, card, plain, title, actionLabels, inputIds: [...inputIds] };
 }

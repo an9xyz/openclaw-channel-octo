@@ -20,6 +20,7 @@ const session = (suffix = "") => ({
   channelType: 2,
   title: "确认",
   actionLabels: { approve: "批准" },
+  inputIds: ["note"],
   maxInputTextBytes: 4096,
   maxInputsBytes: 16384,
 } as const);

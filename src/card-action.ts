@@ -1,4 +1,5 @@
 import { ChannelType, MessageType, type BotMessage } from "./types.js";
+import { isSensitive } from "./card-render.js";
 
 export interface BotEvent {
   event_id: number;
@@ -99,11 +100,16 @@ export function formatCardActionText(action: CardAction): string {
 
 /** Translate a verified card action into the same message shape used by the normal inbound path. */
 export function synthesizeCardActionMessage(action: CardAction, botUid: string): BotMessage {
+  // card_action uses the peer uid as channel_id for DMs. Reconstruct an internal
+  // space-aware channel id so the normal inbound path derives the same Space session/queue.
+  const channelId = action.channelType === ChannelType.DM && action.spaceId
+    ? `s${action.spaceId}_${action.operatorUid}`
+    : action.channelId;
   return {
     message_id: `card_action:${action.eventId}`,
     message_seq: 0,
     from_uid: action.operatorUid,
-    channel_id: action.channelId,
+    channel_id: channelId,
     channel_type: action.channelType,
     timestamp: action.actedAt ?? Math.floor(Date.now() / 1000),
     payload: {
@@ -116,13 +122,22 @@ export function synthesizeCardActionMessage(action: CardAction, botUid: string):
 
 export function validateCardActionInputs(
   action: CardAction,
-  limits?: { maxInputTextBytes?: number; maxInputsBytes?: number },
+  limits?: {
+    inputIds?: readonly string[];
+    maxInputTextBytes?: number;
+    maxInputsBytes?: number;
+  },
 ): { ok: true } | { ok: false; error: string } {
   const maxInputTextBytes = limits?.maxInputTextBytes ?? 4_096;
   const maxInputsBytes = limits?.maxInputsBytes ?? 16_384;
+  const inputIds = new Set(limits?.inputIds ?? []);
   const encoder = new TextEncoder();
   for (const [key, value] of Object.entries(action.inputs)) {
     if (!/^[A-Za-z0-9_.:-]{1,64}$/.test(key)) return { ok: false, error: "提交字段非法" };
+    if (!inputIds.has(key)) return { ok: false, error: "提交字段与原卡不匹配" };
+    if (isSensitive(key, true) || isSensitive(value, true)) {
+      return { ok: false, error: "提交内容包含敏感信息" };
+    }
     if (encoder.encode(value).byteLength > maxInputTextBytes) {
       return { ok: false, error: "提交内容过大" };
     }

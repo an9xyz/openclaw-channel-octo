@@ -1409,7 +1409,10 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
       let consecutiveHeartbeatFailures = 0;
       const MAX_HEARTBEAT_FAILURES = 3;
 
-      const dispatchInboundMessage = (msg: BotMessage): Promise<void> =>
+      const dispatchInboundMessage = (
+        msg: BotMessage,
+        routeOverride?: { sessionKey: string; agentId?: string },
+      ): Promise<"completed" | "dropped"> =>
         enqueueInbound(getInboundQueueKey(account.accountId, msg), async () => {
           try {
             await runWithSessionInitRetry(
@@ -1428,6 +1431,7 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
                   groupMdCache,
                   log,
                   statusSink,
+                  routeOverride,
                 }),
               { ...SESSION_INIT_RETRY, log },
             );
@@ -1441,10 +1445,11 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
                 botToken: account.config.botToken,
                 log,
               });
-              return;
+              return "dropped" as const;
             }
             throw err;
           }
+          return "completed" as const;
         });
 
       let cardEventPoller: EventPoller | undefined;
@@ -1464,9 +1469,16 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
               botToken: account.config.botToken ?? "",
               operatorName: uidToNameMap.get(action.operatorUid),
               log,
-              dispatch: async () => {
+              dispatch: async (session) => {
                 const message = synthesizeCardActionMessage(action, credentials.robot_id);
-                await dispatchInboundMessage(message);
+                const routeOverride = session.sessionKey
+                  ? {
+                      sessionKey: session.sessionKey,
+                      ...(session.agentId ? { agentId: session.agentId } : {}),
+                    }
+                  : undefined;
+                const result = await dispatchInboundMessage(message, routeOverride);
+                return result === "completed" ? "completed" : "rejected";
               },
             });
           },

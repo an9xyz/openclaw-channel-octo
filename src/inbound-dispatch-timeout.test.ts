@@ -232,7 +232,10 @@ function pickTimeoutSends(sends: any[]) {
   );
 }
 
-function runInbound(opts: { log?: any } = {}) {
+function runInbound(opts: {
+  log?: any;
+  routeOverride?: { sessionKey: string; agentId?: string };
+} = {}) {
   return handleInboundMessage({
     account: makeAccount(),
     message: makeAtBotMessage() as any,
@@ -243,6 +246,7 @@ function runInbound(opts: { log?: any } = {}) {
     uidToNameMap: new Map(),
     groupCacheTimestamps: new Map(),
     log: opts.log,
+    routeOverride: opts.routeOverride,
   });
 }
 
@@ -262,6 +266,18 @@ afterEach(() => {
 });
 
 describe("dispatch timeout guard (issue #75)", () => {
+  it("可信 route override 保持原始 sessionKey", async () => {
+    const { dispatch } = installImmediateRuntime();
+    installFetchStub();
+
+    await runInbound({
+      routeOverride: { sessionKey: "origin-session", agentId: "origin-agent" },
+      log: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
+    });
+
+    expect(dispatch.mock.calls[0][0].ctx.SessionKey).toBe("origin-session");
+  });
+
   it("hang: rejects after timeout, sends 处理超时 apology, would unblock per-group queue", async () => {
     const { dispatch } = installHangingRuntime();
     const { sends } = installFetchStub();

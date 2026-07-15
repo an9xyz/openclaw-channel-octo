@@ -49,6 +49,7 @@ describe("interactive card local integration", () => {
       channelType: 2,
       title: "发布确认",
       actionLabels: { approve: "批准" },
+      inputIds: ["reason"],
     });
     const cursorState = { value: 100 };
     const cursorStore: EventCursorStore = {
@@ -67,7 +68,11 @@ describe("interactive card local integration", () => {
           accountId: "account-1",
           apiUrl: "https://api.test",
           botToken: "tok",
-          dispatch: async () => { inbound.push(synthesizeCardActionMessage(action, "bot-1")); },
+          dispatch: async (session) => {
+            expect(session.sessionKey).toBe("session-1");
+            inbound.push(synthesizeCardActionMessage(action, "bot-1"));
+            return "completed";
+          },
         });
       },
     });

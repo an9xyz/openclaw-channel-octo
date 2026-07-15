@@ -2,12 +2,14 @@ import { requestCardEventPolling } from "./events-poll.js";
 import { ChannelType } from "./types.js";
 
 export interface CardSession {
-  sessionKey: string;
+  sessionKey?: string;
+  agentId?: string;
   accountId: string;
   channelId: string;
   channelType: ChannelType;
   title: string;
   actionLabels: Record<string, string>;
+  inputIds: string[];
   maxInputTextBytes?: number;
   maxInputsBytes?: number;
 }

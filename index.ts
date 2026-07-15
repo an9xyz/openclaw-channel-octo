@@ -169,6 +169,7 @@ export default defineBundledChannelEntry({
         return createInteractiveCardTool({
           cfg,
           agentAccountId: ctx.agentAccountId,
+          agentId: ctx.agentId,
           sessionKey: ctx.sessionKey,
           deliveryContext: ctx.deliveryContext,
           messageChannel: ctx.messageChannel,

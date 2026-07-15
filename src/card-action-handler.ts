@@ -13,6 +13,7 @@ import {
 import { CARD_INTERACTIVE_PROFILE } from "./types.js";
 
 export type CardActionHandleResult = "completed" | "duplicate" | "ignored" | "rejected";
+export type CardActionDispatchResult = "completed" | "rejected";
 
 interface Params {
   action: CardAction;
@@ -20,7 +21,7 @@ interface Params {
   apiUrl: string;
   botToken: string;
   operatorName?: string;
-  dispatch: () => Promise<void>;
+  dispatch: (session: CardSession) => Promise<CardActionDispatchResult>;
   log?: { info?: (message: string) => void; warn?: (message: string) => void };
 }
 
@@ -118,7 +119,22 @@ export async function handleCardAction(params: Params): Promise<CardActionHandle
     log: params.log,
   });
   try {
-    await params.dispatch();
+    const dispatchResult = await params.dispatch(session);
+    if (dispatchResult === "rejected") {
+      completeCardSession(action.messageId, action.eventId);
+      await updateStatus({
+        action,
+        session,
+        apiUrl: params.apiUrl,
+        botToken: params.botToken,
+        operator: params.operatorName ?? action.operatorUid,
+        status: "error",
+        errorText: "处理失败，请稍后重试",
+        log: params.log,
+      });
+      params.log?.warn?.(`octo: card_action dispatch rejected message=${action.messageId}`);
+      return "rejected";
+    }
     completeCardSession(action.messageId, action.eventId);
     await updateStatus({
       action,

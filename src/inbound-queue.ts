@@ -23,11 +23,11 @@ export function getInboundQueueKey(accountId: string, message: BotMessage): stri
 }
 
 /** Serialize work per account/conversation while still returning this task's real outcome. */
-export function enqueueInbound(key: string, task: () => Promise<void>): Promise<void> {
+export function enqueueInbound<T>(key: string, task: () => Promise<T>): Promise<T> {
   const previous = inboundQueues.get(key) ?? Promise.resolve();
   const execution = previous.catch(() => undefined).then(task);
-  const tail = execution
-    .catch(() => undefined)
+  const tail: Promise<void> = execution
+    .then(() => undefined, () => undefined)
     .finally(() => {
       if (inboundQueues.get(key) === tail) inboundQueues.delete(key);
     });

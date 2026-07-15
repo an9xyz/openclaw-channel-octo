@@ -1518,6 +1518,8 @@ export async function handleInboundMessage(params: {
   groupMdCache?: Map<string, { content: string; version: number }>;
   log?: ChannelLogSink;
   statusSink?: OctoStatusSink;
+  /** Trusted adapter-side route captured when an interactive card was authored. */
+  routeOverride?: { sessionKey: string; agentId?: string };
 }) {
   const { account, message, botUid, groupHistories, lastBotReplySeqMap, memberMap, uidToNameMap, groupCacheTimestamps, groupMdCache, log, statusSink } = params;
   // Server-authoritative robot map. Default to a throwaway Map when the caller
@@ -2245,6 +2247,13 @@ export async function handleInboundMessage(params: {
   } catch (routeErr) {
     log?.error?.(`octo: resolveAgentRoute failed: ${String(routeErr)}`);
     return;
+  }
+  if (params.routeOverride?.sessionKey.trim()) {
+    route = {
+      ...route,
+      sessionKey: params.routeOverride.sessionKey,
+      ...(params.routeOverride.agentId ? { agentId: params.routeOverride.agentId } : {}),
+    };
   }
 
   // Fire-and-forget: ensure GROUP.md is cached for this group

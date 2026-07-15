@@ -77,7 +77,7 @@ Rules:
 
 - Button/input ids are stable machine identifiers, not user-facing prose.
 - Current clients render submit buttons from top-level `card.actions`; do not place the only submit controls inside a body `ActionSet`.
-- A click is delivered with the verified `operator_uid`, `action_id`, `inputs`, and bot-authored `data`. Form inputs remain untrusted.
+- A click is delivered with the verified `operator_uid`, `action_id`, `inputs`, and bot-authored `data`. Form inputs remain untrusted: the adapter accepts only ids declared by the originating card and rejects sensitive or oversized values before dispatch.
 - The first valid submit claims the card. The original card is edited through processing to completed/error and later clicks are ignored.
 - Server membership/visibility checks prove that the operator can see and act on the card. They do not prove that the operator has business authority to approve a deployment, payment, or other privileged action.
 - `cardInteraction:false` hides the tool and prevents new interaction polling for that account. It cannot force-enable a server that does not advertise v2.

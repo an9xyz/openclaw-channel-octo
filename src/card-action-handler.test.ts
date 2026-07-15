@@ -26,6 +26,7 @@ function register(): void {
     channelType: 2,
     title: "发布确认",
     actionLabels: { approve: "批准" },
+    inputIds: ["note"],
     maxInputTextBytes: 16,
     maxInputsBytes: 64,
   });
@@ -40,7 +41,7 @@ describe("handleCardAction", () => {
   });
 
   it("先显示处理中，dispatch 成功后显示完成并使用递增 card_seq", async () => {
-    const dispatch = vi.fn().mockResolvedValue(undefined);
+    const dispatch = vi.fn().mockResolvedValue("completed");
     expect(await handleCardAction({
       action: action(),
       accountId: "a1",
@@ -63,7 +64,7 @@ describe("handleCardAction", () => {
   });
 
   it("重复 event 或第二次点击不再 dispatch", async () => {
-    const dispatch = vi.fn().mockResolvedValue(undefined);
+    const dispatch = vi.fn().mockResolvedValue("completed");
     await handleCardAction({
       action: action(), accountId: "a1", apiUrl: "https://api.test", botToken: "tok", dispatch,
     });
@@ -103,7 +104,7 @@ describe("handleCardAction", () => {
 
   it("dispatch 失败时显示失败、释放 claim 并向 poller 抛错以便重试", async () => {
     const failure = new Error("agent unavailable");
-    const dispatch = vi.fn().mockRejectedValueOnce(failure).mockResolvedValueOnce(undefined);
+    const dispatch = vi.fn().mockRejectedValueOnce(failure).mockResolvedValueOnce("completed");
     await expect(handleCardAction({
       action: action(), accountId: "a1", apiUrl: "x", botToken: "t", dispatch,
     })).rejects.toThrow("agent unavailable");
@@ -113,5 +114,13 @@ describe("handleCardAction", () => {
       action: action(), accountId: "a1", apiUrl: "x", botToken: "t", dispatch,
     })).resolves.toBe("completed");
     expect(dispatch).toHaveBeenCalledTimes(2);
+  });
+
+  it("派发被明确丢弃时把卡标为失败，而不是 completed", async () => {
+    const dispatch = vi.fn().mockResolvedValue("rejected");
+    expect(await handleCardAction({
+      action: action(), accountId: "a1", apiUrl: "x", botToken: "t", dispatch,
+    })).toBe("rejected");
+    expect(JSON.stringify(vi.mocked(editCardMessage).mock.calls.at(-1)?.[0].card)).toContain("处理失败");
   });
 });

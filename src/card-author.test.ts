@@ -55,6 +55,8 @@ describe("buildInteractiveCard", () => {
     expect(JSON.stringify(result.card.body)).toContain("Input.Text");
     expect(JSON.stringify(result.card.body)).toContain("Input.ChoiceSet");
     expect(result.plain).toContain("批准 / 拒绝");
+    expect(result.plain).toContain("生产");
+    expect(result.inputIds).toEqual(["reason", "env"]);
     expect(cardPayloadBytes(result.card, result.plain, CARD_INTERACTIVE_PROFILE))
       .toBeLessThanOrEqual(caps.maxPayloadBytes);
   });
