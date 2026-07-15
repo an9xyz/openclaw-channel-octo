@@ -7,6 +7,7 @@ import { ChannelType, MessageType, CARD_PROFILE, CARD_VERSION, type CardProfile,
 import path from "path";
 import { open } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import type { BotEvent } from "./card-action.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 // Short timeout for the per-message mention_pref hot-path lookup. On a cache
@@ -575,6 +576,43 @@ export async function getCardProfile(params: {
     ...(Array.isArray(raw.actions) ? { actions: (raw.actions as unknown[]).filter((e): e is string => typeof e === "string") } : {}),
     ...(raw.limits && typeof raw.limits === "object" ? { limits: raw.limits as Record<string, unknown> } : {}),
   };
+}
+
+/** Pull typed bot events strictly after the supplied cursor. This endpoint is short-polling. */
+export async function fetchBotEvents(params: {
+  apiUrl: string;
+  botToken: string;
+  sinceEventId?: number;
+  limit?: number;
+  signal?: AbortSignal;
+}): Promise<BotEvent[]> {
+  const response = await postJson<{ results?: BotEvent[] }>(
+    params.apiUrl,
+    params.botToken,
+    "/v1/bot/events",
+    {
+      event_id: params.sinceEventId ?? 0,
+      limit: Math.max(1, Math.min(100, Math.floor(params.limit ?? 20))),
+    },
+    params.signal,
+  );
+  return Array.isArray(response?.results) ? response.results : [];
+}
+
+/** Best-effort queue pruning after a card_action has been durably accepted locally. */
+export async function ackBotEvent(params: {
+  apiUrl: string;
+  botToken: string;
+  eventId: number;
+  signal?: AbortSignal;
+}): Promise<void> {
+  await postJson(
+    params.apiUrl,
+    params.botToken,
+    `/v1/bot/events/${params.eventId}/ack`,
+    {},
+    params.signal,
+  );
 }
 
 export async function sendTyping(params: {

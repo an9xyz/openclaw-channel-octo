@@ -1,0 +1,87 @@
+import { ChannelType } from "./types.js";
+
+export interface BotEvent {
+  event_id: number;
+  event_type?: string;
+  event_data?: Record<string, unknown>;
+  message?: Record<string, unknown>;
+}
+
+export interface CardAction {
+  eventId: number;
+  messageId: string;
+  channelId: string;
+  channelType: ChannelType;
+  actionId: string;
+  inputs: Record<string, string>;
+  operatorUid: string;
+  data?: Record<string, unknown>;
+  spaceId?: string;
+  clientToken?: string;
+  actedAt?: number;
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function channelTypeValue(value: unknown): ChannelType | null {
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (
+    numeric !== ChannelType.DM &&
+    numeric !== ChannelType.Group &&
+    numeric !== ChannelType.CommunityTopic
+  ) {
+    return null;
+  }
+  return numeric;
+}
+
+/** Parse the server-authoritative card_action envelope without trusting form input values. */
+export function parseCardAction(event: BotEvent): CardAction | null {
+  if (
+    !Number.isSafeInteger(event.event_id) ||
+    event.event_id < 0 ||
+    event.event_type !== "card_action" ||
+    !event.event_data ||
+    typeof event.event_data !== "object"
+  ) {
+    return null;
+  }
+
+  const data = event.event_data;
+  const messageId = stringValue(data.message_id);
+  const channelId = stringValue(data.channel_id);
+  const channelType = channelTypeValue(data.channel_type);
+  const actionId = stringValue(data.action_id);
+  const operatorUid = stringValue(data.operator_uid);
+  if (!messageId || !channelId || channelType === null || !actionId || !operatorUid) return null;
+
+  const inputs: Record<string, string> = {};
+  if (data.inputs && typeof data.inputs === "object" && !Array.isArray(data.inputs)) {
+    for (const [key, value] of Object.entries(data.inputs as Record<string, unknown>)) {
+      if (typeof value === "string") inputs[key] = value;
+    }
+  }
+
+  const action: CardAction = {
+    eventId: event.event_id,
+    messageId,
+    channelId,
+    channelType,
+    actionId,
+    inputs,
+    operatorUid,
+  };
+  if (data.data && typeof data.data === "object" && !Array.isArray(data.data)) {
+    action.data = data.data as Record<string, unknown>;
+  }
+  const spaceId = stringValue(data.space_id);
+  if (spaceId) action.spaceId = spaceId;
+  const clientToken = stringValue(data.client_token);
+  if (clientToken) action.clientToken = clientToken;
+  if (typeof data.acted_at === "number" && Number.isFinite(data.acted_at)) {
+    action.actedAt = data.acted_at;
+  }
+  return action;
+}
