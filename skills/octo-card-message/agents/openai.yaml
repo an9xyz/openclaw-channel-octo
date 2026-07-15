@@ -1,4 +1,0 @@
-interface:
-  display_name: "Octo Card Messages"
-  short_description: "Create display and interactive Octo cards"
-  default_prompt: "Use $octo-card-message to choose and send the right Octo card for this conversation."
