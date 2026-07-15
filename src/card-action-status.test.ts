@@ -39,7 +39,8 @@ describe("renderCardActionStatus", () => {
     expect(json).toContain("A · 体验碾压");
     expect(json).toContain("C · 生态打法");
     expect(json).toContain("方案：C · 生态打法");
-    expect(json).toContain("Alice 已选择");
+    expect(json).toContain("Alice 已选择「C · 生态打法」");
+    expect(json).not.toContain("已选择「确认选择」");
     expect(json).not.toContain("Action.Submit");
     expect(json).not.toContain("Input.ChoiceSet");
     expect(rendered.plain).toContain("选择一个方案");

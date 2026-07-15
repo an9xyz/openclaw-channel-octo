@@ -75,7 +75,7 @@ describe("handleCardAction", () => {
     const completedJson = JSON.stringify(completed.card);
     expect(completedJson).toContain("发布确认");
     expect(completedJson).toContain("备注：ok");
-    expect(completedJson).toContain("Alice 已选择");
+    expect(completedJson).toContain("Alice 已选择「批准」");
     expect(completedJson).not.toContain("Input.Text");
     expect(completedJson).not.toContain("Action.Submit");
     expect(completed.plain).not.toContain("可选操作：");
