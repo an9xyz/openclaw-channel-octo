@@ -3,7 +3,7 @@
  * These are used by inbound/outbound where the full OctoAPI class is not available.
  */
 
-import { ChannelType, MessageType, CARD_PROFILE, CARD_VERSION, type MentionEntity, type RichTextBlock, type SendMessageResult, type TargetCandidate } from "./types.js";
+import { ChannelType, MessageType, CARD_PROFILE, CARD_VERSION, type CardProfile, type MentionEntity, type RichTextBlock, type SendMessageResult, type TargetCandidate } from "./types.js";
 import path from "path";
 import { open } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -398,6 +398,8 @@ export async function sendCardMessage(params: {
   channelId: string;
   channelType: ChannelType;
   card: Record<string, unknown>;
+  /** 展示卡默认 octo/v1；交互卡显式传 octo/v2。 */
+  profile?: CardProfile;
   plain?: string;
   mentionUids?: string[];
   mentionEntities?: MentionEntity[];
@@ -413,7 +415,7 @@ export async function sendCardMessage(params: {
   const payload: Record<string, unknown> = {
     type: MessageType.InteractiveCard,
     card: params.card,
-    profile: CARD_PROFILE,
+    profile: params.profile ?? CARD_PROFILE,
     card_version: CARD_VERSION,
   };
   if (typeof params.plain === "string") {
@@ -462,6 +464,8 @@ export async function editCardMessage(params: {
   channelId: string;
   channelType: ChannelType;
   card: Record<string, unknown>;
+  /** 必须与被编辑卡片的 profile 一致；缺省保持 octo/v1。 */
+  profile?: CardProfile;
   plain?: string;
   /** 进度中间帧标 true → D10 不进修订历史(避免 cap 20 被进度噪音刷屏);终态帧不带 → 进历史。 */
   transient?: boolean;
@@ -477,7 +481,7 @@ export async function editCardMessage(params: {
   const envelope: Record<string, unknown> = {
     type: MessageType.InteractiveCard,
     card: params.card,
-    profile: CARD_PROFILE,
+    profile: params.profile ?? CARD_PROFILE,
     card_version: CARD_VERSION,
   };
   if (typeof params.plain === "string") {

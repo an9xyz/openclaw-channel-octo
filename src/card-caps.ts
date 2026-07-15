@@ -13,6 +13,8 @@ export function deriveCardCaps(manifest: CardProfileManifest): CardCaps {
   const maxNodes = positiveFiniteLimit(limits?.max_nodes);
   const maxDepth = positiveFiniteLimit(limits?.max_depth);
   const maxPayloadBytes = positiveFiniteLimit(limits?.max_payload_bytes);
+  const maxInputTextBytes = positiveFiniteLimit(limits?.max_input_text_bytes);
+  const maxInputsBytes = positiveFiniteLimit(limits?.max_inputs_bytes);
 
   return {
     ...(Array.isArray(manifest.elements) ? { elements: new Set(manifest.elements) } : {}),
@@ -21,5 +23,7 @@ export function deriveCardCaps(manifest: CardProfileManifest): CardCaps {
     ...(maxNodes !== undefined ? { maxNodes } : {}),
     ...(maxDepth !== undefined ? { maxDepth } : {}),
     ...(maxPayloadBytes !== undefined ? { maxPayloadBytes } : {}),
+    ...(maxInputTextBytes !== undefined ? { maxInputTextBytes } : {}),
+    ...(maxInputsBytes !== undefined ? { maxInputsBytes } : {}),
   };
 }

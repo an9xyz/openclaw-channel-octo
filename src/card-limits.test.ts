@@ -5,6 +5,7 @@ import {
   cardPayloadBytes,
   countCardNodes,
 } from "./card-limits.js";
+import { CARD_INTERACTIVE_PROFILE } from "./types.js";
 
 const card = (body: Array<Record<string, unknown>>): Record<string, unknown> => ({
   type: "AdaptiveCard",
@@ -36,6 +37,20 @@ describe("card hard-limit walker", () => {
     const ascii = cardPayloadBytes(card([{ type: "TextBlock", text: "aaa" }]), "aaa");
     const utf8 = cardPayloadBytes(card([{ type: "TextBlock", text: "汉汉汉" }]), "汉汉汉");
     expect(utf8).toBeGreaterThan(ascii);
+  });
+
+  it("payload 字节预算使用实际 profile，而不是固定 octo/v1", () => {
+    const value = card([{ type: "TextBlock", text: "ok" }]);
+    const displayBytes = cardPayloadBytes(value, "ok");
+    const interactiveBytes = cardPayloadBytes(value, "ok", CARD_INTERACTIVE_PROFILE);
+
+    expect(interactiveBytes).toBe(displayBytes);
+    expect(cardFitsLimits(
+      value,
+      "ok",
+      { maxPayloadBytes: interactiveBytes },
+      CARD_INTERACTIVE_PROFILE,
+    )).toBe(true);
   });
 
   it("无有效限制时放行；节点、深度、字节任一超限都拒绝", () => {

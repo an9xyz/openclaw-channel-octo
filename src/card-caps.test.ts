@@ -24,9 +24,15 @@ describe("deriveCardCaps", () => {
         max_nodes: 200.9,
         max_depth: 0,
         max_payload_bytes: Number.POSITIVE_INFINITY,
+        max_input_text_bytes: 4096.8,
+        max_inputs_bytes: 16384,
       },
     });
 
-    expect(caps).toEqual({ maxNodes: 200 });
+    expect(caps).toEqual({
+      maxNodes: 200,
+      maxInputTextBytes: 4096,
+      maxInputsBytes: 16384,
+    });
   });
 });

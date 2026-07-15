@@ -209,7 +209,9 @@ export const CARD_PLACEHOLDER = "[卡片]";
 
 /** InteractiveCard(=17) 协议 profile / 版本（octo-server Decision 10 协商值）。 */
 export const CARD_PROFILE = "octo/v1";
+export const CARD_INTERACTIVE_PROFILE = "octo/v2";
 export const CARD_VERSION = "1.5";
+export type CardProfile = typeof CARD_PROFILE | typeof CARD_INTERACTIVE_PROFILE;
 
 /**
  * InteractiveCard(=17) 消息的 payload 信封（octo-server PR #525 P1）。

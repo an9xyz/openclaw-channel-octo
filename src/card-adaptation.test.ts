@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { ChannelType, MessageType, CARD_PLACEHOLDER } from "./types.js";
+import {
+  ChannelType,
+  MessageType,
+  CARD_INTERACTIVE_PROFILE,
+  CARD_PLACEHOLDER,
+} from "./types.js";
 import { resolveCardPlain, resolveInnerMessageText, resolveApiMessagePlaceholder } from "./inbound.js";
 import { sendCardMessage, getCardProfile, editCardMessage } from "./api-fetch.js";
 
@@ -85,6 +90,29 @@ describe("sendCardMessage 出站组包", () => {
         card: {},
       }),
     ).rejects.toThrow(/channelId is required/);
+  });
+
+  it("允许调用方显式发送 octo/v2，同时默认 profile 仍保持 octo/v1", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: vi.fn().mockResolvedValue('{"message_id":"m2"}'),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await sendCardMessage({
+      apiUrl: "https://api.test",
+      botToken: "bf_x",
+      channelId: "g1",
+      channelType: ChannelType.Group,
+      card: { type: "AdaptiveCard", body: [], actions: [] },
+      profile: CARD_INTERACTIVE_PROFILE,
+    });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string);
+    expect(body.payload.profile).toBe("octo/v2");
+    expect(body.payload.card_version).toBe("1.5");
   });
 });
 
@@ -256,5 +284,28 @@ describe("editCardMessage 出站组包", () => {
         card: {},
       }),
     ).rejects.toThrow(/messageId is required/);
+  });
+
+  it("允许以 octo/v2 信封编辑交互卡", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: vi.fn().mockResolvedValue(""),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await editCardMessage({
+      apiUrl: "https://api.test",
+      botToken: "bf_x",
+      messageId: "m2",
+      channelId: "g1",
+      channelType: ChannelType.Group,
+      card: { type: "AdaptiveCard", body: [] },
+      profile: CARD_INTERACTIVE_PROFILE,
+    });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string);
+    expect(JSON.parse(body.content_edit).profile).toBe("octo/v2");
   });
 });
