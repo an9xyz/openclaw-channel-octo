@@ -114,6 +114,33 @@ describe("sendCardMessage 出站组包", () => {
     expect(body.payload.profile).toBe("octo/v2");
     expect(body.payload.card_version).toBe("1.5");
   });
+
+  it("卡体出现 Input.* 或 Action.Submit 时默认自动使用 octo/v2", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: vi.fn().mockResolvedValue('{"message_id":"m3"}'),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    for (const card of [
+      { type: "AdaptiveCard", body: [{ type: "Input.ChoiceSet", id: "choice", choices: [] }] },
+      { type: "AdaptiveCard", body: [], actions: [{ type: "Action.Submit", id: "ok", title: "确定" }] },
+    ]) {
+      await sendCardMessage({
+        apiUrl: "https://api.test",
+        botToken: "bf_x",
+        channelId: "g1",
+        channelType: ChannelType.Group,
+        card,
+      });
+    }
+
+    for (const [, init] of fetchMock.mock.calls as Array<[string, RequestInit]>) {
+      const body = JSON.parse(init.body as string);
+      expect(body.payload.profile).toBe("octo/v2");
+    }
+  });
 });
 
 describe("getCardProfile (D12 feature-detect)", () => {

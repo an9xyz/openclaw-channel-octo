@@ -117,6 +117,7 @@ describe("octo_send_card", () => {
     const schema = current.parameters as { properties: Record<string, unknown> };
     expect(schema.properties.channelId).toBeUndefined();
     expect(schema.properties.accountId).toBeUndefined();
+    expect(schema.properties.blocks).toBeDefined();
 
     const result = await current.execute("call-1", {
       title: "确认发布",

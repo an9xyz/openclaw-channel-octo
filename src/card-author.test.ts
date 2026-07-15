@@ -27,6 +27,74 @@ const allInputCaps = {
 };
 
 describe("buildInteractiveCard", () => {
+  it("把受控 section/options blocks 构造成 Container/FactSet/ChoiceSet", () => {
+    const result = buildInteractiveCard({
+      title: "选择方案",
+      text: "请选择一个方向",
+      blocks: [
+        {
+          type: "section",
+          title: "A · 体验碾压",
+          text: "把响应速度、工具调用和多端体验做到极致。",
+          facts: [{ title: "适合", value: "通用产品竞争" }],
+        },
+        {
+          type: "options",
+          id: "strategy",
+          label: "方案",
+          options: [
+            { title: "A · 体验碾压", value: "a" },
+            { title: "B · 垂直场景", value: "b" },
+            { title: "C · 生态打法", value: "c" },
+          ],
+        },
+      ],
+      buttons: [{ id: "submit", label: "确认选择", style: "positive" }],
+    } as never, {
+      ...caps,
+      elements: new Set(["TextBlock", "Container", "FactSet"]),
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.card.body).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "Container",
+        items: expect.arrayContaining([
+          expect.objectContaining({ type: "TextBlock", text: "A · 体验碾压" }),
+          expect.objectContaining({
+            type: "FactSet",
+            facts: [{ title: "适合", value: "通用产品竞争" }],
+          }),
+        ]),
+      }),
+      expect.objectContaining({
+        type: "Input.ChoiceSet",
+        id: "strategy",
+        style: "expanded",
+        choices: expect.arrayContaining([{ title: "C · 生态打法", value: "c" }]),
+      }),
+    ]));
+    expect(result.inputIds).toContain("strategy");
+    expect(result.plain).toContain("A · 体验碾压");
+    expect(result.plain).toContain("C · 生态打法");
+  });
+
+  it("options 最多 128 项且每项必须有安全的 title/value", () => {
+    const build = (options: unknown[]) => buildInteractiveCard({
+      title: "选择方案",
+      blocks: [{ type: "options", id: "strategy", options }],
+      buttons: [{ id: "submit", label: "确认" }],
+    } as never, caps);
+
+    expect(build(Array.from({ length: 129 }, (_, index) => ({
+      title: `方案 ${index}`,
+      value: `v${index}`,
+    })))).toEqual(expect.objectContaining({ error: expect.stringMatching(/max 128/) }));
+    expect(build([{ title: "", value: "a" }])).toEqual(expect.objectContaining({ ok: false }));
+    expect(build([{ title: "方案 A", value: "" }])).toEqual(expect.objectContaining({ ok: false }));
+  });
+
   it("构造顶层 Action.Submit 与输入，并生成同源 plain", () => {
     const result = buildInteractiveCard({
       title: "发布确认",
