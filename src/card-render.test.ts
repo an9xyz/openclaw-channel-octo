@@ -3,6 +3,7 @@ import {
   OCTO_CARD_LAYOUTS,
   detectOctoCardLayout,
   renderProgressCard,
+  renderProgressResponseCard,
   resolveToolMeta,
   summarizeToolParams,
   sanitizeErrorText,
@@ -340,6 +341,42 @@ describe("stepLine", () => {
 });
 
 describe("renderProgressCard", () => {
+  it("builds one terminal card with a collapsed progress panel and the final text below it", () => {
+    const result = renderProgressResponseCard(
+      {
+        phase: "done",
+        elapsedMs: 12_000,
+        steps: [
+          { tool: "__thinking__", status: "done", durationMs: 4_000 },
+          { tool: "read", status: "done", summary: "渠道 B 周报", durationMs: 300 },
+        ],
+      },
+      "结论\n\n渠道 B 的下降主要来自权益认知不足。",
+      {
+        elements: new Set(["TextBlock", "RichTextBlock", "Container", "ColumnSet", "ActionSet"]),
+        actions: new Set(["Action.ToggleVisibility"]),
+      },
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.card).not.toHaveProperty("metadata");
+    const body = result!.card.body as Array<Record<string, unknown>>;
+    expect(body[0]).toMatchObject({ type: "Container", style: "emphasis" });
+    expect(elementText(body[0])).toContain("✅ 已完成");
+    expect(elementText(body[1])).toContain("渠道 B 的下降主要来自权益认知不足");
+    expect(result!.plain).toBe("结论\n\n渠道 B 的下降主要来自权益认知不足。");
+  });
+
+  it("declines the merge when the combined card exceeds negotiated payload limits", () => {
+    const result = renderProgressResponseCard(
+      { phase: "done", elapsedMs: 100, steps: [{ tool: "read", status: "done" }] },
+      "很长的最终回答".repeat(100),
+      { maxPayloadBytes: 256 },
+    );
+
+    expect(result).toBeNull();
+  });
+
   it("marks agent progress cards with root metadata layout", () => {
     const { card } = renderProgressCard({ phase: "thinking", steps: [] });
     expect(card.metadata).toEqual({ octo_layout: OCTO_CARD_LAYOUTS.agentProgressV1 });
