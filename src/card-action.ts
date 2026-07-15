@@ -113,3 +113,22 @@ export function synthesizeCardActionMessage(action: CardAction, botUid: string):
     },
   };
 }
+
+export function validateCardActionInputs(
+  action: CardAction,
+  limits?: { maxInputTextBytes?: number; maxInputsBytes?: number },
+): { ok: true } | { ok: false; error: string } {
+  const maxInputTextBytes = limits?.maxInputTextBytes ?? 4_096;
+  const maxInputsBytes = limits?.maxInputsBytes ?? 16_384;
+  const encoder = new TextEncoder();
+  for (const [key, value] of Object.entries(action.inputs)) {
+    if (!/^[A-Za-z0-9_.:-]{1,64}$/.test(key)) return { ok: false, error: "提交字段非法" };
+    if (encoder.encode(value).byteLength > maxInputTextBytes) {
+      return { ok: false, error: "提交内容过大" };
+    }
+  }
+  if (encoder.encode(JSON.stringify(action.inputs)).byteLength > maxInputsBytes) {
+    return { ok: false, error: "提交内容过大" };
+  }
+  return { ok: true };
+}

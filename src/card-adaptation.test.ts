@@ -302,10 +302,14 @@ describe("editCardMessage 出站组包", () => {
       channelType: ChannelType.Group,
       card: { type: "AdaptiveCard", body: [] },
       profile: CARD_INTERACTIVE_PROFILE,
+      cardSeq: 3,
     });
 
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     const body = JSON.parse(init.body as string);
-    expect(JSON.parse(body.content_edit).profile).toBe("octo/v2");
+    expect(JSON.parse(body.content_edit)).toEqual(expect.objectContaining({
+      profile: "octo/v2",
+      card_seq: 3,
+    }));
   });
 });

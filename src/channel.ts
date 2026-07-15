@@ -40,6 +40,7 @@ import {
   type EventPoller,
 } from "./events-poll.js";
 import { synthesizeCardActionMessage } from "./card-action.js";
+import { handleCardAction } from "./card-action-handler.js";
 
 /**
  * 会话初始化冲突(core CAS)兜底重试参数。同群紧挨两条消息时,turn N 的 session 收尾写
@@ -1456,8 +1457,18 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
           cursorStore: createFileEventCursorStore({ accountId: account.accountId }),
           log,
           onCardAction: async (action) => {
-            const message = synthesizeCardActionMessage(action, credentials.robot_id);
-            await dispatchInboundMessage(message);
+            await handleCardAction({
+              action,
+              accountId: account.accountId,
+              apiUrl: account.config.apiUrl,
+              botToken: account.config.botToken ?? "",
+              operatorName: uidToNameMap.get(action.operatorUid),
+              log,
+              dispatch: async () => {
+                const message = synthesizeCardActionMessage(action, credentials.robot_id);
+                await dispatchInboundMessage(message);
+              },
+            });
           },
         });
         log?.info?.(`octo: [${account.accountId}] card_action poller started`);

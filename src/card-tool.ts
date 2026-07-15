@@ -13,6 +13,7 @@ import { registerCardSession } from "./card-session.js";
 import { INTERACTIVE_CARD_TOOL_NAME, CHANNEL_ID } from "./constants.js";
 import { resolveOutboundOctoTarget } from "./actions.js";
 import { CARD_INTERACTIVE_PROFILE, CARD_VERSION, type ChannelType } from "./types.js";
+import type { CardCaps } from "./card-render.js";
 
 const SEND_TIMEOUT_MS = 15_000;
 
@@ -188,6 +189,7 @@ export function createInteractiveCardTool(params: Params): any[] {
       if (!baseline.ok) return error(baseline.error);
 
       let manifest: CardProfileManifest | null = null;
+      let negotiatedCaps: CardCaps | undefined;
       let unsupportedReason = "card profile probe failed";
       try {
         manifest = await getCardProfile({
@@ -201,7 +203,8 @@ export function createInteractiveCardTool(params: Params): any[] {
 
       let built = baseline;
       if (manifest && !unsupportedReason) {
-        const strict = buildInteractiveCard(spec, deriveCardCaps(manifest));
+        negotiatedCaps = deriveCardCaps(manifest);
+        const strict = buildInteractiveCard(spec, negotiatedCaps);
         if (strict.ok) built = strict;
         else unsupportedReason = strict.error;
       }
@@ -242,6 +245,10 @@ export function createInteractiveCardTool(params: Params): any[] {
           channelType: target.channelType as ChannelType,
           title: built.title,
           actionLabels: built.actionLabels,
+          ...(negotiatedCaps?.maxInputTextBytes
+            ? { maxInputTextBytes: negotiatedCaps.maxInputTextBytes }
+            : {}),
+          ...(negotiatedCaps?.maxInputsBytes ? { maxInputsBytes: negotiatedCaps.maxInputsBytes } : {}),
         });
         return ok({ sent: true, message_id: messageId, channel_id: target.channelId });
       } catch (sendError) {

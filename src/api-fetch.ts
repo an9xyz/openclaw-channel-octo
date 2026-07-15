@@ -467,6 +467,8 @@ export async function editCardMessage(params: {
   card: Record<string, unknown>;
   /** 必须与被编辑卡片的 profile 一致；缺省保持 octo/v1。 */
   profile?: CardProfile;
+  /** 交互卡多帧编辑的单调序号；服务端拒绝旧帧/乱序帧。 */
+  cardSeq?: number;
   plain?: string;
   /** 进度中间帧标 true → D10 不进修订历史(避免 cap 20 被进度噪音刷屏);终态帧不带 → 进历史。 */
   transient?: boolean;
@@ -487,6 +489,12 @@ export async function editCardMessage(params: {
   };
   if (typeof params.plain === "string") {
     envelope.plain = params.plain;
+  }
+  if (params.cardSeq !== undefined) {
+    if (!Number.isSafeInteger(params.cardSeq) || params.cardSeq < 0) {
+      throw new Error("octo: cardSeq must be a non-negative safe integer");
+    }
+    envelope.card_seq = params.cardSeq;
   }
   // D10:transient 帧不进修订历史侧表(进度中间帧用,避免 cap 20 被刷屏)。
   if (params.transient) {
