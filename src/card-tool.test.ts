@@ -138,6 +138,27 @@ describe("octo_send_card", () => {
     expect(result.details).toEqual(expect.objectContaining({ sent: true, message_id: "m1" }));
   });
 
+  it("octo/v2 profile 即表示 Submit 可用，不要求本地 actions 列出 Action.Submit", async () => {
+    vi.mocked(getCardProfile).mockResolvedValue({
+      available: true,
+      enabled: true,
+      profiles: ["octo/v1", "octo/v2"],
+      card_version: "1.5",
+      elements: ["TextBlock"],
+      inputs: ["Input.Text"],
+      actions: ["Action.OpenUrl", "Action.ToggleVisibility", "Action.CopyToClipboard"],
+    });
+
+    const result = await tool().execute("live-d12-shape", {
+      title: "确认模拟发布",
+      buttons: [{ id: "continue", label: "继续模拟" }, { id: "cancel", label: "取消" }],
+    });
+
+    expect(sendCardMessage).toHaveBeenCalledWith(expect.objectContaining({ profile: "octo/v2" }));
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(result.details).toEqual(expect.objectContaining({ sent: true, message_id: "m1" }));
+  });
+
   it("服务端不支持 octo/v2 时降级为当前会话纯文本，不登记 session", async () => {
     vi.mocked(getCardProfile).mockResolvedValue({
       available: true,
