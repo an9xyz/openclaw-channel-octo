@@ -30,6 +30,7 @@ export interface OctoAccountConfig {
   historyPromptTemplate?: string;  // Template for group history context injection
   cardProgress?: boolean;  // false force-disables automatic progress cards; true/unset follows server capabilities
   cardDisplay?: boolean;  // false force-disables the display-card tool; true/unset follows server capabilities
+  cardInteraction?: boolean;  // false force-disables interactive cards; true/unset follows server capabilities
   onBehalfOf?: string;  // Persona clone: grantor uid — bot acts on behalf of this human
   secretsFileRoot?: string;  // Jail root for write-secret: secret files may only be written under this path. When unset, defaults to the agent's workspace (agents.list[].workspace matched to the agent, else agents.defaults.workspace); if neither resolves, write-secret fails closed (no process.cwd() fallback).
   dispatchTimeoutMs?: number;  // Explicit per-inbound dispatch timeout override (ms). Unset = derived from agents.defaults.timeoutSeconds + 60s buffer (issue #113).
@@ -50,6 +51,7 @@ export interface OctoConfig {
   historyPromptTemplate?: string;  // Template for group history context injection
   cardProgress?: boolean;  // Top-level default for automatic progress cards
   cardDisplay?: boolean;  // Top-level default for the display-card tool
+  cardInteraction?: boolean;  // Top-level default for interactive cards
   onBehalfOf?: string;  // Persona clone: grantor uid — bot acts on behalf of this human
   secretsFileRoot?: string;  // Jail root for write-secret (see OctoAccountConfig)
   dispatchTimeoutMs?: number;  // Explicit per-inbound dispatch timeout override (ms); see OctoAccountConfig
@@ -81,6 +83,9 @@ export const CARD_PROGRESS_DESCRIPTION =
 
 export const CARD_DISPLAY_DESCRIPTION =
   "When omitted or true, follow the server card capability gate; false force-disables the octo_send_display_card tool. Per-account values override the top-level value.";
+
+export const CARD_INTERACTION_DESCRIPTION =
+  "When omitted or true, follow the server octo/v2 card capability gate; false force-disables the octo_send_card tool and new interactive callback polling. Per-account values override the top-level value.";
 
 // Shared description for commands.fork.scope, kept identical to the wording in
 // openclaw.plugin.json (manifest-schema-sync.test.ts asserts key-level sync).
@@ -124,6 +129,7 @@ export const OctoConfigJsonSchema = {
       historyPromptTemplate: { type: "string" },
       cardProgress: { type: "boolean", description: CARD_PROGRESS_DESCRIPTION },
       cardDisplay: { type: "boolean", description: CARD_DISPLAY_DESCRIPTION },
+      cardInteraction: { type: "boolean", description: CARD_INTERACTION_DESCRIPTION },
       onBehalfOf: { type: "string" },
       secretsFileRoot: { type: "string", description: SECRETS_FILE_ROOT_DESCRIPTION },
       dispatchTimeoutMs: { type: "number", minimum: 1000, description: DISPATCH_TIMEOUT_MS_DESCRIPTION },
@@ -147,6 +153,7 @@ export const OctoConfigJsonSchema = {
             historyPromptTemplate: { type: "string" },
             cardProgress: { type: "boolean", description: CARD_PROGRESS_DESCRIPTION },
             cardDisplay: { type: "boolean", description: CARD_DISPLAY_DESCRIPTION },
+            cardInteraction: { type: "boolean", description: CARD_INTERACTION_DESCRIPTION },
             onBehalfOf: { type: "string" },
             secretsFileRoot: { type: "string", description: SECRETS_FILE_ROOT_DESCRIPTION },
             dispatchTimeoutMs: { type: "number", minimum: 1000, description: DISPATCH_TIMEOUT_MS_DESCRIPTION },

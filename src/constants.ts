@@ -22,6 +22,7 @@ export const CHANNEL_ID = "octo";
  * 进度卡噪音。集中定义避免字面量漂移。
  */
 export const DISPLAY_CARD_TOOL_NAME = "octo_send_display_card";
+export const INTERACTIVE_CARD_TOOL_NAME = "octo_send_card";
 
 /**
  * Separator between parent group_no and thread short_id in Octo's CommunityTopic

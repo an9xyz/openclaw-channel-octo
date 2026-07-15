@@ -17,7 +17,7 @@ import { ChannelType, CARD_PROFILE, CARD_VERSION } from "./types.js";
 import { sendCardMessage, editCardMessage, getCardProfile, httpStatusFromApiFetchError } from "./api-fetch.js";
 import { deriveCardCaps } from "./card-caps.js";
 import { renderProgressCard, summarizeToolParams, type CardStep, type CardProgressState, type CardCaps } from "./card-render.js";
-import { DISPLAY_CARD_TOOL_NAME } from "./constants.js";
+import { DISPLAY_CARD_TOOL_NAME, INTERACTIVE_CARD_TOOL_NAME } from "./constants.js";
 
 /** dispatch 侧登记的发送上下文。 */
 export interface CardContext {
@@ -424,7 +424,7 @@ export function registerCardProgress(api: OpenClawPluginApi): void {
     if (!claimRun(entry, ctx)) return; // 超时 run 的迟到 hook 落到新 run 的卡 → 丢弃
     // P1-h:agent 展示卡工具的产出**就是那张卡本身**,不该再有旁边的"正在处理/已中断"进度卡噪音。
     // 该工具不计入进度、不触发发卡。混合 turn 里其它真实工具照常显示,仅不含这步。
-    if (e.toolName === DISPLAY_CARD_TOOL_NAME) {
+    if (e.toolName === DISPLAY_CARD_TOOL_NAME || e.toolName === INTERACTIVE_CARD_TOOL_NAME) {
       // 仍要收尾上一轮 running thinking —— 否则思考步 duration 会把 display-card 的执行时长吞进去。
       endRunningThinking(entry, Date.now());
       return;
@@ -448,7 +448,7 @@ export function registerCardProgress(api: OpenClawPluginApi): void {
     if (!entry || entry.skip) return;
     if (!claimRun(entry, ctx)) return; // 同 §before_tool_call:外来 run 的迟到 after 事件 → 丢弃
     // P1-h:与 before_tool_call 对称,避免 display-card 触发 scheduleFlush 而误发进度卡。
-    if (e.toolName === DISPLAY_CARD_TOOL_NAME) return;
+    if (e.toolName === DISPLAY_CARD_TOOL_NAME || e.toolName === INTERACTIVE_CARD_TOOL_NAME) return;
     // 回填终态。优先按 toolCallId 精确匹配 running 步骤;若 toolCallId 存在但没命中
     // running(过期/重复投递的 after 事件),直接丢弃,**不**回退按名匹配 —— 否则会把仍
     // 在跑的并发同名步骤误标为终态。仅当 toolCallId 缺失(旧 host)才回退「最后一个同名 running」。

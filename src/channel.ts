@@ -1462,8 +1462,10 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
         });
         log?.info?.(`octo: [${account.accountId}] card_action poller started`);
       };
-      setCardEventPollStarter(account.accountId, startCardEventPoller);
-      if (process.env.OCTO_CARD_POLL_FORCE === "1") startCardEventPoller();
+      if (account.config.cardInteraction !== false) {
+        setCardEventPollStarter(account.accountId, startCardEventPoller);
+        if (process.env.OCTO_CARD_POLL_FORCE === "1") startCardEventPoller();
+      }
 
       // 6. Connect WebSocket — pure real-time
       const socket = new WKSocket({
