@@ -44,6 +44,7 @@ async function updateStatus(params: {
   submittedInputs?: Record<string, string>;
   errorText?: string;
   transient?: boolean;
+  preserveControls?: boolean;
   log?: { info?: (message: string) => void; warn?: (message: string) => void };
 }): Promise<void> {
   const rendered = renderCardActionStatus({
@@ -54,6 +55,7 @@ async function updateStatus(params: {
     actionLabel: params.session.actionLabels[params.action.actionId] ?? params.action.actionId,
     status: params.status,
     ...(params.errorText ? { errorText: params.errorText } : {}),
+    ...(params.preserveControls ? { preserveControls: true } : {}),
   });
   const cardSeq = nextCardSessionSeq(params.action.messageId);
   if (cardSeq === undefined) return;
@@ -116,6 +118,7 @@ export async function handleCardAction(params: Params): Promise<CardActionHandle
       operator: params.operatorName ?? action.operatorUid,
       status: "error",
       errorText: inputs.error,
+      preserveControls: true,
       log: params.log,
     });
     params.log?.warn?.(`octo: card_action rejected message=${action.messageId} reason=${inputs.error}`);
@@ -149,6 +152,7 @@ export async function handleCardAction(params: Params): Promise<CardActionHandle
         status: "error",
         submittedInputs: action.inputs,
         errorText: "处理失败，请稍后重试",
+        preserveControls: true,
         log: params.log,
       });
       params.log?.warn?.(`octo: card_action dispatch rejected message=${action.messageId}`);

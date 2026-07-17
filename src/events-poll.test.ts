@@ -240,6 +240,26 @@ describe("event poller", () => {
     poller.stop();
   });
 
+  it("拉取与 ack 请求都带默认超时 signal，服务端挂起时不会无限阻塞轮询", async () => {
+    const signals: Array<unknown> = [];
+    global.fetch = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      signals.push(init?.signal);
+      if (String(url).endsWith("/ack")) return new Response("");
+      return Response.json({ results: [actionEvent(5)] });
+    }) as typeof fetch;
+    const cursor = memoryCursor(4);
+    const poller = startEventPoller({
+      apiUrl: "https://api.test", botToken: "bf", intervalMs: 1000,
+      cursorStore: cursor, onCardAction: async () => {},
+    });
+    await poller.ready;
+    await vi.advanceTimersByTimeAsync(1000);
+    // 即便 poller 未显式传 signal，fetchBotEvents 与 ackBotEvent 也须带 AbortSignal（默认超时）。
+    expect(signals.length).toBeGreaterThanOrEqual(2);
+    expect(signals.every((signal) => signal instanceof AbortSignal)).toBe(true);
+    poller.stop();
+  });
+
   it("cursor load 失败或返回非法值时从零启动", async () => {
     const errors: string[] = [];
     const rejected = startEventPoller({

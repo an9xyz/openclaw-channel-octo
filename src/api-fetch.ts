@@ -10,6 +10,10 @@ import { randomUUID } from "node:crypto";
 import type { BotEvent } from "./card-action.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+// Card-event short-poll requests run in a single sequential loop; without a bound a hung
+// /v1/bot/events (or its ack) would block all callback processing for the account until the OS
+// eventually drops the socket. Cap each request well under any reasonable poll cadence.
+const EVENTS_POLL_TIMEOUT_MS = 10_000;
 // Short timeout for the per-message mention_pref hot-path lookup. On a cache
 // miss this fires on the first message of every group every TTL window; before
 // the backend ships it 404s, and we must not stall the inbound pipeline for the
@@ -619,7 +623,7 @@ export async function fetchBotEvents(params: {
       event_id: params.sinceEventId ?? 0,
       limit: Math.max(1, Math.min(100, Math.floor(params.limit ?? 20))),
     },
-    params.signal,
+    params.signal ?? AbortSignal.timeout(EVENTS_POLL_TIMEOUT_MS),
   );
   return Array.isArray(response?.results) ? response.results : [];
 }
@@ -636,7 +640,7 @@ export async function ackBotEvent(params: {
     params.botToken,
     `/v1/bot/events/${params.eventId}/ack`,
     {},
-    params.signal,
+    params.signal ?? AbortSignal.timeout(EVENTS_POLL_TIMEOUT_MS),
   );
 }
 

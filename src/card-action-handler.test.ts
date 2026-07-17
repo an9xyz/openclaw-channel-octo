@@ -156,12 +156,39 @@ describe("handleCardAction", () => {
       action: action(), accountId: "a1", apiUrl: "x", botToken: "t", dispatch,
     })).toBe("rejected");
     expect(dispatch).toHaveBeenCalledTimes(3);
-    expect(JSON.stringify(vi.mocked(editCardMessage).mock.calls.at(-1)?.[0].card)).toContain("处理失败");
+    const deadLetter = JSON.stringify(vi.mocked(editCardMessage).mock.calls.at(-1)?.[0].card);
+    expect(deadLetter).toContain("处理失败");
+    // Dead-letter 是终态：剥离控件，成为只读状态帧。
+    expect(deadLetter).not.toContain("Action.Submit");
     // 终态后同卡再点击（新 event）一律 duplicate，不再 dispatch。
     expect(await handleCardAction({
       action: action({ eventId: 11 }), accountId: "a1", apiUrl: "x", botToken: "t", dispatch,
     })).toBe("duplicate");
     expect(dispatch).toHaveBeenCalledTimes(3);
+  });
+
+  it("可恢复失败的错误卡保留 Action.Submit 与可编辑输入，重试可从同卡发起", async () => {
+    // 校验失败：错误帧仍须带提交按钮与输入控件（否则文案承诺的“重试”无从点击）。
+    const dispatch = vi.fn().mockResolvedValue("completed");
+    expect(await handleCardAction({
+      action: action({ inputs: { note: "n".repeat(50) } }),
+      accountId: "a1", apiUrl: "x", botToken: "t", dispatch,
+    })).toBe("rejected");
+    const validationCard = JSON.stringify(vi.mocked(editCardMessage).mock.calls.at(-1)?.[0].card);
+    expect(validationCard).toContain("提交内容过大");
+    expect(validationCard).toContain("Action.Submit");
+    expect(validationCard).toContain("Input.Text");
+
+    // dispatch 被明确丢弃：错误帧同样保留控件。
+    vi.mocked(editCardMessage).mockClear();
+    const rejectDispatch = vi.fn().mockResolvedValue("rejected");
+    expect(await handleCardAction({
+      action: action({ eventId: 11 }), accountId: "a1", apiUrl: "x", botToken: "t", dispatch: rejectDispatch,
+    })).toBe("rejected");
+    const rejectedCard = JSON.stringify(vi.mocked(editCardMessage).mock.calls.at(-1)?.[0].card);
+    expect(rejectedCard).toContain("处理失败");
+    expect(rejectedCard).toContain("Action.Submit");
+    expect(rejectedCard).toContain("Input.Text");
   });
 
   it("校验失败后释放 claim，纠正输入后可在同卡重新提交", async () => {

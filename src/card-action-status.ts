@@ -8,6 +8,12 @@ interface StatusParams {
   actionLabel: string;
   status: CardActionStatus;
   errorText?: string;
+  /**
+   * Recoverable error: keep the authored inputs (editable) and `Action.Submit` buttons so the
+   * user can actually act on the "please retry" hint on the same card. Terminal states
+   * (`completed`, dead-lettered errors) leave this unset and get the frozen, action-stripped card.
+   */
+  preserveControls?: boolean;
 }
 
 function freezeInput(
@@ -59,6 +65,20 @@ function freezeElement(
 
 /** Preserve the authored card body, freeze submitted inputs, remove actions, and append status. */
 export function renderCardActionStatus(params: StatusParams): { card: Record<string, unknown>; plain: string } {
+  if (params.preserveControls) {
+    // Recoverable error: leave the interactive card intact (inputs editable, Action.Submit kept)
+    // and only append the error line, so a resubmit is physically reachable from the same card.
+    const statusLine = `⚠️ ${params.errorText ?? "处理失败"}`;
+    const sourceBody = Array.isArray(params.card.body) ? params.card.body : [];
+    const body = [
+      ...sourceBody,
+      { type: "TextBlock", text: statusLine, wrap: true, spacing: "Medium", separator: true },
+    ];
+    const basePlain = params.plain.trim();
+    const plain = [...(basePlain ? [basePlain] : []), statusLine].join("\n");
+    return { card: { ...params.card, body }, plain };
+  }
+
   const selections: string[] = [];
   const selectedChoices: string[] = [];
   const inputs = params.inputs ?? {};
