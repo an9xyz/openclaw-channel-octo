@@ -22,10 +22,14 @@ interface CardSessionEntry {
   state: "pending" | "processing" | "completed";
   claimedEventId?: number;
   cardSeq: number;
+  /** Number of dispatch attempts for the current `attemptEventId`; bounds poison-pill replay. */
+  dispatchAttempts: number;
+  /** The event id `dispatchAttempts` is counting; a new event id resets the counter. */
+  attemptEventId?: number;
 }
 
 export type CardClaimResult =
-  | { status: "claimed"; session: CardSession }
+  | { status: "claimed"; session: CardSession; attempts: number }
   | { status: "duplicate"; session: CardSession }
   | { status: "missing" };
 
@@ -63,6 +67,7 @@ export function registerCardSession(messageId: string, session: CardSession): vo
     expiresAt: Date.now() + CARD_SESSION_TTL_MS,
     state: "pending",
     cardSeq: 0,
+    dispatchAttempts: 0,
   });
   requestCardEventPolling(session.accountId);
 }
@@ -77,7 +82,14 @@ export function claimCardSession(messageId: string, eventId: number): CardClaimR
   if (entry.state !== "pending") return { status: "duplicate", session: entry.session };
   entry.state = "processing";
   entry.claimedEventId = eventId;
-  return { status: "claimed", session: entry.session };
+  // Count attempts per event id: replays of the same event (poller re-fetches the
+  // same id while the cursor is stuck) accumulate; a genuinely new click resets.
+  if (entry.attemptEventId !== eventId) {
+    entry.attemptEventId = eventId;
+    entry.dispatchAttempts = 0;
+  }
+  entry.dispatchAttempts += 1;
+  return { status: "claimed", session: entry.session, attempts: entry.dispatchAttempts };
 }
 
 export function releaseCardSessionClaim(messageId: string, eventId: number): void {

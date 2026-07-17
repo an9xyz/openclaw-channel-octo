@@ -212,6 +212,34 @@ describe("event poller", () => {
     poller.stop();
   });
 
+  it("批次含非整数 event_id 时丢弃畸形项，合法事件仍按升序处理不被挤掉", async () => {
+    const errors: string[] = [];
+    global.fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (String(url).endsWith("/ack")) return new Response("");
+      // 畸形项夹在两个合法事件之间；若在校验前排序，NaN 比较会打乱顺序并可能丢掉 11。
+      return Response.json({ results: [
+        actionEvent(12),
+        { ...actionEvent(11), event_id: "oops" },
+        actionEvent(11),
+      ] });
+    }) as typeof fetch;
+    const cursor = memoryCursor(10);
+    const seen: number[] = [];
+    const poller = startEventPoller({
+      apiUrl: "https://api.test", botToken: "bf", intervalMs: 1000,
+      cursorStore: cursor,
+      log: { error: (message) => errors.push(message) },
+      onCardAction: async (action: CardAction) => { seen.push(action.eventId); },
+    });
+    await poller.ready;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(seen).toEqual([11, 12]);
+    expect(cursor.saved).toEqual([11, 12]);
+    expect(poller.cursor()).toBe(12);
+    expect(errors.some((message) => message.includes("non-integer event_id"))).toBe(true);
+    poller.stop();
+  });
+
   it("cursor load 失败或返回非法值时从零启动", async () => {
     const errors: string[] = [];
     const rejected = startEventPoller({

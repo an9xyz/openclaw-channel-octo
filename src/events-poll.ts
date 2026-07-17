@@ -99,9 +99,17 @@ export function startEventPoller(options: EventPollerOptions): EventPoller {
         sinceEventId: cursor,
         limit,
       });
+      // Validate ids *before* sorting: a non-integer event_id makes numeric-subtraction comparison
+      // return NaN, which leaves the sort order unspecified and can drop a valid interleaved event.
+      const malformed = events.filter((event) => !Number.isSafeInteger(event.event_id)).length;
+      if (malformed > 0) {
+        options.log?.error?.(`octo: event poll dropped ${malformed} event(s) with a non-integer event_id`);
+      }
       let cardActions = 0;
-      for (const event of [...events].sort((a, b) => a.event_id - b.event_id)) {
-        if (!Number.isSafeInteger(event.event_id) || event.event_id <= cursor) continue;
+      const ordered = events
+        .filter((event) => Number.isSafeInteger(event.event_id) && event.event_id > cursor)
+        .sort((a, b) => a.event_id - b.event_id);
+      for (const event of ordered) {
         const action = parseCardAction(event);
         if (action) {
           cardActions += 1;

@@ -15,6 +15,15 @@ import { CARD_INTERACTIVE_PROFILE } from "./types.js";
 export type CardActionHandleResult = "completed" | "duplicate" | "ignored" | "rejected";
 export type CardActionDispatchResult = "completed" | "rejected";
 
+/**
+ * Upper bound on how many times a single card_action event is re-dispatched after a *throw*.
+ * A throw is treated as transient and replayed by the poller (the cursor does not advance); once
+ * this many attempts have failed the event is dead-lettered — the session is completed and the
+ * cursor is allowed to advance — so one persistently-failing action can neither re-run the agent
+ * turn forever nor block every later action for the account.
+ */
+const MAX_CARD_DISPATCH_ATTEMPTS = 3;
+
 interface Params {
   action: CardAction;
   accountId: string;
@@ -96,7 +105,9 @@ export async function handleCardAction(params: Params): Promise<CardActionHandle
 
   const inputs = validateCardActionInputs(action, session);
   if (!inputs.ok) {
-    completeCardSession(action.messageId, action.eventId);
+    // Recoverable: release (not complete) so the user can correct the input and resubmit on the
+    // same card. This event's cursor still advances (we return normally), so it does not replay.
+    releaseCardSessionClaim(action.messageId, action.eventId);
     await updateStatus({
       action,
       session,
@@ -125,7 +136,10 @@ export async function handleCardAction(params: Params): Promise<CardActionHandle
   try {
     const dispatchResult = await params.dispatch(session);
     if (dispatchResult === "rejected") {
-      completeCardSession(action.messageId, action.eventId);
+      // A definitive drop for this event (e.g. session-init conflict already notified). Release
+      // rather than complete so the "请稍后重试" hint is truthful — a fresh click can retry — while
+      // this event's cursor still advances (returned normally) so it does not auto-replay.
+      releaseCardSessionClaim(action.messageId, action.eventId);
       await updateStatus({
         action,
         session,
@@ -154,6 +168,28 @@ export async function handleCardAction(params: Params): Promise<CardActionHandle
     params.log?.info?.(`octo: card_action completed message=${action.messageId} event=${action.eventId}`);
     return "completed";
   } catch (error) {
+    // A throw is treated as transient and replayed by the poller (cursor stays put). Bound that
+    // replay: after MAX attempts on the same event, dead-letter it — complete the session and
+    // return normally so the cursor advances, instead of re-running the agent turn forever and
+    // blocking every later action for this account.
+    if (claim.attempts >= MAX_CARD_DISPATCH_ATTEMPTS) {
+      completeCardSession(action.messageId, action.eventId);
+      await updateStatus({
+        action,
+        session,
+        apiUrl: params.apiUrl,
+        botToken: params.botToken,
+        operator: params.operatorName ?? action.operatorUid,
+        status: "error",
+        submittedInputs: action.inputs,
+        errorText: "处理失败，请稍后重新发起",
+        log: params.log,
+      });
+      params.log?.warn?.(
+        `octo: card_action giving up after ${claim.attempts} attempts message=${action.messageId} event=${action.eventId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return "rejected";
+    }
     releaseCardSessionClaim(action.messageId, action.eventId);
     await updateStatus({
       action,

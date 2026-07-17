@@ -141,4 +141,52 @@ describe("handleCardAction", () => {
     })).toBe("rejected");
     expect(JSON.stringify(vi.mocked(editCardMessage).mock.calls.at(-1)?.[0].card)).toContain("处理失败");
   });
+
+  it("dispatch 持续抛错达到上限后落终态并停止重放（不再无限重跑 agent turn）", async () => {
+    const dispatch = vi.fn().mockRejectedValue(new Error("agent down"));
+    // 同一 event 的前两次向 poller 抛错以便重放（cursor 不前进）。
+    await expect(handleCardAction({
+      action: action(), accountId: "a1", apiUrl: "x", botToken: "t", dispatch,
+    })).rejects.toThrow("agent down");
+    await expect(handleCardAction({
+      action: action(), accountId: "a1", apiUrl: "x", botToken: "t", dispatch,
+    })).rejects.toThrow("agent down");
+    // 第三次达到上限：不再抛错，落终态 rejected（poller 得以推进 cursor）。
+    expect(await handleCardAction({
+      action: action(), accountId: "a1", apiUrl: "x", botToken: "t", dispatch,
+    })).toBe("rejected");
+    expect(dispatch).toHaveBeenCalledTimes(3);
+    expect(JSON.stringify(vi.mocked(editCardMessage).mock.calls.at(-1)?.[0].card)).toContain("处理失败");
+    // 终态后同卡再点击（新 event）一律 duplicate，不再 dispatch。
+    expect(await handleCardAction({
+      action: action({ eventId: 11 }), accountId: "a1", apiUrl: "x", botToken: "t", dispatch,
+    })).toBe("duplicate");
+    expect(dispatch).toHaveBeenCalledTimes(3);
+  });
+
+  it("校验失败后释放 claim，纠正输入后可在同卡重新提交", async () => {
+    const dispatch = vi.fn().mockResolvedValue("completed");
+    expect(await handleCardAction({
+      action: action({ inputs: { note: "n".repeat(50) } }),
+      accountId: "a1", apiUrl: "x", botToken: "t", dispatch,
+    })).toBe("rejected");
+    expect(dispatch).not.toHaveBeenCalled();
+    // 纠正后（新 event）重新提交 → 正常 dispatch，而不是被永久锁死。
+    expect(await handleCardAction({
+      action: action({ eventId: 11, inputs: { note: "ok" } }),
+      accountId: "a1", apiUrl: "x", botToken: "t", dispatch,
+    })).toBe("completed");
+    expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("dispatch 明确丢弃后释放 claim，可重新提交（“请稍后重试”文案属实）", async () => {
+    const dispatch = vi.fn().mockResolvedValueOnce("rejected").mockResolvedValueOnce("completed");
+    expect(await handleCardAction({
+      action: action(), accountId: "a1", apiUrl: "x", botToken: "t", dispatch,
+    })).toBe("rejected");
+    expect(await handleCardAction({
+      action: action({ eventId: 11 }), accountId: "a1", apiUrl: "x", botToken: "t", dispatch,
+    })).toBe("completed");
+    expect(dispatch).toHaveBeenCalledTimes(2);
+  });
 });
