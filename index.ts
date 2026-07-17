@@ -21,7 +21,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { getGroupMdForPrompt } from "./src/group-md.js";
-import { pendingInboundContext, sessionAccountMap, buildSessionAccountKey } from "./src/inbound.js";
+import { pendingInboundContext, sessionAccountMap, buildSessionAccountKey, recordSessionResetWatermark } from "./src/inbound.js";
 import { resolvePersonaHintForSession } from "./src/persona-prompt.js";
 import { setOctoRuntime } from "./src/runtime.js";
 import { octoPlugin } from "./src/channel.js";
@@ -258,6 +258,19 @@ export default defineBundledChannelEntry({
         ...(contextSections.length > 0 ? { prependContext: contextSections.join('\n\n') } : {}),
         ...(systemSections.length > 0 ? { prependSystemContext: systemSections.join('\n\n') } : {}),
       };
+    });
+
+    // Session reset watermark (#155). Registering before_reset is REQUIRED: the
+    // runtime only fires it when a plugin has subscribed (hasHooks gate), and
+    // without it the plugin is blind to /new. On reset we record the instant so
+    // the inbound history injector drops pre-/new channel messages — otherwise
+    // the channel-keyed history (whose sessionId never resets) would re-inject
+    // stale, already-answered instructions into the fresh session. Belt to
+    // sessionStartedAt's braces (see resolveResetWatermarkMs): this survives even
+    // if the session store read lags, while sessionStartedAt survives restarts.
+    api.on('before_reset', (_event, ctx) => {
+      const sessionKey = (ctx as { sessionKey?: string | null } | undefined)?.sessionKey;
+      if (sessionKey) recordSessionResetWatermark(sessionKey, Date.now());
     });
 
     // 波 B:注册卡片进度 hook(before/after_tool_call、model_call_started)。

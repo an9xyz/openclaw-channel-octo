@@ -39,7 +39,7 @@
     "ws": "^8.21.0"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.4.15"
+    "openclaw": ">=2026.6.9"
   },
   "peerDependenciesMeta": {
     "openclaw": {
@@ -76,13 +76,13 @@
     "install": {
       "clawhubSpec": "clawhub:octo",
       "defaultChoice": "clawhub",
-      "minHostVersion": ">=2026.4.15"
+      "minHostVersion": ">=2026.6.9"
     },
     "compat": {
-      "pluginApi": ">=2026.4.15"
+      "pluginApi": ">=2026.6.9"
     },
     "build": {
-      "openclawVersion": "2026.5.4"
+      "openclawVersion": "2026.6.9"
     },
     "release": {
       "publishToClawHub": true,

@@ -30,6 +30,7 @@ import { setCardContext, finalizeCard } from "./card-progress.js";
 import { ChannelType, MessageType, RICH_TEXT_BLOCK_IMAGE, RICH_TEXT_BLOCK_TEXT, RICH_TEXT_IMAGE_PLACEHOLDER, CARD_PLACEHOLDER } from "./types.js";
 import type { RichTextBlock } from "./types.js";
 import { getOctoRuntime } from "./runtime.js";
+import { getSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
 import { CHANNEL_ID, MAX_UPLOAD_SIZE } from "./constants.js";
 import { streamToFileWithCap } from "./stream-helpers.js";
 import {
@@ -197,6 +198,42 @@ export function buildSessionAccountKey(accountId: string, sessionKey: string): s
 export function recordSessionAccount(accountId: string, sessionKey: string): void {
   const id = normalizeAccountId(accountId);
   sessionAccountMap.set(buildSessionAccountKey(id, sessionKey), id);
+}
+
+// Session reset watermarks (#155). Keyed by OpenClaw host sessionKey (the same
+// key the before_prompt_build hook and pendingInboundContext use), value = the
+// reset instant in ms. The plugin's channel history is keyed by a channel-stable
+// sessionId that never resets on /new, so without a watermark a reset session
+// still gets pre-/new messages injected as "already answered" context. This map
+// is the belt to sessionStartedAt's braces: the before_reset hook writes here
+// the moment /new happens (surviving even if the session store read lags), while
+// sessionStartedAt is the persistent source of truth read at injection time.
+const sessionResetWatermarks = new Map<string, number>();
+
+/**
+ * Record a session reset instant, called from the before_reset hook. Monotonic:
+ * a later reset can only push the watermark forward, never rewind it.
+ */
+export function recordSessionResetWatermark(sessionKey: string, resetAtMs: number): void {
+  if (!sessionKey || !(resetAtMs > 0)) return;
+  const existing = sessionResetWatermarks.get(sessionKey) ?? 0;
+  if (resetAtMs > existing) sessionResetWatermarks.set(sessionKey, resetAtMs);
+}
+
+/**
+ * Resolve the effective reset watermark (ms) for a session: the later of the
+ * hook-recorded reset instant and the session store's sessionStartedAt. Returns
+ * 0 when neither is known (no reset seen → no filtering, backward compatible).
+ */
+export function resolveResetWatermarkMs(sessionKey: string | undefined, sessionStartedAt?: number): number {
+  const hookMark = sessionKey ? (sessionResetWatermarks.get(sessionKey) ?? 0) : 0;
+  const startedAt = sessionStartedAt && sessionStartedAt > 0 ? sessionStartedAt : 0;
+  return Math.max(hookMark, startedAt);
+}
+
+/** Test-only: clear recorded reset watermarks between cases. */
+export function _test_clearResetWatermarks(): void {
+  sessionResetWatermarks.clear();
 }
 
 export type OctoStatusSink = (patch: {
@@ -1431,10 +1468,24 @@ export function segmentHistoryEntries(params: {
   entries: Array<{ message_id?: string; message_seq?: number; [key: string]: any }>;
   cutoffSeq: number;
   currentMsgId?: string;
+  resetWatermarkMs?: number;
 }): { answered: typeof params.entries; new: typeof params.entries } {
-  const filtered = params.currentMsgId
+  let filtered = params.currentMsgId
     ? params.entries.filter(e => e.message_id !== params.currentMsgId)
     : params.entries;
+
+  // Session reset watermark (#155): drop everything that predates the current
+  // OpenClaw session's start. The plugin's history is channel-level and its
+  // sessionId never resets on /new, so without this filter a reset session
+  // still gets pre-/new messages injected as "already answered" context,
+  // carrying stale instructions across the reset boundary. Entry timestamps are
+  // normalized to ms on both the live-cache and API-backfill paths, so the
+  // comparison is unit-safe. Fail safe: an entry with no timestamp is dropped
+  // when a watermark is active — a pre-reset message must never leak through.
+  if (params.resetWatermarkMs && params.resetWatermarkMs > 0) {
+    const watermark = params.resetWatermarkMs;
+    filtered = filtered.filter(e => typeof e.timestamp === "number" && e.timestamp >= watermark);
+  }
 
   if (params.cutoffSeq <= 0) {
     return { answered: [], new: filtered };
@@ -2049,10 +2100,54 @@ export async function handleInboundMessage(params: {
       const cutoffSeq = lastBotReplySeqMap.get(sessionId) ?? 0;
       const currentMsgId = message.message_id;
 
+      // Session reset watermark (#155): drop any history that predates the
+      // current OpenClaw session's start, so a /new gives a clean context
+      // boundary. Two sources combine (see resolveResetWatermarkMs): the
+      // before_reset hook mark (pure in-memory, cannot throw) and the session
+      // store's sessionStartedAt (read here). The hook mark is the belt to the
+      // store read's braces — so the pure-memory lookup MUST survive even when
+      // getSessionEntry throws (locked/corrupt/permission-denied store file),
+      // otherwise a store read error would silently disable filtering and let
+      // #155 recur. So we scope the try to ONLY the store read, and always run
+      // resolveResetWatermarkMs (which folds in the hook mark) afterwards.
+      //
+      // Clock domain: hook mark and sessionStartedAt are host wall-clock ms;
+      // entry.timestamp is Octo server ms. A sub-second host/server skew cannot
+      // flip the boundary in practice (pre-reset messages are already stale by
+      // minutes, post-reset ones arrive seconds+ later after a human types), and
+      // is negligible under NTP.
+      let resetWatermarkMs = 0;
+      let wmSessionKey: string | undefined;
+      let wmStartedAt: number | undefined;
+      try {
+        const wmCore = getOctoRuntime();
+        const wmConfig = wmCore.config.loadConfig() as OpenClawConfig;
+        const wmRoute = wmCore.channel.routing.resolveAgentRoute({
+          cfg: wmConfig,
+          channel: CHANNEL_ID,
+          accountId: account.accountId,
+          peer: { kind: isGroup ? "group" : "direct", id: sessionId },
+        });
+        wmSessionKey = wmRoute.sessionKey;
+        const wmStorePath = wmCore.channel.session.resolveStorePath(wmConfig.session?.store, {
+          agentId: wmRoute.agentId,
+        });
+        wmStartedAt = getSessionEntry({
+          storePath: wmStorePath,
+          sessionKey: wmRoute.sessionKey,
+        })?.sessionStartedAt;
+      } catch (wmErr) {
+        log?.warn?.(`octo: [MENTION] reset watermark store read failed (falling back to hook mark): ${String(wmErr)}`);
+      }
+      // Always fold in the in-memory hook mark, even if the store read above
+      // threw — this is the whole point of the belt-and-braces design.
+      resetWatermarkMs = resolveResetWatermarkMs(wmSessionKey, wmStartedAt);
+
       const { answered: answeredEntries, new: newEntries } = segmentHistoryEntries({
         entries,
         cutoffSeq,
         currentMsgId,
+        resetWatermarkMs,
       });
 
       const formatEntries = (items: any[]) => JSON.stringify(items.map((e: any) => {
@@ -2096,7 +2191,11 @@ export async function handleInboundMessage(params: {
               .replace("{messages}", formatEntries([...answeredEntries, ...newEntries]))
               .replace("{count}", String(answeredEntries.length + newEntries.length));
           } else {
-            const filteredEntries = entries.filter((e: any) => e.message_id !== currentMsgId);
+            // Reuse the watermark-filtered, current-excluded entries — NOT the
+            // raw `entries` — so the legacy {messages}/{count} template also
+            // honors the session reset boundary (#155). Reading raw entries here
+            // would re-inject pre-/new messages the segmenting already dropped.
+            const filteredEntries = [...answeredEntries, ...newEntries];
             const allFormatted = formatEntries(filteredEntries);
             const legacyPreamble = answeredEntries.length > 0
               ? `[Note: The first ${answeredEntries.length} message(s) below have already been answered. Do NOT re-answer them.]\n`
