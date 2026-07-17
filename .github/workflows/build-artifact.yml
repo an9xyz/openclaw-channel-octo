@@ -1,0 +1,40 @@
+name: Build Artifact
+
+# Build the plugin tarball and upload it as a downloadable workflow artifact.
+# Scope: feat/* branches only (plus manual dispatch). Does NOT publish anywhere
+# (no ClawHub, no GitHub Release) — it just produces octo-*.tgz for download.
+on:
+  push:
+    branches:
+      - 'feat/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-artifact-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: verify dist/ artifacts exist
+        run: |
+          test -f dist/index.js || (echo "::error::dist/index.js missing after build" && exit 1)
+          test -f dist/setup-entry.js || (echo "::error::dist/setup-entry.js missing after build" && exit 1)
+          echo "dist/ artifacts present"
+      - run: npm pack
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: octo-plugin-tgz
+          path: octo-*.tgz
+          if-no-files-found: error
