@@ -1,4 +1,21 @@
+import { reduceUrlsInText } from "./card-render.js";
+
 export type CardActionStatus = "processing" | "completed" | "error";
+
+/**
+ * Neutralize an untrusted string before it is echoed into a bot-authored card `TextBlock`.
+ *
+ * A `TextBlock` renders a markdown subset (links, emphasis, code), so a submitted input value —
+ * or a user-set operator display name — could otherwise inject an active hyperlink that looks
+ * bot-authored (an integrity / spoofing gap: a group member could make the bot echo a phishing
+ * link as its own). Reduce URLs the same way authored content does (`card-author.ts` →
+ * `reduceUrlsInText`), then backslash-escape the inline markdown control chars (CommonMark) so
+ * no link / code / emphasis span can form. Authored strings (input labels, resolved choice
+ * titles, the action label) are already sanitized at authoring time and are not routed here.
+ */
+function neutralizeEcho(value: string): string {
+  return reduceUrlsInText(value).replace(/[\\`*_~\[\]<]/g, "\\$&");
+}
 
 interface StatusParams {
   card: Record<string, unknown>;
@@ -25,7 +42,10 @@ function freezeInput(
   const id = typeof element.id === "string" ? element.id : "";
   if (!id || !Object.hasOwn(inputs, id)) return null;
   const rawValue = inputs[id];
-  let displayValue = rawValue;
+  // The submitted value is attacker-controlled; neutralize it before it is echoed into a
+  // TextBlock. A ChoiceSet value that resolves to an authored choice title is replaced by that
+  // (already-sanitized) title below, so only free-form / unrecognized submissions carry escapes.
+  let displayValue = neutralizeEcho(rawValue);
   if (element.type === "Input.ChoiceSet" && Array.isArray(element.choices)) {
     const selected = element.choices.find((choice) => (
       choice && typeof choice === "object" && (choice as { value?: unknown }).value === rawValue
@@ -68,7 +88,9 @@ export function renderCardActionStatus(params: StatusParams): { card: Record<str
   if (params.preserveControls) {
     // Recoverable error: leave the interactive card intact (inputs editable, Action.Submit kept)
     // and only append the error line, so a resubmit is physically reachable from the same card.
-    const statusLine = `⚠️ ${params.errorText ?? "处理失败"}`;
+    // errorText is bot-authored constant text today, but neutralize it too so this path can never
+    // echo an active link even if a future caller derives it from submitted content.
+    const statusLine = `⚠️ ${neutralizeEcho(params.errorText ?? "处理失败")}`;
     const sourceBody = Array.isArray(params.card.body) ? params.card.body : [];
     const body = [
       ...sourceBody,
@@ -89,11 +111,14 @@ export function renderCardActionStatus(params: StatusParams): { card: Record<str
     return frozen ? [frozen] : [];
   });
   const selectedLabel = selectedChoices.length > 0 ? selectedChoices.join(" / ") : params.actionLabel;
+  // operator is a user-set display name (uid→name); neutralize it before it lands in a TextBlock.
+  // selectedLabel is built from already-neutralized submitted values or authored titles/labels.
+  const operator = neutralizeEcho(params.operator);
   const statusLine = params.status === "processing"
-    ? `⏳ ${params.operator} 正在处理「${params.actionLabel}」`
+    ? `⏳ ${operator} 正在处理「${params.actionLabel}」`
     : params.status === "completed"
-      ? `✅ ${params.operator} 已选择「${selectedLabel}」`
-      : `⚠️ ${params.errorText ?? "处理失败"}`;
+      ? `✅ ${operator} 已选择「${selectedLabel}」`
+      : `⚠️ ${neutralizeEcho(params.errorText ?? "处理失败")}`;
   body.push({ type: "TextBlock", text: statusLine, wrap: true, spacing: "Medium", separator: true });
 
   const { actions: _actions, ...cardWithoutActions } = params.card;

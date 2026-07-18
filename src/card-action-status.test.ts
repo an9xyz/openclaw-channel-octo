@@ -1,6 +1,21 @@
 import { describe, expect, it } from "vitest";
 import { renderCardActionStatus } from "./card-action-status.js";
 
+/** Collect every `text` string in a rendered card, in-memory (single backslashes, no JSON escaping). */
+function collectText(node: unknown, acc: string[] = []): string[] {
+  if (Array.isArray(node)) {
+    for (const child of node) collectText(child, acc);
+    return acc;
+  }
+  if (node && typeof node === "object") {
+    for (const [key, value] of Object.entries(node)) {
+      if (key === "text" && typeof value === "string") acc.push(value);
+      else collectText(value, acc);
+    }
+  }
+  return acc;
+}
+
 describe("renderCardActionStatus", () => {
   it("保留原卡方案正文，冻结已选输入，移除 Submit 并追加选择状态", () => {
     const rendered = renderCardActionStatus({
@@ -46,5 +61,85 @@ describe("renderCardActionStatus", () => {
     expect(rendered.plain).toContain("选择一个方案");
     expect(rendered.plain).toContain("方案：C · 生态打法");
     expect(rendered.plain).not.toContain("可选操作：");
+  });
+
+  it("中和提交值里的 markdown 链接：回显不产生活链接(防钓鱼冒名)", () => {
+    const rendered = renderCardActionStatus({
+      card: {
+        type: "AdaptiveCard",
+        version: "1.5",
+        body: [
+          { type: "TextBlock", text: "填写理由", weight: "Bolder" },
+          { type: "Input.Text", id: "reason", label: "理由" },
+        ],
+        actions: [{ type: "Action.Submit", id: "submit", title: "提交" }],
+      },
+      plain: "填写理由\n可选操作：提交",
+      // A group member submits a value crafted to render as a bot-authored hyperlink.
+      inputs: { reason: "[Finance Portal](https://evil.example/login?token=abc)" },
+      operator: "Mallory",
+      actionLabel: "提交",
+      status: "completed",
+    } as never);
+
+    const texts = collectText(rendered.card).join("\n");
+    expect(texts).toContain("理由：");
+    // Credential-bearing path/query stripped like authored content (reduceUrlsInText keeps only
+    // scheme://registrable-domain — the deceptive part is the label, handled next).
+    expect(texts).not.toContain("/login");
+    expect(texts).not.toContain("token=abc");
+    // Opening/closing brackets escaped → CommonMark renders them literally: the "Finance Portal"
+    // label can no longer hide the evil destination behind a bot-authored hyperlink.
+    expect(texts).toContain("\\[Finance Portal\\]");
+    // The raw link markup that would linkify must not survive verbatim.
+    expect(texts).not.toContain("[Finance Portal](");
+    // Same property on the plain fallback.
+    expect(rendered.plain).not.toContain("[Finance Portal](");
+    expect(rendered.plain).not.toContain("token=abc");
+  });
+
+  it("中和 operator 显示名里的 markdown(显示名由用户自设)", () => {
+    const rendered = renderCardActionStatus({
+      card: {
+        type: "AdaptiveCard",
+        version: "1.5",
+        body: [{ type: "TextBlock", text: "选择方案" }],
+        actions: [{ type: "Action.Submit", id: "s", title: "确认" }],
+      },
+      plain: "选择方案",
+      inputs: {},
+      operator: "[admin](https://evil.example)",
+      actionLabel: "确认",
+      status: "processing",
+    } as never);
+
+    const texts = collectText(rendered.card).join("\n");
+    expect(texts).toContain("正在处理");
+    // The deceptive "admin" label link is broken (opening bracket escaped); the bare origin that
+    // remains is honest and visible, matching how authored content reduces URLs.
+    expect(texts).toContain("\\[admin\\]");
+    expect(texts).not.toContain("[admin](");
+  });
+
+  it("普通提交值与显示名不被加转义(无回归)", () => {
+    const rendered = renderCardActionStatus({
+      card: {
+        type: "AdaptiveCard",
+        version: "1.5",
+        body: [{ type: "Input.Text", id: "amount", label: "金额" }],
+        actions: [{ type: "Action.Submit", id: "s", title: "确认" }],
+      },
+      plain: "可选操作：确认",
+      inputs: { amount: "100" },
+      operator: "Alice",
+      actionLabel: "确认",
+      status: "completed",
+    } as never);
+
+    const texts = collectText(rendered.card).join("\n");
+    expect(texts).toContain("金额：100");
+    expect(texts).toContain("Alice 已选择");
+    // Clean values gain no backslash noise.
+    expect(texts).not.toContain("\\");
   });
 });
