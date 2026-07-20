@@ -13,6 +13,8 @@ description: Choose, create, and send Octo plain-text, display, or P2 submit-int
 
 Do not send a display card and an interactive card for the same content. Do not use P2 interaction merely to decorate an answer.
 
+Do not manage server limits yourself: author complete high-level blocks and let the tool enforce and degrade them. Never hand-truncate content or add "超出限制" / "省略 N 项" notices; if nothing fits, reply in plain text.
+
 ## Load only the needed reference
 
 - Before calling `octo_send_card`, or when handling its callback turn, read [references/interactive-submit.md](references/interactive-submit.md). This is mandatory for confirmations, approvals, menus, and forms.

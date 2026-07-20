@@ -71,6 +71,7 @@ The tool probes octo/v1 capabilities, degrades unsupported block types to safe t
 - Keep exactly one title and a compact first screen, normally 3–6 lines.
 - Use `columns` for a small top summary and `facts` for detail fields.
 - Put long process details or evidence in one `collapsible` block. Summarize reasoning stages; do not paste raw tool events, stack traces, long paths, or logs.
+- Do not pre-truncate content or add your own "省略 N 项" / "超出限制" / "超出服务端限制" notices. Pass the full set of high-level blocks; the tool enforces `max_nodes` / `max_depth` / `max_payload_bytes` recursively and degrades or drops to fit. If the content genuinely cannot fit as a card, reply in plain text instead of sending a hand-trimmed card annotated with a server-limit note.
 - Use no `group.style` for ordinary information. Use `emphasis` for a small neutral callout and `good`, `warning`, or `attention` only for a real status.
 - Use `copy` only for local clipboard content. It is not a confirmation button.
 - Keep URLs and all visible/fallback text non-sensitive. Hidden and copied content is still stored in the group-visible card JSON.
