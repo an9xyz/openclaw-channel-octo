@@ -1,10 +1,12 @@
-import { CARD_PROFILE, CARD_VERSION, MessageType } from "./types.js";
+import { CARD_PROFILE, CARD_VERSION, MessageType, type CardProfile } from "./types.js";
 
 /** Manifest-derived structural and payload limits shared by all card producers. */
 export interface CardLimits {
   maxNodes?: number;
   maxDepth?: number;
   maxPayloadBytes?: number;
+  maxInputTextBytes?: number;
+  maxInputsBytes?: number;
 }
 
 function positiveLimit(value: number | undefined): number | undefined {
@@ -39,10 +41,14 @@ export function cardMaxDepth(value: unknown, depth = 0, root = true): number {
 }
 
 /** UTF-8 size of the complete type-17 payload envelope, not just card JSON. */
-export function cardPayloadBytes(card: Record<string, unknown>, plain: string): number {
+export function cardPayloadBytes(
+  card: Record<string, unknown>,
+  plain: string,
+  profile: CardProfile = CARD_PROFILE,
+): number {
   return new TextEncoder().encode(JSON.stringify({
     type: MessageType.InteractiveCard,
-    profile: CARD_PROFILE,
+    profile,
     card_version: CARD_VERSION,
     card,
     plain,
@@ -53,12 +59,13 @@ export function cardFitsLimits(
   card: Record<string, unknown>,
   plain: string,
   limits: CardLimits | undefined,
+  profile: CardProfile = CARD_PROFILE,
 ): boolean {
   const maxNodes = positiveLimit(limits?.maxNodes);
   if (maxNodes !== undefined && countCardNodes(card) > maxNodes) return false;
   const maxDepth = positiveLimit(limits?.maxDepth);
   if (maxDepth !== undefined && cardMaxDepth(card) > maxDepth) return false;
   const maxPayloadBytes = positiveLimit(limits?.maxPayloadBytes);
-  if (maxPayloadBytes !== undefined && cardPayloadBytes(card, plain) > maxPayloadBytes) return false;
+  if (maxPayloadBytes !== undefined && cardPayloadBytes(card, plain, profile) > maxPayloadBytes) return false;
   return true;
 }

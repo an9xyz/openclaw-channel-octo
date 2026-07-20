@@ -155,18 +155,11 @@ When replying, always use the `channel_id` and `channel_type` from the received 
 
 ### Sending Cards (Interactive Card, payload.type=17)
 
-Do not overuse card messages. Plain text is the default. Use cards only when structure materially improves comprehension, such as weather, status, lists, comparisons, or detail fields; use plain text for ordinary chat, short answers, and follow-up replies.
+Card-specific guidance lives in the progressive `$octo-card-message` skill. Use it before any card work; it selects plain text, `octo_send_display_card` (octo/v1, no callback), or `octo_send_card` (octo/v2 `Action.Submit` with callback) and loads only the reference needed for that path.
 
-Interactive-card details are intentionally kept out of this main skill file. Before sending or editing `payload.type=17` messages, using `octo_send_display_card`, designing normal information cards, or touching agent progress cards, read [references/interactive-card-messages.md](references/interactive-card-messages.md). It contains the octo/v1/v2 boundary, branch availability, feature detection, DisplayBlock schema, normal-card visual rules, agent progress layout, transient edit envelope, and security guardrails.
+In particular, use `$octo-card-message` before asking for a confirmation, approval/rejection, menu choice, or short form. The P2 tool polls `card_action` automatically and resumes the originating conversation, but a verified click identifies the channel member only; it never grants business authority by itself.
 
-Hard rules to remember even before opening the reference:
-
-- Display cards (`payload.type=17`, `profile="octo/v1"`) are structured, non-callback output. Submit/click-back cards use `octo/v2` and require event polling.
-- The `octo_send_display_card` tool feature-detects, degrades, and fail-closed rejects on its own — just pass `{ title?, blocks[] }`. On the raw API path, feature-detect with `GET /v1/bot/card/profile`: `available:true, enabled:false` is an explicit disable; `available:false` (endpoint not deployed) sends only when `OCTO_CARD_MESSAGE_ENABLED=1`; `card_version` must match `1.5` exactly. Otherwise fall back to text.
-- Keep one title, a compact first screen, truthful `plain`, and no raw logs or secrets.
-- Normal information cards should be quiet IM content: avoid large `good/warning/attention` blocks, excessive Bolder headings, and strong CTA-looking copy buttons.
-- Agent progress cards use `metadata.octo_layout = "agent_progress_v1"` with `[ColumnSet, Container#timeline_detail]` only when those elements are supported. The reference defines the flat-card fallback.
-- `octo/v2` callback cards and `octo_send_card` are not delivered by the current release; they require an `octo/v2` producer plus callback consumer, which the display-card surface does not provide.
+The old [card reference](references/interactive-card-messages.md) is retained only as a compatibility pointer. Do not load the former mixed display/interactive/raw protocol guide for normal tool calls.
 
 ## Real-time Features
 

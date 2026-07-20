@@ -9,7 +9,7 @@
     "./skills"
   ],
   "contracts": {
-    "tools": ["octo_management", "octo_send_display_card"]
+    "tools": ["octo_management", "octo_send_display_card", "octo_send_card"]
   },
   "activation": {
     "onStartup": true
@@ -78,6 +78,10 @@
             "type": "boolean",
             "description": "When omitted or true, follow the server card capability gate; false force-disables the octo_send_display_card tool. Per-account values override the top-level value."
           },
+          "cardInteraction": {
+            "type": "boolean",
+            "description": "When omitted or true, follow the server octo/v2 card capability gate; false force-disables the octo_send_card tool and new interactive callback polling. Per-account values override the top-level value."
+          },
           "accounts": {
             "type": "object",
             "additionalProperties": {
@@ -135,6 +139,10 @@
                 "cardDisplay": {
                   "type": "boolean",
                   "description": "When omitted or true, follow the server card capability gate; false force-disables the octo_send_display_card tool. Per-account values override the top-level value."
+                },
+                "cardInteraction": {
+                  "type": "boolean",
+                  "description": "When omitted or true, follow the server octo/v2 card capability gate; false force-disables the octo_send_card tool and new interactive callback polling. Per-account values override the top-level value."
                 },
                 "onBehalfOf": {
                   "type": "string",

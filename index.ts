@@ -27,7 +27,8 @@ import { setOctoRuntime } from "./src/runtime.js";
 import { octoPlugin } from "./src/channel.js";
 import { createOctoManagementTools } from "./src/agent-tools.js";
 import { createDisplayCardTool } from "./src/card-display-tool.js";
-import { CHANNEL_ID, DISPLAY_CARD_TOOL_NAME } from "./src/constants.js";
+import { createInteractiveCardTool } from "./src/card-tool.js";
+import { CHANNEL_ID, DISPLAY_CARD_TOOL_NAME, INTERACTIVE_CARD_TOOL_NAME } from "./src/constants.js";
 import { bindCardRun, registerCardProgress } from "./src/card-progress.js";
 
 // ---------------------------------------------------------------------------
@@ -159,6 +160,22 @@ export default defineBundledChannelEntry({
         });
       },
       { names: [DISPLAY_CARD_TOOL_NAME] },
+    );
+
+    api.registerTool(
+      (ctx: OpenClawPluginToolContext) => {
+        const cfg = ctx.getRuntimeConfig?.() ?? ctx.runtimeConfig ?? ctx.config;
+        if (!cfg) return null;
+        return createInteractiveCardTool({
+          cfg,
+          agentAccountId: ctx.agentAccountId,
+          agentId: ctx.agentId,
+          sessionKey: ctx.sessionKey,
+          deliveryContext: ctx.deliveryContext,
+          messageChannel: ctx.messageChannel,
+        });
+      },
+      { names: [INTERACTIVE_CARD_TOOL_NAME] },
     );
 
     // Manual setOctoRuntime + registerChannel — kept as a defensive call even

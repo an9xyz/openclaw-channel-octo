@@ -4,6 +4,7 @@ import { OCTO_CARD_LAYOUTS } from "./card-render.js";
 import {
   setCardContext,
   finalizeCard,
+  finalizeCardWithResponse,
   registerCardProgress,
   bindCardRun,
   _resetCardProgressForTests,
@@ -250,6 +251,50 @@ describe("card-progress 状态机 + hook + 节流", () => {
     setCardContext("s5", { apiUrl: "https://a5.test", botToken: "y", channelId: "g", channelType: ChannelType.Group });
     await finalizeCard("s5", { success: true });
     expect(calls.length).toBe(0);
+  });
+
+  it("finalizeCardWithResponse edits the existing progress message into one terminal response", async () => {
+    const { fn, calls } = mockFetch();
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi();
+    setCardContext("merged-final", {
+      apiUrl: "https://merge.test",
+      botToken: "bf",
+      channelId: "g1",
+      channelType: ChannelType.Group,
+    });
+    handlers.before_tool_call({ toolName: "read" }, { sessionKey: "merged-final" });
+    await vi.advanceTimersByTimeAsync(900);
+    calls.length = 0;
+
+    const merged = await finalizeCardWithResponse(
+      "merged-final",
+      "结论\n\n渠道 B 的下降主要来自权益认知不足。",
+    );
+
+    expect(merged).toBe(true);
+    const edits = calls.filter((call) => call.url.includes("/message/edit"));
+    expect(edits).toHaveLength(1);
+    const env = JSON.parse(edits[0].body!.content_edit as string);
+    expect(env.transient).toBeUndefined();
+    expect(progressCardText(env.card)).toContain("渠道 B 的下降主要来自权益认知不足");
+    calls.length = 0;
+    await finalizeCard("merged-final", { success: true });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("finalizeCardWithResponse returns false when no progress message was sent", async () => {
+    const { fn, calls } = mockFetch();
+    global.fetch = fn as unknown as typeof fetch;
+    setCardContext("plain-final", {
+      apiUrl: "https://merge.test",
+      botToken: "bf",
+      channelId: "g1",
+      channelType: ChannelType.Group,
+    });
+
+    expect(await finalizeCardWithResponse("plain-final", "普通回答")).toBe(false);
+    expect(calls).toHaveLength(0);
   });
 
   it("P1: finalize 等待 in-flight 首帧 send,终态帧不丢失", async () => {

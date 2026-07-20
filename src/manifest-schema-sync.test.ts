@@ -34,7 +34,7 @@ describe("openclaw.plugin.json channelConfigs", () => {
     );
   });
 
-  it.each(["cardProgress", "cardDisplay"])(
+  it.each(["cardProgress", "cardDisplay", "cardInteraction"])(
     "%s description matches at top-level and per-account",
     (key) => {
       const manifestProps = manifest.channelConfigs.octo.schema.properties;

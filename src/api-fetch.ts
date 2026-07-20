@@ -3,12 +3,17 @@
  * These are used by inbound/outbound where the full OctoAPI class is not available.
  */
 
-import { ChannelType, MessageType, CARD_PROFILE, CARD_VERSION, type MentionEntity, type RichTextBlock, type SendMessageResult, type TargetCandidate } from "./types.js";
+import { ChannelType, MessageType, CARD_INTERACTIVE_PROFILE, CARD_PROFILE, CARD_VERSION, type CardProfile, type MentionEntity, type RichTextBlock, type SendMessageResult, type TargetCandidate } from "./types.js";
 import path from "path";
 import { open } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import type { BotEvent } from "./card-action.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+// Card-event short-poll requests run in a single sequential loop; without a bound a hung
+// /v1/bot/events (or its ack) would block all callback processing for the account until the OS
+// eventually drops the socket. Cap each request well under any reasonable poll cadence.
+const EVENTS_POLL_TIMEOUT_MS = 10_000;
 // Short timeout for the per-message mention_pref hot-path lookup. On a cache
 // miss this fires on the first message of every group every TTL window; before
 // the backend ships it 404s, and we must not stall the inbound pipeline for the
@@ -387,17 +392,36 @@ export async function sendRichTextMessage(params: {
  *   - `card` 由调用方组装为合法 AC1.5 JSON；schema 校验由服务端 `pkg/cardmsg` 权威，
  *     本函数只组包不校验。
  *   - `plain` 出站可附带（老客户端降级用），server 在 dispatch 出口权威重算覆盖。
- *   - `profile`/`card_version` 固定 `octo/v1`/`1.5`（Decision 10；不匹配 server 400）。
+ *   - `card_version` 固定 `1.5`；含任意 `Input.*`/`Action.Submit` 时 profile 自动为
+ *     `octo/v2`，否则使用调用方 profile 或缺省 `octo/v1`。
  *   - `onBehalfOf` 透传保证 persona-clone 身份一致（C3）；注意 OBO + type17 会被
  *     server 在 P1 拒绝（Decision 2b），故仅用于普通 bot 发卡场景。
  *   - 发卡前应先 `getCardProfile` feature-detect（D12）。
  */
+function cardContainsInteraction(value: unknown, seen = new WeakSet<object>()): boolean {
+  if (!value || typeof value !== "object") return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) return value.some((item) => cardContainsInteraction(item, seen));
+  const record = value as Record<string, unknown>;
+  if (typeof record.type === "string" && (
+    record.type.startsWith("Input.") || record.type === "Action.Submit"
+  )) return true;
+  return Object.values(record).some((item) => cardContainsInteraction(item, seen));
+}
+
+function resolveCardProfile(card: Record<string, unknown>, requested?: CardProfile): CardProfile {
+  return cardContainsInteraction(card) ? CARD_INTERACTIVE_PROFILE : (requested ?? CARD_PROFILE);
+}
+
 export async function sendCardMessage(params: {
   apiUrl: string;
   botToken: string;
   channelId: string;
   channelType: ChannelType;
   card: Record<string, unknown>;
+  /** 展示卡默认 octo/v1；Input.* / Action.Submit 自动升级 octo/v2。 */
+  profile?: CardProfile;
   plain?: string;
   mentionUids?: string[];
   mentionEntities?: MentionEntity[];
@@ -413,7 +437,7 @@ export async function sendCardMessage(params: {
   const payload: Record<string, unknown> = {
     type: MessageType.InteractiveCard,
     card: params.card,
-    profile: CARD_PROFILE,
+    profile: resolveCardProfile(params.card, params.profile),
     card_version: CARD_VERSION,
   };
   if (typeof params.plain === "string") {
@@ -462,6 +486,10 @@ export async function editCardMessage(params: {
   channelId: string;
   channelType: ChannelType;
   card: Record<string, unknown>;
+  /** 缺省 octo/v1；Input.* / Action.Submit 自动升级 octo/v2。 */
+  profile?: CardProfile;
+  /** 交互卡多帧编辑的单调序号；服务端拒绝旧帧/乱序帧。 */
+  cardSeq?: number;
   plain?: string;
   /** 进度中间帧标 true → D10 不进修订历史(避免 cap 20 被进度噪音刷屏);终态帧不带 → 进历史。 */
   transient?: boolean;
@@ -477,11 +505,17 @@ export async function editCardMessage(params: {
   const envelope: Record<string, unknown> = {
     type: MessageType.InteractiveCard,
     card: params.card,
-    profile: CARD_PROFILE,
+    profile: resolveCardProfile(params.card, params.profile),
     card_version: CARD_VERSION,
   };
   if (typeof params.plain === "string") {
     envelope.plain = params.plain;
+  }
+  if (params.cardSeq !== undefined) {
+    if (!Number.isSafeInteger(params.cardSeq) || params.cardSeq < 0) {
+      throw new Error("octo: cardSeq must be a non-negative safe integer");
+    }
+    envelope.card_seq = params.cardSeq;
   }
   // D10:transient 帧不进修订历史侧表(进度中间帧用,避免 cap 20 被刷屏)。
   if (params.transient) {
@@ -519,9 +553,9 @@ export interface CardProfileManifest {
   elements?: string[];
   inputs?: string[];
   /**
-   * 动作白名单(pkg/cardmsg 权威)。octo/v1 展示卡只消费本地/导航动作
-   * (`Action.ToggleVisibility`/`Action.CopyToClipboard`/`Action.OpenUrl`);回流 `Action.Submit`
-   * 属于 octo/v2 交互卡路径,不得放进展示卡 selectAction。
+   * 本地/导航动作白名单(pkg/cardmsg 权威):`Action.ToggleVisibility`/
+   * `Action.CopyToClipboard`/`Action.OpenUrl`。回流 `Action.Submit` 不在此数组中；它由
+   * `profiles` 包含 `octo/v2` 表示，也不得放进展示卡 selectAction。
    * 旧部署不返该字段(undefined) → 消费方保守视为不支持任何 action。
    */
   actions?: string[];
@@ -571,6 +605,43 @@ export async function getCardProfile(params: {
     ...(Array.isArray(raw.actions) ? { actions: (raw.actions as unknown[]).filter((e): e is string => typeof e === "string") } : {}),
     ...(raw.limits && typeof raw.limits === "object" ? { limits: raw.limits as Record<string, unknown> } : {}),
   };
+}
+
+/** Pull typed bot events strictly after the supplied cursor. This endpoint is short-polling. */
+export async function fetchBotEvents(params: {
+  apiUrl: string;
+  botToken: string;
+  sinceEventId?: number;
+  limit?: number;
+  signal?: AbortSignal;
+}): Promise<BotEvent[]> {
+  const response = await postJson<{ results?: BotEvent[] }>(
+    params.apiUrl,
+    params.botToken,
+    "/v1/bot/events",
+    {
+      event_id: params.sinceEventId ?? 0,
+      limit: Math.max(1, Math.min(100, Math.floor(params.limit ?? 20))),
+    },
+    params.signal ?? AbortSignal.timeout(EVENTS_POLL_TIMEOUT_MS),
+  );
+  return Array.isArray(response?.results) ? response.results : [];
+}
+
+/** Best-effort queue pruning after a card_action has been durably accepted locally. */
+export async function ackBotEvent(params: {
+  apiUrl: string;
+  botToken: string;
+  eventId: number;
+  signal?: AbortSignal;
+}): Promise<void> {
+  await postJson(
+    params.apiUrl,
+    params.botToken,
+    `/v1/bot/events/${params.eventId}/ack`,
+    {},
+    params.signal ?? AbortSignal.timeout(EVENTS_POLL_TIMEOUT_MS),
+  );
 }
 
 export async function sendTyping(params: {

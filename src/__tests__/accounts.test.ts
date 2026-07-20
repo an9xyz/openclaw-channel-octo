@@ -34,6 +34,7 @@ describe("resolveOctoAccount", () => {
           octo: {
             cardProgress: false,
             cardDisplay: false,
+            cardInteraction: false,
             accounts: {
               [MIXED_CASE_ID]: { botToken: "bf_cards_inherit" },
             },
@@ -45,6 +46,7 @@ describe("resolveOctoAccount", () => {
 
       expect(account.config.cardProgress).toBe(false);
       expect(account.config.cardDisplay).toBe(false);
+      expect(account.config.cardInteraction).toBe(false);
     });
 
     it("allows an account true to override a top-level false", () => {
@@ -53,11 +55,13 @@ describe("resolveOctoAccount", () => {
           octo: {
             cardProgress: false,
             cardDisplay: false,
+            cardInteraction: false,
             accounts: {
               [MIXED_CASE_ID]: {
                 botToken: "bf_cards_enable",
                 cardProgress: true,
                 cardDisplay: true,
+                cardInteraction: true,
               },
             },
           },
@@ -68,6 +72,7 @@ describe("resolveOctoAccount", () => {
 
       expect(account.config.cardProgress).toBe(true);
       expect(account.config.cardDisplay).toBe(true);
+      expect(account.config.cardInteraction).toBe(true);
     });
 
     it("allows an account false to override a top-level true", () => {
@@ -76,11 +81,13 @@ describe("resolveOctoAccount", () => {
           octo: {
             cardProgress: true,
             cardDisplay: true,
+            cardInteraction: true,
             accounts: {
               [MIXED_CASE_ID]: {
                 botToken: "bf_cards_disable",
                 cardProgress: false,
                 cardDisplay: false,
+                cardInteraction: false,
               },
             },
           },
@@ -91,6 +98,7 @@ describe("resolveOctoAccount", () => {
 
       expect(account.config.cardProgress).toBe(false);
       expect(account.config.cardDisplay).toBe(false);
+      expect(account.config.cardInteraction).toBe(false);
     });
   });
 
