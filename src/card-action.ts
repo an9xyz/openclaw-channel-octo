@@ -61,7 +61,15 @@ export function parseCardAction(event: BotEvent): CardAction | null {
   const inputs: Record<string, string> = {};
   if (data.inputs && typeof data.inputs === "object" && !Array.isArray(data.inputs)) {
     for (const [key, value] of Object.entries(data.inputs as Record<string, unknown>)) {
+      // The server contract serializes every submitted value as a string, but normalize a raw
+      // JSON number/boolean (e.g. an Input.Number / Input.Toggle value) to its string form rather
+      // than dropping it: a dropped field still passes validation (missing keys are allowed) and
+      // would reach the agent as silently incomplete input. `false` / `0` must normalize too, so
+      // this tests the type, not truthiness. Objects / arrays / null / non-finite numbers stay
+      // dropped as malformed or unsupported envelope shapes.
       if (typeof value === "string") inputs[key] = value;
+      else if (typeof value === "boolean") inputs[key] = String(value);
+      else if (typeof value === "number" && Number.isFinite(value)) inputs[key] = String(value);
     }
   }
 

@@ -104,7 +104,7 @@ Handle it as follows:
 4. Check business authorization before any privileged or irreversible operation.
 5. Perform only the selected, authorized action and report its actual outcome. Do not claim success merely because the card was clicked.
 
-All submitted values arrive as strings, including number, date, time, and toggle values. Parse and validate them for the business operation.
+All submitted values arrive as strings, including number, date, time, and toggle values. The adapter also normalizes any raw JSON number/boolean to its string form on receipt (`parseCardAction`), so a value never silently disappears even if the server ever serializes it non-string. Parse and validate them for the business operation.
 
 ## Security and authorization
 

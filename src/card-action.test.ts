@@ -46,7 +46,7 @@ describe("parseCardAction", () => {
     expect(parseCardAction(event({ event_data: { action_id: "approve" } }))).toBeNull();
   });
 
-  it("只接受 DM、群和 Thread channel_type，并剔除非字符串 inputs", () => {
+  it("接受 DM/群/Thread channel_type；把 number/boolean 提交值归一为字符串，丢弃复杂类型", () => {
     const parsed = parseCardAction(event({
       event_data: {
         message_id: "m1",
@@ -54,10 +54,12 @@ describe("parseCardAction", () => {
         channel_type: 1,
         action_id: "submit",
         operator_uid: "u1",
-        inputs: { text: "yes", invalid: 1 },
+        // number / boolean (incl. falsy 0 / false) normalize to their string form instead of
+        // silently vanishing; objects / arrays / null are dropped as malformed shapes.
+        inputs: { text: "yes", amount: 100, zero: 0, enabled: true, disabled: false, bad: { a: 1 }, arr: [1], nul: null },
       },
     }));
-    expect(parsed?.inputs).toEqual({ text: "yes" });
+    expect(parsed?.inputs).toEqual({ text: "yes", amount: "100", zero: "0", enabled: "true", disabled: "false" });
 
     expect(parseCardAction(event({
       event_data: {
