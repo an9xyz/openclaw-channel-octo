@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.0](https://github.com/Mininglamp-OSS/openclaw-channel-octo/compare/v1.0.19...v1.1.0) (2026-07-20)
+
+### Added
+- **交互卡片消息完整落地：展示卡 + Agent 进度卡 + octo/v2 回调卡**（#156 / #159 / #165）：本版把 InteractiveCard（`payload.type=17`）从无到有做成一条完整能力线，让 bot 能发结构化卡片而不只是纯文本。
+  - **展示卡（`octo/v1`，`octo_send_display_card` 工具）**：非交互的结构化输出——状态报告、键值摘要、三列 KPI/天气条、表格、可折叠详情、本地复制按钮、安全导航链接。工具自动做能力协商，服务端不支持的元素降级为纯文本，作者无需自己判断兼容性。
+  - **Agent 进度卡**：长任务运行时以进度卡展示执行阶段与工具调用，随执行 edit 帧更新，让用户看得到"在干什么、跑到哪"，而非只有一个 typing 指示器。
+  - **octo/v2 回调卡（`octo_send_card` 工具，#165）**：带 `Action.Submit` 按钮与 `text/number/date/time/toggle/choice` 输入的交互卡；按钮点击经服务端权威事件回流为**同一会话内新的、可信的 agent 轮次**。含 `/v1/bot/events` 短轮询（磁盘游标、进程重启后续跑，游标先落盘后 ack，崩溃至多重放不丢）、卡片 action 派发与 in-place 状态帧（处理中 / 完成 / 失败,含输入冻结与幂等 claim/complete/release）。
+  - **能力协商与服务端权威（D12）**：卡片元素/输入/actions 由 `GET /v1/bot/card/profile` 的 manifest 决定，`card_version` 精确匹配 `1.5`，`limits.*` 服务端权威并递归生效，ColumnSet/Table 等按需渲染，不支持则降级。
+- **账号级卡片开关（`cardProgress` / `cardDisplay` / `cardInteraction`，#159 / #165）**：进度卡、展示卡、交互卡可按 bot 独立关闭（顶层默认 + `accounts.<id>` 覆盖，与 `requireMention` 同款分层）。三态语义——只有显式 `false` 强制关，`true` / 省略都跟随服务端能力；只作收窄、不能强开，`card_version` 等 fail-closed 底线保留。开关同时作用于工具发现与执行两道关。
+
+### Fixed
+- **纯图片回合被误判为"未投递"**（#152）：agent 一个回合只发图片、不发文字时，OpenClaw core 认不出这是成功投递，把整回合判成 `non_deliverable_terminal_turn`。根因是出向 `extractToolSend` 返回的是 `target` 而非 core 识别的 canonical `to` 字段、结果里也没上浮媒体 URL，导致 core 的两个投递证据信号都拿不到。
+  - 修复：`extractToolSend` 返回 `{ to }`、发送结果顶层补 `mediaUrls`，让 core 的 `isMessagingToolSendAction` / `collectMessagingMediaUrlsFromToolResult` 正确认账。同时修掉 dispatch reject 兜底分支无条件清空 deliverBuffer 的问题——加 `!replySucceeded` 守卫，有缓冲的 block 文本时优先投递而非发矛盾的错误兜底，不再吞掉有效回复。
+- **历史注入不尊重会话重置（/new），穿透污染新会话**（#155）：用户 `/new` 重置会话后，注入的群历史仍会带入重置点之前的内容，污染新会话上下文。修复后历史注入以会话重置点为界，不再穿透。
+- **卡片链路安全加固**：交互卡的信任边界与脱敏做了系统性收敛——卡片文本 / data / facts 中的内嵌 URL 统一降级为 `scheme://<registrable-domain>`（扩到任意 scheme，堵非 http 凭据 URI 泄露）、工具名 label 与工具错误文本同样脱敏 + 截断、首帧 4xx fail-closed、提交表单值当作数据而非控制文本并按原卡输入 id 校验，消除进度卡与错误路径的泄露 sink。
+- **session 初始化 CAS 瞬时竞态导致的 inbound 失败**：对 core 的 session-init 冲突做重试，吸收该瞬时竞态。
+
+### Changed
+- **依赖 floor 提升到 openclaw >= 2026.6.9**：新增功能依赖 `getSessionEntry` 等 export，相应抬高 peer-dep 下限。
+
+### Internal
+- 抽出共享的卡片能力推导（`deriveCardCaps`），进度卡与展示卡复用同一能力判断，避免两处漂移。
+
 ## [1.0.19](https://github.com/Mininglamp-OSS/openclaw-channel-octo/compare/v1.0.18...v1.0.19) (2026-06-29)
 
 ### Added
