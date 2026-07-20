@@ -2639,6 +2639,7 @@ export async function handleInboundMessage(params: {
     botToken,
     channelId: replyChannelId,
     channelType: replyChannelType,
+    cardProgress: account.config.cardProgress,
     ...(effectiveOnBehalfOf ? { onBehalfOf: effectiveOnBehalfOf } : {}),
   });
 

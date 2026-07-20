@@ -101,6 +101,82 @@ describe("createDisplayCardTool 骨架", () => {
     } as DisplayToolParams)).toEqual([]);
   });
 
+  it("已知当前账号 cardDisplay:false 时 discovery 不注册工具", () => {
+    vi.mocked(resolveOctoAccount).mockReturnValue({
+      accountId: "default",
+      enabled: true,
+      configured: true,
+      config: {
+        botToken: "tok",
+        apiUrl: "https://api.test",
+        pollIntervalMs: 2000,
+        heartbeatIntervalMs: 30000,
+        cardDisplay: false,
+      },
+    } as never);
+
+    expect(createDisplayCardTool({
+      cfg: mockCfg,
+      agentAccountId: "default",
+      deliveryContext: CURRENT_DELIVERY,
+      messageChannel: "octo",
+    } as DisplayToolParams)).toEqual([]);
+  });
+
+  it("无当前账号上下文但只有一个配置账号时也按 cardDisplay:false 隐藏工具", () => {
+    vi.mocked(resolveOctoAccount).mockReturnValue({
+      accountId: "only-account",
+      enabled: true,
+      configured: true,
+      config: {
+        botToken: "tok",
+        apiUrl: "https://api.test",
+        pollIntervalMs: 2000,
+        heartbeatIntervalMs: 30000,
+        cardDisplay: false,
+      },
+    } as never);
+    vi.mocked(listOctoAccountIds).mockReturnValue(["only-account"]);
+
+    expect(createDisplayCardTool({ cfg: mockCfg } as DisplayToolParams)).toEqual([]);
+  });
+
+  it("多账号且 discovery 无法确定当前账号时,全部 cardDisplay:false 则隐藏工具", () => {
+    vi.mocked(listOctoAccountIds).mockReturnValue(["account-a", "account-b"]);
+    vi.mocked(resolveOctoAccount).mockImplementation(({ accountId }: { accountId?: string }) => ({
+      accountId: accountId ?? "default",
+      enabled: true,
+      configured: true,
+      config: {
+        botToken: `tok-${accountId}`,
+        apiUrl: "https://api.test",
+        pollIntervalMs: 2000,
+        heartbeatIntervalMs: 30000,
+        cardDisplay: false,
+      },
+    }) as never);
+
+    expect(createDisplayCardTool({ cfg: mockCfg } as DisplayToolParams)).toEqual([]);
+  });
+
+  it("多账号且 discovery 无法确定当前账号时,任一账号允许展示卡则保留工具", () => {
+    vi.mocked(listOctoAccountIds).mockReturnValue(["account-a", "account-b"]);
+    vi.mocked(resolveOctoAccount).mockImplementation(({ accountId }: { accountId?: string }) => ({
+      accountId: accountId ?? "default",
+      enabled: true,
+      configured: true,
+      config: {
+        botToken: `tok-${accountId}`,
+        apiUrl: "https://api.test",
+        pollIntervalMs: 2000,
+        heartbeatIntervalMs: 30000,
+        cardDisplay: accountId === "account-a" ? false : true,
+      },
+    }) as never);
+
+    expect(createDisplayCardTool({ cfg: mockCfg } as DisplayToolParams)).toHaveLength(1);
+  });
+
   it("tool 元数据:name=octo_send_display_card,description 涵盖『展示型』『不回流』", () => {
     const t = getTool();
     expect(t.name).toBe("octo_send_display_card");
@@ -173,6 +249,31 @@ describe("execute:发展示卡", () => {
     // 展示型 → 顶层无 actions
     expect(call.card).not.toHaveProperty("actions");
     expect(res.content[0].text).toContain("m1"); // 返回 message_id
+  });
+
+  it("execute 再检查热更新后的 cardDisplay:false,不探测 manifest 也不发送", async () => {
+    const tool = getTool();
+    vi.mocked(resolveOctoAccount).mockReturnValue({
+      accountId: "default",
+      enabled: true,
+      configured: true,
+      config: {
+        botToken: "tok",
+        apiUrl: "https://api.test",
+        pollIntervalMs: 2000,
+        heartbeatIntervalMs: 30000,
+        cardDisplay: false,
+      },
+    } as never);
+    vi.mocked(getCardProfile).mockClear();
+
+    const res = await tool.execute("display-disabled-after-discovery", {
+      blocks: [{ type: "text", text: "must use plain text" }],
+    });
+
+    expect(res.content[0].text).toMatch(/disabled|plain text/i);
+    expect(getCardProfile).not.toHaveBeenCalled();
+    expect(sendCardMessage).not.toHaveBeenCalled();
   });
 
   it("服务端成功响应缺 message_id 时保持稳定空值结果", async () => {

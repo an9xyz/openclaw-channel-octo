@@ -27,6 +27,73 @@ function buildCfg(accounts: Record<string, unknown>): unknown {
 }
 
 describe("resolveOctoAccount", () => {
+  describe("card feature switch inheritance", () => {
+    it("inherits top-level card switches when the account omits them", () => {
+      const cfg = {
+        channels: {
+          octo: {
+            cardProgress: false,
+            cardDisplay: false,
+            accounts: {
+              [MIXED_CASE_ID]: { botToken: "bf_cards_inherit" },
+            },
+          },
+        },
+      };
+
+      const account = resolveOctoAccount({ cfg: cfg as never, accountId: MIXED_CASE_ID });
+
+      expect(account.config.cardProgress).toBe(false);
+      expect(account.config.cardDisplay).toBe(false);
+    });
+
+    it("allows an account true to override a top-level false", () => {
+      const cfg = {
+        channels: {
+          octo: {
+            cardProgress: false,
+            cardDisplay: false,
+            accounts: {
+              [MIXED_CASE_ID]: {
+                botToken: "bf_cards_enable",
+                cardProgress: true,
+                cardDisplay: true,
+              },
+            },
+          },
+        },
+      };
+
+      const account = resolveOctoAccount({ cfg: cfg as never, accountId: MIXED_CASE_ID });
+
+      expect(account.config.cardProgress).toBe(true);
+      expect(account.config.cardDisplay).toBe(true);
+    });
+
+    it("allows an account false to override a top-level true", () => {
+      const cfg = {
+        channels: {
+          octo: {
+            cardProgress: true,
+            cardDisplay: true,
+            accounts: {
+              [MIXED_CASE_ID]: {
+                botToken: "bf_cards_disable",
+                cardProgress: false,
+                cardDisplay: false,
+              },
+            },
+          },
+        },
+      };
+
+      const account = resolveOctoAccount({ cfg: cfg as never, accountId: MIXED_CASE_ID });
+
+      expect(account.config.cardProgress).toBe(false);
+      expect(account.config.cardDisplay).toBe(false);
+    });
+  });
+
   describe("strict (case-sensitive) match — primary path", () => {
     it("returns account config when accountId matches the configured key exactly", () => {
       const cfg = buildCfg({
