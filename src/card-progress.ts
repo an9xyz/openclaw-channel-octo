@@ -72,7 +72,7 @@ const gateCache = new Map<string, boolean>();
  */
 const capsCache = new Map<string, CardCaps>();
 
-const FLUSH_DEBOUNCE_MS = 800;
+const FLUSH_DEBOUNCE_MS = 400;
 const EDIT_TIMEOUT_MS = 10_000;
 
 // 进度卡失败不影响主回复流程 —— 仅告警,不抛。
@@ -220,7 +220,7 @@ async function runFlush(sessionKey: string, entry: CardEntry): Promise<void> {
         return;
       }
       if (gate === null) {
-        // 瞬时探测失败:清 dirty 且不自动重排,避免端点故障期每 ~800ms 一次探测风暴。
+        // 瞬时探测失败:清 dirty 且不自动重排,避免端点故障期每个 debounce 周期一次探测风暴。
         // 累积的 steps 仍在 entry 上,下个工具事件会重新 scheduleFlush 并重探。
         entry.dirty = false;
         return;
