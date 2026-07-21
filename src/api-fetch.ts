@@ -682,6 +682,45 @@ export async function sendHeartbeat(params: {
   await postJson(params.apiUrl, params.botToken, "/v1/bot/heartbeat", {}, params.signal);
 }
 
+/** Final state returned by POST /v1/bot/message/reaction. */
+export interface BotReactionResult {
+  message_id: string;
+  channel_id: string;
+  channel_type: number;
+  emoji: string;
+  action: string;
+  seq: number;
+  is_deleted: number;
+}
+
+/**
+ * Add or remove an emoji reaction on a message (as-bot, idempotent).
+ *
+ * `remove=false` (default) → ensure the reaction is present (action="add");
+ * `remove=true` → ensure it is absent (action="remove"). The endpoint is
+ * idempotent, so a retried add never cancels a live reaction the way a toggle
+ * would — safe to retry on timeout. Maps directly from the OpenClaw
+ * ReactionParams.remove flag.
+ */
+export async function sendReaction(params: {
+  apiUrl: string;
+  botToken: string;
+  channelId: string;
+  channelType: ChannelType;
+  messageId: string;
+  emoji: string;
+  remove?: boolean;
+  signal?: AbortSignal;
+}): Promise<BotReactionResult | undefined> {
+  return postJson<BotReactionResult>(params.apiUrl, params.botToken, "/v1/bot/message/reaction", {
+    channel_id: params.channelId,
+    channel_type: params.channelType,
+    message_id: params.messageId,
+    emoji: params.emoji,
+    action: params.remove ? "remove" : "add",
+  }, params.signal);
+}
+
 
 
 export async function registerBot(params: {

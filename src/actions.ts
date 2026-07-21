@@ -12,6 +12,7 @@ import {
   sendMessage,
   sendMediaMessage,
   sendRichTextMessage,
+  sendReaction,
   getChannelMessages,
   getGroupMembers,
   fetchBotGroups,
@@ -19,6 +20,7 @@ import {
   getGroupMd,
   updateGroupMd,
 } from "./api-fetch.js";
+import { readReactionParams, resolveReactionMessageId } from "openclaw/plugin-sdk/channel-actions";
 import { uploadAndSendMedia, uploadMedia, resolveRichTextContent, type UploadedMedia } from "./inbound.js";
 import { buildEntitiesFromFallback, parseStructuredMentions, convertStructuredMentions, sanitizeOutboundMentions } from "./mention-utils.js";
 import { getKnownGroupIds, extractParentGroupNo, isThreadChannelId } from "./group-md.js";
@@ -257,11 +259,12 @@ export async function handleOctoMessageAction(params: {
   groupMdCache?: Map<string, { content: string; version: number }>;
   currentChannelId?: string;
   threadId?: string | number | null;
+  currentMessageId?: string | number;
   requesterSenderId?: string;
   accountId?: string;
   log?: LogSink;
 }): Promise<MessageActionResult> {
-  const { action, args, apiUrl, botToken, memberMap, uidToNameMap, groupMdCache, currentChannelId, threadId, requesterSenderId, accountId, log } =
+  const { action, args, apiUrl, botToken, memberMap, uidToNameMap, groupMdCache, currentChannelId, threadId, currentMessageId, requesterSenderId, accountId, log } =
     params;
 
   if (!botToken) {
@@ -271,6 +274,8 @@ export async function handleOctoMessageAction(params: {
   switch (action) {
     case "send":
       return handleSend({ args, apiUrl, botToken, memberMap, uidToNameMap, currentChannelId, threadId, log });
+    case "react":
+      return handleReact({ args, apiUrl, botToken, currentChannelId, currentMessageId, log });
     case "read":
       return handleRead({ args, apiUrl, botToken, uidToNameMap, currentChannelId, requesterSenderId, accountId, log });
     case "search":
@@ -289,6 +294,84 @@ export async function handleOctoMessageAction(params: {
     // 统一通过 octo_management tool 入口，不走 message action
     default:
       return { ok: false, error: `Unknown action: ${action}` };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// react — add/remove an emoji reaction on a message (as-bot, idempotent)
+// ---------------------------------------------------------------------------
+
+async function handleReact(params: {
+  args: Record<string, unknown>;
+  apiUrl: string;
+  botToken: string;
+  currentChannelId?: string;
+  currentMessageId?: string | number;
+  log?: LogSink;
+}): Promise<MessageActionResult> {
+  const { args, apiUrl, botToken, currentChannelId, currentMessageId, log } = params;
+
+  // Target message: an explicit `messageId` arg wins, else the message currently
+  // being handled — the framework threads it via toolContext.currentMessageId.
+  // This is the "react to the message I'm about to reply to" default.
+  const resolvedMessageId = resolveReactionMessageId({
+    args,
+    ...(currentMessageId != null ? { toolContext: { currentMessageId } } : {}),
+  });
+  const messageId = resolvedMessageId != null ? String(resolvedMessageId).trim() : "";
+  if (!messageId) {
+    return { ok: false, error: "react: no target message — pass `messageId`, or react from within a message context" };
+  }
+
+  // Emoji + add/remove. readReactionParams validates the shape and normalizes
+  // `remove` (defaults to false = add).
+  let reaction: { emoji: string; remove: boolean; isEmpty: boolean };
+  try {
+    reaction = readReactionParams(args, { removeErrorMessage: "react: `remove` must be a boolean" });
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+  if (reaction.isEmpty || !reaction.emoji.trim()) {
+    return { ok: false, error: "react: `emoji` is required" };
+  }
+
+  // The reaction lands on the channel the message lives in — the current
+  // conversation unless the agent explicitly names a `target`. currentChannelId
+  // already encodes any thread suffix (groupNo____shortId), so parseTarget
+  // yields the correct CommunityTopic/Group/DM type without a separate merge.
+  const targetRef = (args.target as string | undefined)?.trim() || currentChannelId;
+  if (!targetRef || !stripAllChannelPrefixes(targetRef).trim()) {
+    return { ok: false, error: "react: could not resolve the channel (no target and no current channel)" };
+  }
+  const { channelId, channelType } = parseTarget(targetRef, currentChannelId, getKnownGroupIds());
+
+  try {
+    const result = await sendReaction({
+      apiUrl,
+      botToken,
+      channelId,
+      channelType,
+      messageId,
+      emoji: reaction.emoji,
+      remove: reaction.remove,
+    });
+    log?.info?.(
+      `octo: [react] ${reaction.remove ? "removed" : "added"} ${reaction.emoji} on ${messageId} in ${channelId}`,
+    );
+    return {
+      ok: true,
+      data: {
+        messageId,
+        channelId,
+        emoji: reaction.emoji,
+        action: reaction.remove ? "remove" : "add",
+        isDeleted: result?.is_deleted ?? (reaction.remove ? 1 : 0),
+      },
+    };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    log?.warn?.(`octo: [react] failed on ${messageId}: ${msg}`);
+    return { ok: false, error: msg };
   }
 }
 

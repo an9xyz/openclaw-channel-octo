@@ -137,6 +137,116 @@ describe("handleOctoMessageAction", () => {
   });
 
   // -----------------------------------------------------------------------
+  // react action — add/remove an emoji reaction (as-bot, idempotent)
+  // -----------------------------------------------------------------------
+  describe("react", () => {
+    it("adds a reaction to an explicit messageId in a group target", async () => {
+      let body: any = null;
+      globalThis.fetch = mockFetch({
+        "/v1/bot/message/reaction": async (_url, init) => {
+          body = JSON.parse(init?.body as string);
+          return jsonResponse({ message_id: "777", channel_id: "chan123", channel_type: ChannelType.Group, emoji: "👀", action: "add", seq: 3, is_deleted: 0 });
+        },
+      });
+
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
+        action: "react",
+        args: { target: "group:chan123", messageId: "777", emoji: "👀" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+      });
+
+      expect(result.ok).toBe(true);
+      expect(body.channel_id).toBe("chan123");
+      expect(body.channel_type).toBe(ChannelType.Group);
+      expect(body.message_id).toBe("777");
+      expect(body.emoji).toBe("👀");
+      expect(body.action).toBe("add");
+      expect((result.data as any).isDeleted).toBe(0);
+    });
+
+    it("defaults the target message to the current message being handled", async () => {
+      let body: any = null;
+      globalThis.fetch = mockFetch({
+        "/v1/bot/message/reaction": async (_url, init) => {
+          body = JSON.parse(init?.body as string);
+          return jsonResponse({ is_deleted: 0 });
+        },
+      });
+
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
+        action: "react",
+        args: { emoji: "✅" }, // no explicit messageId/target
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: "group:chan123",
+        currentMessageId: "888",
+      });
+
+      expect(result.ok).toBe(true);
+      expect(body.message_id).toBe("888");
+      expect(body.channel_id).toBe("chan123");
+      expect(body.action).toBe("add");
+    });
+
+    it("maps remove:true to action=remove", async () => {
+      let body: any = null;
+      globalThis.fetch = mockFetch({
+        "/v1/bot/message/reaction": async (_url, init) => {
+          body = JSON.parse(init?.body as string);
+          return jsonResponse({ is_deleted: 1 });
+        },
+      });
+
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
+        action: "react",
+        args: { target: "group:chan123", messageId: "777", emoji: "👀", remove: true },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+      });
+
+      expect(result.ok).toBe(true);
+      expect(body.action).toBe("remove");
+      expect((result.data as any).isDeleted).toBe(1);
+    });
+
+    it("rejects a missing emoji without calling the API", async () => {
+      const fetchSpy = mockFetch({});
+      globalThis.fetch = fetchSpy;
+
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
+        action: "react",
+        args: { target: "group:chan123", messageId: "777" }, // no emoji
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+      });
+
+      expect(result.ok).toBe(false);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it("rejects when no target message can be resolved", async () => {
+      const fetchSpy = mockFetch({});
+      globalThis.fetch = fetchSpy;
+
+      const { handleOctoMessageAction } = await import("./actions.js");
+      const result = await handleOctoMessageAction({
+        action: "react",
+        args: { target: "group:chan123", emoji: "👀" }, // no messageId, no currentMessageId
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+      });
+
+      expect(result.ok).toBe(false);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  // -----------------------------------------------------------------------
   // #51 — messageId / mediaMessageIds propagation in toolResult.data
   //   When Octo API returns SendMessageResult, the handler must surface
   //   message_id back to the LLM via toolResult.data so the agent can

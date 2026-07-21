@@ -470,7 +470,7 @@ function getAvailableActions(cfg: any): string[] {
   } catch {
     return [];
   }
-  return ["send", "read", "search"];
+  return ["send", "read", "search", "react"];
 }
 
 const meta = {
@@ -655,7 +655,10 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
   capabilities: {
     chatTypes: ["direct", "group"],
     media: true,
-    reactions: false,
+    // Enables the `react` action on the shared message tool (agent-driven
+    // reactions) and lets the framework's ack-reaction machinery drive the
+    // Octo reaction primitive. Server enforces membership/visibility/text-only.
+    reactions: true,
     threads: true,
   },
   reload: { configPrefixes: [`channels.${CHANNEL_ID}`] },
@@ -802,6 +805,9 @@ export const octoPlugin: ChannelPlugin<ResolvedOctoAccount> = {
         groupMdCache,
         currentChannelId: ctx.toolContext?.currentChannelId ?? undefined,
         threadId: ctx.toolContext?.threadId ?? ctx.params?.threadId ?? undefined,
+        // Target message for the `react` action — the framework surfaces the
+        // message currently being handled here (resolveReactionMessageId reads it).
+        currentMessageId: ctx.toolContext?.currentMessageId ?? undefined,
         requesterSenderId: ctx.requesterSenderId ?? undefined,
         accountId,
         log: ctx.log,
