@@ -20,7 +20,15 @@ const isReplyPayloadNonTerminalToolErrorWarning =
     ? replyPayloadCompat.isReplyPayloadNonTerminalToolErrorWarning
     : undefined;
 const resolveSendableOutboundReplyParts = replyPayloadSdk.resolveSendableOutboundReplyParts;
-import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson, sendMediaMessage, inferContentType, ensureTextCharset, parseImageDimensions, parseImageDimensionsFromFile, getUploadPresign, uploadFileToPresignedUrl, fetchUserInfo } from "./api-fetch.js";
+import { sendMessage, sendReadReceipt, sendTyping, sendReaction, getChannelMessages, getGroupMembers, getGroupMd, postJson, sendMediaMessage, inferContentType, ensureTextCharset, parseImageDimensions, parseImageDimensionsFromFile, getUploadPresign, uploadFileToPresignedUrl, fetchUserInfo } from "./api-fetch.js";
+import {
+  resolveAckReaction,
+  shouldAckReaction,
+  createAckReactionHandle,
+  removeAckReactionHandleAfterReply,
+  type AckReactionHandle,
+  type AckReactionScope,
+} from "openclaw/plugin-sdk/channel-feedback";
 import type { GroupMember } from "./api-fetch.js";
 import { getMentionPrefFromCache, invalidateMentionPref } from "./mention-prefs.js";
 import { normalizeAccountId } from "./account-id.js";
@@ -1497,6 +1505,78 @@ export function segmentHistoryEntries(params: {
   };
 }
 
+/**
+ * Build the Discord-style "ack reaction" (👀 before reply) for an inbound
+ * message, or null when it should not fire.
+ *
+ * Opt-in: activates ONLY when the operator has set `ackReactionScope` for octo
+ * (account-level wins over channel-level) to a value other than "off"/"none".
+ * This keeps upgrading the plugin from silently reacting to every mention. The
+ * emoji comes from a configured `ackReaction` (account/channel/global/identity)
+ * or the SDK default 👀. `ackReactionScope` gates direct/group/mention exactly
+ * like every other OpenClaw channel.
+ *
+ * Extracted from handleInboundMessage so the gating + primitive wiring is unit
+ * testable (that function has no full harness). Fail-open: never throws — a bad
+ * config or a reaction-send error resolves to null / a warn log.
+ */
+export function maybeCreateAckReaction(params: {
+  config: OpenClawConfig;
+  agentId: string;
+  accountId?: string;
+  accountConfig: { ackReactionScope?: AckReactionScope };
+  isGroup: boolean;
+  isMentioned: boolean;
+  requireMention: boolean;
+  messageId?: string;
+  apiUrl: string;
+  botToken: string;
+  channelId: string;
+  channelType: ChannelType;
+  log?: ChannelLogSink;
+}): AckReactionHandle | null {
+  if (!params.messageId) return null;
+  const scope: AckReactionScope | undefined =
+    params.accountConfig.ackReactionScope
+    ?? (params.config.channels as { octo?: { ackReactionScope?: AckReactionScope } } | undefined)?.octo?.ackReactionScope;
+  if (!scope || scope === "off" || scope === "none") return null; // opt-in + explicit disable
+  try {
+    if (
+      !shouldAckReaction({
+        scope,
+        isDirect: !params.isGroup,
+        isGroup: params.isGroup,
+        isMentionableGroup: params.isGroup,
+        requireMention: params.requireMention,
+        canDetectMention: true,
+        effectiveWasMentioned: params.isMentioned,
+      })
+    ) {
+      return null;
+    }
+    const emoji = resolveAckReaction(params.config, params.agentId, {
+      channel: CHANNEL_ID,
+      accountId: params.accountId,
+    });
+    if (!emoji) return null;
+    const ackMsgId = String(params.messageId);
+    const { apiUrl, botToken, channelId, channelType, log } = params;
+    const handle = createAckReactionHandle({
+      ackReactionValue: emoji,
+      send: () =>
+        sendReaction({ apiUrl, botToken, channelId, channelType, messageId: ackMsgId, emoji, remove: false }).then(() => {}),
+      remove: () =>
+        sendReaction({ apiUrl, botToken, channelId, channelType, messageId: ackMsgId, emoji, remove: true }).then(() => {}),
+      onSendError: (err) => log?.warn?.(`octo: [ack-react] send failed: ${String(err)}`),
+    });
+    if (handle) log?.info?.(`octo: [ack-react] ${emoji} on ${ackMsgId} (channel=${channelId})`);
+    return handle;
+  } catch (err) {
+    params.log?.warn?.(`octo: [ack-react] setup failed (ignored): ${String(err)}`);
+    return null;
+  }
+}
+
 export async function handleInboundMessage(params: {
   account: ResolvedOctoAccount;
   message: BotMessage;
@@ -2670,6 +2750,28 @@ export async function handleInboundMessage(params: {
       .catch((err) => log?.error?.(`octo: typing failed: ${String(err)}`));
   }
 
+  // --- Ack reaction (Discord-style 👀 before reply) ---
+  // Opt-in + fail-open. See maybeCreateAckReaction: null unless the operator has
+  // set `ackReactionScope` for octo (account/channel), never throws. Skipped for
+  // OBO v2 (the reply is attributed to the grantor, not the bot).
+  const ackHandle: AckReactionHandle | null = isOBOv2
+    ? null
+    : maybeCreateAckReaction({
+        config,
+        agentId: route.agentId,
+        accountId: account.accountId,
+        accountConfig: account.config as { ackReactionScope?: AckReactionScope },
+        isGroup,
+        isMentioned,
+        requireMention: accountRequiresMention,
+        messageId: message.message_id,
+        apiUrl,
+        botToken,
+        channelId: replyChannelId,
+        channelType: replyChannelType,
+        log,
+      });
+
   // Keep sending typing indicator while AI is processing
   const typingInterval = setInterval(() => {
     sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType, ...(effectiveOnBehalfOf ? { onBehalfOf: effectiveOnBehalfOf } : {}) }).catch(() => {});
@@ -3099,6 +3201,20 @@ export async function handleInboundMessage(params: {
     // 波 B:收尾进度卡(终态帧 + 清理);fire-and-forget，不阻塞 dispatch 结束/会话释放。
     // finalizeCard 内部同步删 Map(立即释放关联),终态 edit 后台异步发送。
     void finalizeCard(route.sessionKey, { success: replySucceeded });
+    // Remove the ack reaction now the reply has settled (fire-and-forget,
+    // fail-open). No-op when ack was never sent. The SDK wrapper only removes
+    // once the original send resolved, so a failed ack send won't try to remove.
+    if (ackHandle) {
+      try {
+        removeAckReactionHandleAfterReply({
+          removeAfterReply: true,
+          ackReaction: ackHandle,
+          onError: (err) => log?.warn?.(`octo: [ack-react] remove failed: ${String(err)}`),
+        });
+      } catch (err) {
+        log?.warn?.(`octo: [ack-react] cleanup failed (ignored): ${String(err)}`);
+      }
+    }
     // Safety net: clean up pending inbound context in case the hook didn't fire
     pendingInboundContext.delete(route.sessionKey);
 
