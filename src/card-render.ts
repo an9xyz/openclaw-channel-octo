@@ -490,7 +490,7 @@ function maxVisibleSteps(caps: CardCaps | undefined): number {
 
 /**
  * 单步 → RichTextBlock 的多段 inlines(供 buildDisplayCard 的 rich block 使用):
- *   状态图标 | label(Bolder) | :摘要 | · 耗时/— 错误详情(good/attention 着色)
+ *   状态图标 | label(subtle) | :摘要 | · 耗时/— 错误详情(good/attention 着色)
  * 段拼接后与 `stepLine(step)` 输出完全一致 —— 保证 plain 兜底不变,且降级到 TextBlock 时视觉等价。
  */
 function stepSegments(step: CardStep): RichSegment[] {
@@ -500,7 +500,7 @@ function stepSegments(step: CardStep): RichSegment[] {
   if (step.status === "running") {
     return [
       { text: "⏳ " },
-      { text: label, bold: true },
+      { text: label, subtle: true },
       ...(sum ? [{ text: ": " }, { text: sum, fontType: "Monospace" as const }] : []),
     ];
   }
@@ -508,7 +508,7 @@ function stepSegments(step: CardStep): RichSegment[] {
     const detail = sanitizeErrorText(step.error);
     const segs: RichSegment[] = [
       { text: "❌ " },
-      { text: label, bold: true },
+      { text: label, subtle: true },
       ...(sum ? [{ text: ": " }, { text: sum, fontType: "Monospace" as const }] : []),
     ];
     if (detail) segs.push({ text: ` — ${detail}`, color: "attention" });
@@ -517,7 +517,7 @@ function stepSegments(step: CardStep): RichSegment[] {
   const dur = fmtDuration(step.durationMs);
   const segs: RichSegment[] = [
     { text: `${icon} ` },
-    { text: label, bold: true },
+    { text: label, subtle: true },
     ...(sum ? [{ text: ": " }, { text: sum, fontType: "Monospace" as const }] : []),
   ];
   if (dur) segs.push({ text: ` · ${dur}`, color: "good" });
@@ -541,7 +541,7 @@ function groupSegments(group: CardStep[]): RichSegment[] {
   const lastSum = last.summary ? last.summary : "";
   const segs: RichSegment[] = [
     { text: `${icon} ` },
-    { text: label, bold: true },
+    { text: label, subtle: true },
     { text: ` × ${group.length}` },
   ];
   if (dur) segs.push({ text: ` · total ${dur}`, color: "good" });
