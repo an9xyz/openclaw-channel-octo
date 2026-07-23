@@ -508,6 +508,16 @@ describe("renderProgressCard", () => {
     expect(progressHeaderText(card)).toContain("✅ 已完成 · 1 步 · 2.5s");
   });
 
+  it("yield 暂停与恢复使用短状态文案", () => {
+    const paused = renderProgressCard({ phase: "paused", steps: [] });
+    const resuming = renderProgressCard({ phase: "resuming", steps: [] });
+    const expired = renderProgressCard({ phase: "expired", steps: [] });
+
+    expect(progressHeaderText(paused.card)).toBe("⏸️ 等待任务结果");
+    expect(progressHeaderText(resuming.card)).toBe("🤖 正在整理结果");
+    expect(progressHeaderText(expired.card)).toBe("⏱️ 等待超时");
+  });
+
   it("error 收尾", () => {
     const { card } = renderProgressCard({ phase: "error", steps: [], errorText: "超时" });
     expect(progressHeaderText(card)).toContain("⚠️ 已中断");
@@ -766,6 +776,23 @@ describe("cardSupports / CardCaps 渲染协商(波 C)", () => {
       steps: [{ tool: "__thinking__", status: "running" }],
     });
     expect(progressDetailText(running.card)).toContain("⏳ 思考");
+  });
+
+  it("子任务等待作为独立明细展示,不能误算成工具耗时", () => {
+    const { card, plain } = renderProgressCard({
+      phase: "done",
+      elapsedMs: 67_300,
+      steps: [
+        { tool: "__thinking__", status: "done", durationMs: 2_000 },
+        { tool: "sessions_spawn", status: "done", durationMs: 50 },
+        { tool: "sessions_yield", status: "done", durationMs: 10 },
+        { tool: "__subagent_wait__", status: "done", durationMs: 65_000 },
+      ],
+    });
+
+    expect(progressDetailText(card)).toContain("⏸️ 等待子任务 · 65.0s");
+    expect(plain).toContain("任务过程 · 思考 1 · 工具 2 · 等待 1 · 4 步");
+    expect(plain).not.toContain("工具 3");
   });
 
   it("P1-g: 连续 thinking done 触发同类合并 → 💭 思考 × N", () => {

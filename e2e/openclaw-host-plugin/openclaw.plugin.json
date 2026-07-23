@@ -1,0 +1,18 @@
+{
+  "id": "octo-host-e2e",
+  "name": "Octo Host E2E Bridge",
+  "version": "0.0.0",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "gatewayMethodDispatch": [
+      "authenticated-request"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
