@@ -1,0 +1,377 @@
+/**
+ * Test-only OpenClaw plugin. It injects a synthetic Octo DM into the real
+ * adapter so the host, sessions_spawn/yield lifecycle, and Octo HTTP edits are
+ * all exercised without requiring a second human/bot account to send inbound.
+ * A loopback OpenAI-compatible provider scripts only the model outputs; host
+ * tool execution, subagent scheduling, lifecycle, and channel I/O stay real.
+ *
+ * Install beside the active plugin:
+ *   ~/.openclaw-dev/extensions/octo-host-e2e
+ *
+ * Never ship this directory in the octo package. The runner enables it only
+ * for the duration of an explicit container E2E and removes it afterwards.
+ */
+import { resolveOctoAccount } from "../octo/dist/src/accounts.js";
+import { handleInboundMessage } from "../octo/dist/src/inbound.js";
+import { setOctoRuntime } from "../octo/dist/src/runtime.js";
+import { ChannelType, MessageType } from "../octo/dist/src/types.js";
+import fs from "node:fs";
+import http from "node:http";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+
+const SESSION_PREFIX = "agent:main:octo-host-e2e:";
+const PROVIDER = "octo-e2e";
+const MODEL = "scripted";
+const MODEL_REF = `${PROVIDER}/${MODEL}`;
+const MODEL_PORT = 19123;
+const REQUEST_DIR = "/tmp/octo-host-e2e";
+const EDIT_LOG = `${REQUEST_DIR}/card-edits.jsonl`;
+const MODEL_SERVER = Symbol.for("octo.host-e2e.model-server");
+const EDIT_OBSERVER = Symbol.for("octo.host-e2e.edit-observer");
+
+function ensureEditObserver(api) {
+  if (globalThis[EDIT_OBSERVER] || typeof globalThis.fetch !== "function") return;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const response = await originalFetch(input, init);
+    const url = typeof input === "string" || input instanceof URL
+      ? String(input)
+      : input?.url ?? "";
+    if (url.endsWith("/v1/bot/message/edit") && typeof init?.body === "string") {
+      try {
+        const request = JSON.parse(init.body);
+        const envelope = JSON.parse(request.content_edit);
+        fs.mkdirSync(REQUEST_DIR, { recursive: true });
+        fs.appendFileSync(EDIT_LOG, JSON.stringify({
+          timestampMs: Date.now(),
+          messageId: String(request.message_id ?? ""),
+          status: response.status,
+          ok: response.ok,
+          transient: envelope.transient === true,
+          plain: typeof envelope.plain === "string" ? envelope.plain : "",
+        }) + "\n");
+      } catch (error) {
+        api.logger.warn(`octo-host-e2e edit observer: ${error}`);
+      }
+    }
+    return response;
+  };
+  globalThis[EDIT_OBSERVER] = true;
+}
+
+function contentText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((part) => typeof part?.text === "string" ? part.text : "").join("\n");
+}
+
+function scriptedReply(body) {
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  const allText = messages.map((message) => contentText(message?.content)).join("\n");
+  const marker = allText.match(/(?:CHILD|PARENT)_E2E_OK:([0-9a-f-]{36})/i)?.[1] ??
+    allText.match(/OpenClaw host E2E marker: ([0-9a-f-]{36})/i)?.[1] ??
+    allText.match(/Ordinary user follow-up for ([0-9a-f-]{36})/i)?.[1];
+  if (!marker) return { text: "E2E_SCRIPT_ERROR: missing marker" };
+
+  if (allText.includes("<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>") &&
+      allText.includes(`CHILD_E2E_OK:${marker}`)) {
+    return { text: `PARENT_E2E_OK:${marker}` };
+  }
+  if (allText.includes(`Ordinary user follow-up for ${marker}`)) {
+    return { text: `FOLLOWUP_E2E_OK:${marker}` };
+  }
+
+  const isChild = allText.includes("[Subagent Task]");
+  const toolMessages = messages.filter((message) => message?.role === "tool");
+  if (isChild) {
+    if (toolMessages.length > 0) return { text: `CHILD_E2E_OK:${marker}` };
+    const delay = Number(allText.match(/sleep (\d+)/)?.[1] ?? 10);
+    return {
+      tool: "exec",
+      arguments: {
+        command: `sleep ${delay}`,
+        yieldMs: (delay + 5) * 1_000,
+        timeout: delay + 15,
+        background: false,
+      },
+    };
+  }
+
+  const spawnFinished = toolMessages.some((message) =>
+    message?.name === "sessions_spawn" || contentText(message?.content).includes("childSessionKey"));
+  if (spawnFinished) {
+    return {
+      tool: "sessions_yield",
+      arguments: { message: "Waiting for protected child completion event." },
+      delayMs: 2_000,
+    };
+  }
+  const delay = Number(allText.match(/sleep (\d+)/)?.[1] ?? 10);
+  return {
+    tool: "sessions_spawn",
+    arguments: {
+      task: `E2E child. Run sleep ${delay}, then return CHILD_E2E_OK:${marker}`,
+      label: `octo-host-e2e-${marker}`,
+      taskName: "octo_host_e2e_child",
+      runtime: "subagent",
+      mode: "run",
+      context: "isolated",
+      model: MODEL_REF,
+      cleanup: "delete",
+    },
+  };
+}
+
+function sendScriptedResponse(res, body, reply) {
+  const id = `chatcmpl-${randomUUID()}`;
+  const created = Math.floor(Date.now() / 1_000);
+  const model = typeof body?.model === "string" ? body.model : MODEL;
+  const toolCall = reply.tool ? {
+    id: `call_${randomUUID().replaceAll("-", "")}`,
+    type: "function",
+    function: { name: reply.tool, arguments: JSON.stringify(reply.arguments ?? {}) },
+  } : undefined;
+  const finishReason = toolCall ? "tool_calls" : "stop";
+
+  if (body?.stream === true) {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    });
+    const emit = (chunk) => res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+    emit({ id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }] });
+    emit({
+      id,
+      object: "chat.completion.chunk",
+      created,
+      model,
+      choices: [{
+        index: 0,
+        delta: toolCall
+          ? { tool_calls: [{ index: 0, ...toolCall }] }
+          : { content: reply.text ?? "" },
+        finish_reason: null,
+      }],
+    });
+    emit({ id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta: {}, finish_reason: finishReason }] });
+    if (body?.stream_options?.include_usage) {
+      emit({ id, object: "chat.completion.chunk", created, model, choices: [], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } });
+    }
+    res.end("data: [DONE]\n\n");
+    return;
+  }
+
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({
+    id,
+    object: "chat.completion",
+    created,
+    model,
+    choices: [{
+      index: 0,
+      message: {
+        role: "assistant",
+        content: toolCall ? null : reply.text ?? "",
+        ...(toolCall ? { tool_calls: [toolCall] } : {}),
+      },
+      finish_reason: finishReason,
+    }],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  }));
+}
+
+function ensureModelServer(api) {
+  if (globalThis[MODEL_SERVER]) return;
+  const server = http.createServer((req, res) => {
+    if (req.method !== "POST" || req.url !== "/v1/chat/completions") {
+      res.writeHead(404).end();
+      return;
+    }
+    const chunks = [];
+    let size = 0;
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size <= 2 * 1024 * 1024) chunks.push(chunk);
+      else req.destroy();
+    });
+    req.on("end", () => {
+      try {
+        const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        const reply = scriptedReply(body);
+        setTimeout(() => sendScriptedResponse(res, body, reply), reply.delayMs ?? 0);
+      } catch (error) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { message: error instanceof Error ? error.message : String(error) } }));
+      }
+    });
+  });
+  server.on("error", (error) => {
+    if (error?.code !== "EADDRINUSE") api.logger.error(`octo-host-e2e model server: ${error}`);
+  });
+  server.listen(MODEL_PORT, "127.0.0.1", () => {
+    api.logger.info(`octo-host-e2e: scripted model ready on 127.0.0.1:${MODEL_PORT}`);
+  });
+  globalThis[MODEL_SERVER] = server;
+}
+
+function requiredString(params, key) {
+  const value = typeof params[key] === "string" ? params[key].trim() : "";
+  if (!value) throw new Error(`missing ${key}`);
+  return value;
+}
+
+function resolveAccountId(config, requested) {
+  if (requested) return requested;
+  const accounts = config.channels?.octo?.accounts;
+  const first = accounts && typeof accounts === "object" ? Object.keys(accounts)[0] : undefined;
+  if (!first) throw new Error("no configured Octo account");
+  return first;
+}
+
+function buildPrompt(kind, marker, childDelaySeconds) {
+  if (kind === "followup") {
+    return `Ordinary user follow-up for ${marker}. Do not call tools. Reply exactly FOLLOWUP_E2E_OK:${marker}`;
+  }
+  const childResult = `CHILD_E2E_OK:${marker}`;
+  const childTask = [
+    `Call exec exactly once with arguments {\"command\":\"sleep ${childDelaySeconds}\",\"yieldMs\":${(childDelaySeconds + 5) * 1_000},\"timeout\":${childDelaySeconds + 15},\"background\":false}.`,
+    "Do not use process or any other tool.",
+    `Only after exec reports exit code 0, reply exactly ${childResult}.`,
+    "If exec fails or is interrupted, reply CHILD_E2E_FAILED instead.",
+  ].join(" ");
+  return [
+    `OpenClaw host E2E marker: ${marker}.`,
+    `You MUST call sessions_spawn exactly once with runtime=\"subagent\", mode=\"run\", context=\"isolated\", model=\"${MODEL_REF}\".`,
+    "Call sessions_spawn as your first tool. Do not call agents_list; omit agentId.",
+    `Set the child task exactly to ${JSON.stringify(childTask)}.`,
+    "After spawn succeeds, do not poll with sessions_list, sessions_history, exec sleep, or any other tool.",
+    "Call sessions_yield and end this turn while waiting for the protected completion event.",
+    `When that protected child completion event arrives, reply exactly PARENT_E2E_OK:${marker}`,
+  ].join(" ");
+}
+
+export default {
+  id: "octo-host-e2e",
+  name: "Octo Host E2E Bridge",
+  version: "0.0.0",
+  register(api) {
+    ensureEditObserver(api);
+    ensureModelServer(api);
+    setOctoRuntime(api.runtime);
+    let watcher;
+
+    // Keep the test deterministic and avoid mutating the operator's default
+    // model. The child gets the same explicit model in sessions_spawn.
+    api.on("before_model_resolve", (_event, ctx) => {
+      if (!ctx.sessionKey?.startsWith(SESSION_PREFIX)) return;
+      return { providerOverride: PROVIDER, modelOverride: MODEL };
+    });
+
+    const runRequest = async (params) => {
+      try {
+        const kind = params.kind === "followup" ? "followup" : "spawn";
+        const marker = requiredString(params, "marker");
+        const targetUid = requiredString(params, "targetUid");
+        const sessionKey = requiredString(params, "sessionKey");
+        if (!sessionKey.startsWith(SESSION_PREFIX)) {
+          throw new Error(`sessionKey must start with ${SESSION_PREFIX}`);
+        }
+        const delay = Number(params.childDelaySeconds ?? 25);
+        if (!Number.isInteger(delay) || delay < 10 || delay > 90) {
+          throw new Error("childDelaySeconds must be an integer between 10 and 90");
+        }
+
+        const config = api.runtime.config.loadConfig();
+        const accountId = resolveAccountId(
+          config,
+          typeof params.accountId === "string" ? params.accountId.trim() : "",
+        );
+        const account = resolveOctoAccount({ cfg: config, accountId });
+        if (!account.configured || !account.config.botToken) {
+          throw new Error(`Octo account ${accountId} is not configured`);
+        }
+
+        const now = Date.now();
+        await handleInboundMessage({
+          account,
+          botUid: accountId,
+          message: {
+            message_id: `host-e2e-${kind}-${marker}`,
+            message_seq: now,
+            from_uid: targetUid,
+            channel_id: targetUid,
+            channel_type: ChannelType.DM,
+            timestamp: Math.floor(now / 1000),
+            payload: {
+              type: MessageType.Text,
+              content: buildPrompt(kind, marker, delay),
+            },
+          },
+          groupHistories: new Map(),
+          lastBotReplySeqMap: new Map(),
+          memberMap: new Map([["E2E User", targetUid]]),
+          uidToNameMap: new Map([[targetUid, "E2E User"]]),
+          groupCacheTimestamps: new Map(),
+          memberRobotMap: new Map([[targetUid, false]]),
+          routeOverride: { sessionKey, agentId: "main" },
+          log: api.logger,
+        });
+        return { ok: true, accepted: true, kind, marker, sessionKey };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    };
+
+    const processRequests = () => {
+      let names = [];
+      try { names = fs.readdirSync(REQUEST_DIR); } catch { return; }
+      for (const name of names) {
+        if (!name.endsWith(".request.json")) continue;
+        const requestPath = path.join(REQUEST_DIR, name);
+        const processingPath = path.join(
+          REQUEST_DIR,
+          name.replace(/\.request\.json$/, ".processing.json"),
+        );
+        try {
+          // OpenClaw can register this test plugin in both gateway and embedded
+          // agent runtimes. Rename is the cross-instance claim: exactly one
+          // watcher gets to inject a given synthetic inbound message.
+          fs.renameSync(requestPath, processingPath);
+        } catch {
+          continue;
+        }
+        void (async () => {
+          const resultPath = path.join(REQUEST_DIR, name.replace(/\.request\.json$/, ".result.json"));
+          try {
+            const params = JSON.parse(fs.readFileSync(processingPath, "utf8"));
+            const result = await runRequest(params);
+            fs.writeFileSync(resultPath, JSON.stringify(result));
+          } catch (error) {
+            fs.writeFileSync(resultPath, JSON.stringify({
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            }));
+          } finally {
+            try { fs.unlinkSync(processingPath); } catch {}
+          }
+        })();
+      }
+    };
+
+    const startWatcher = () => {
+      fs.mkdirSync(REQUEST_DIR, { recursive: true });
+      watcher?.close();
+      watcher = fs.watch(REQUEST_DIR, processRequests);
+      processRequests();
+      api.logger.info("octo-host-e2e: request bridge ready");
+    };
+    startWatcher();
+    api.on("gateway_start", startWatcher);
+    api.on("gateway_stop", () => {
+      watcher?.close();
+      watcher = undefined;
+    });
+  },
+};

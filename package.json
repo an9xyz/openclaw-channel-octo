@@ -28,6 +28,7 @@
     "type-check": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:e2e:openclaw": "node scripts/run-openclaw-card-e2e.mjs",
     "prepack": "npm run build",
     "pack:check": "npm pack --dry-run 2>&1 | tee /tmp/octo-pack.txt && grep -q 'dist/index.js' /tmp/octo-pack.txt && grep -q 'dist/setup-entry.js' /tmp/octo-pack.txt && echo '✓ dist/ included in tarball'"
   },

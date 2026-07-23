@@ -10,12 +10,58 @@ import {
   _resetCardProgressForTests,
 } from "./card-progress.js";
 
-/** 收集 registerCardProgress 注册的 hook handler。 */
-function makeApi(): { handlers: Record<string, (e: unknown, c: unknown) => unknown> } {
+type AgentEvent = {
+  runId: string;
+  sessionKey?: string;
+  stream: string;
+  data: Record<string, unknown>;
+};
+
+/** 收集 registerCardProgress 注册的 hook 与 lifecycle handler。 */
+function makeApi(opts: { lifecycle?: boolean } = {}): {
+  handlers: Record<string, (e: unknown, c: unknown) => unknown>;
+  emitLifecycle: (event: AgentEvent) => Promise<void>;
+} {
   const handlers: Record<string, (e: unknown, c: unknown) => unknown> = {};
-  const api = { on: (name: string, fn: (e: unknown, c: unknown) => unknown) => { handlers[name] = fn; } };
+  let lifecycleHandler: ((event: AgentEvent) => void | Promise<void>) | undefined;
+  const api: Record<string, unknown> = {
+    on: (name: string, fn: (e: unknown, c: unknown) => unknown) => { handlers[name] = fn; },
+  };
+  if (opts.lifecycle !== false) {
+    api.agent = {
+      events: {
+        registerAgentEventSubscription: (subscription: {
+          streams?: string[];
+          handle: (event: AgentEvent) => void | Promise<void>;
+        }) => {
+          expect(subscription.streams).toEqual(["lifecycle"]);
+          lifecycleHandler = subscription.handle;
+        },
+      },
+    };
+  }
   registerCardProgress(api as never);
-  return { handlers };
+  return {
+    handlers,
+    emitLifecycle: async (event) => {
+      expect(lifecycleHandler).toBeTypeOf("function");
+      await lifecycleHandler!(event);
+    },
+  };
+}
+
+function completionPrompt(childSessionKey: string): string {
+  return [
+    "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>",
+    "OpenClaw runtime context (internal):",
+    "This context is runtime-generated, not user-authored. Keep internal details private.",
+    "",
+    "[Internal task completion event]",
+    "source: subagent",
+    `session_key: ${childSessionKey}`,
+    "status: completed",
+    "<<<END_OPENCLAW_INTERNAL_CONTEXT>>>",
+  ].join("\n");
 }
 
 /** mock fetch,按 url 分派 getCardProfile / sendMessage / message-edit,记录请求。 */
@@ -242,6 +288,418 @@ describe("card-progress 状态机 + hook + 节流", () => {
     const env = JSON.parse(edit!.body!.content_edit as string);
     expect(progressHeaderText(env.card)).toContain("✅ 已完成");
     expect(env.transient).toBeUndefined(); // 终态帧进修订历史(不带 transient)
+  });
+
+  it("sessions_yield 成功后显示等待任务结果,而不是已中断", async () => {
+    const { fn, calls } = mockFetch();
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi();
+    setCardContext("yield-fallback", {
+      apiUrl: "https://yield.test",
+      botToken: "bf",
+      channelId: "g1",
+      channelType: ChannelType.Group,
+    });
+    handlers.before_agent_run({}, { sessionKey: "yield-fallback", runId: "run-a" });
+    handlers.before_tool_call(
+      { toolName: "sessions_yield", toolCallId: "yield-1" },
+      { sessionKey: "yield-fallback", runId: "run-a" },
+    );
+    await vi.advanceTimersByTimeAsync(900);
+    handlers.after_tool_call(
+      { toolName: "sessions_yield", toolCallId: "yield-1", durationMs: 20 },
+      { sessionKey: "yield-fallback", runId: "run-a" },
+    );
+    calls.length = 0;
+
+    await finalizeCard("yield-fallback", { success: false });
+
+    const edit = calls.find((call) => call.url.includes("/message/edit"));
+    expect(edit).toBeTruthy();
+    const env = JSON.parse(edit!.body!.content_edit as string);
+    expect(progressHeaderText(env.card)).toContain("⏸️ 等待任务结果");
+    expect(progressHeaderText(env.card)).not.toContain("已中断");
+  });
+
+  it("yielded lifecycle 后保留原卡,后续 run 开始时整理、结束时完成", async () => {
+    const { fn, calls } = mockFetch();
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers, emitLifecycle } = makeApi();
+    setCardContext("yield-lifecycle", {
+      apiUrl: "https://yield-lifecycle.test",
+      botToken: "bf",
+      channelId: "g1",
+      channelType: ChannelType.Group,
+    });
+    handlers.before_agent_run({}, { sessionKey: "yield-lifecycle", runId: "run-a" });
+    handlers.before_tool_call(
+      { toolName: "sessions_spawn", toolCallId: "spawn-1" },
+      { sessionKey: "yield-lifecycle", runId: "run-a" },
+    );
+    handlers.after_tool_call(
+      {
+        toolName: "sessions_spawn",
+        toolCallId: "spawn-1",
+        durationMs: 30,
+        result: {
+          content: [{ type: "text", text: '{"status":"accepted","childSessionKey":"agent:main:subagent:child-1","runId":"child-run-1"}' }],
+        },
+      },
+      { sessionKey: "yield-lifecycle", runId: "run-a" },
+    );
+    await vi.advanceTimersByTimeAsync(900);
+    calls.length = 0;
+
+    await emitLifecycle({
+      runId: "run-a",
+      sessionKey: "yield-lifecycle",
+      stream: "lifecycle",
+      data: { phase: "end", yielded: true, livenessState: "paused" },
+    });
+    await finalizeCard("yield-lifecycle", { success: false });
+    const pausedEdit = calls.find((call) => {
+      if (!call.url.includes("/message/edit")) return false;
+      const env = JSON.parse(call.body!.content_edit as string);
+      return progressHeaderText(env.card).includes("⏸️ 等待任务结果");
+    });
+    expect(pausedEdit).toBeTruthy();
+    expect(progressCardText(JSON.parse(pausedEdit!.body!.content_edit as string).card))
+      .toContain("⏳ 等待子任务");
+
+    await vi.advanceTimersByTimeAsync(65_000);
+
+    calls.length = 0;
+    await emitLifecycle({
+      runId: "run-b",
+      sessionKey: "yield-lifecycle",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    handlers.before_agent_run(
+      { prompt: completionPrompt("agent:main:subagent:child-1"), messages: [] },
+      { sessionKey: "yield-lifecycle", runId: "run-b" },
+    );
+    await vi.runAllTicks();
+    const resumingEdit = calls.find((call) => {
+      if (!call.url.includes("/message/edit")) return false;
+      const env = JSON.parse(call.body!.content_edit as string);
+      return progressHeaderText(env.card).includes("🤖 正在整理结果");
+    });
+    expect(resumingEdit).toBeTruthy();
+    expect(progressCardText(JSON.parse(resumingEdit!.body!.content_edit as string).card))
+      .toContain("⏸️ 等待子任务 · 65.0s");
+
+    calls.length = 0;
+    await emitLifecycle({
+      runId: "run-b",
+      sessionKey: "yield-lifecycle",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+    const completed = calls.find((call) => call.url.includes("/message/edit"));
+    expect(completed).toBeTruthy();
+    const completedEnv = JSON.parse(completed!.body!.content_edit as string);
+    expect(progressHeaderText(completedEnv.card)).toContain("✅ 已完成");
+  });
+
+  it("无关用户 run 不得劫持 paused 卡,真正 completion run 仍可继续更新", async () => {
+    const { fn, calls } = mockFetch();
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers, emitLifecycle } = makeApi();
+    const childSessionKey = "agent:main:subagent:child-unrelated";
+    const target = {
+      apiUrl: "https://yield-unrelated.test",
+      botToken: "bf",
+      channelId: "g1",
+      channelType: ChannelType.Group,
+    };
+
+    setCardContext("yield-unrelated", target);
+    handlers.before_agent_run({}, { sessionKey: "yield-unrelated", runId: "run-a" });
+    handlers.before_tool_call(
+      { toolName: "sessions_spawn", toolCallId: "spawn-1" },
+      { sessionKey: "yield-unrelated", runId: "run-a" },
+    );
+    handlers.after_tool_call(
+      {
+        toolName: "sessions_spawn",
+        toolCallId: "spawn-1",
+        result: { details: { status: "accepted", childSessionKey, runId: "child-run" } },
+      },
+      { sessionKey: "yield-unrelated", runId: "run-a" },
+    );
+    handlers.before_tool_call(
+      { toolName: "sessions_yield", toolCallId: "yield-1" },
+      { sessionKey: "yield-unrelated", runId: "run-a" },
+    );
+    handlers.after_tool_call(
+      { toolName: "sessions_yield", toolCallId: "yield-1" },
+      { sessionKey: "yield-unrelated", runId: "run-a" },
+    );
+    await vi.advanceTimersByTimeAsync(900);
+    await finalizeCard("yield-unrelated", { success: false });
+
+    calls.length = 0;
+    setCardContext("yield-unrelated", target);
+    await emitLifecycle({
+      runId: "run-user",
+      sessionKey: "yield-unrelated",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    handlers.before_agent_run(
+      { prompt: "用户在等待期间发来的普通追问", messages: [] },
+      { sessionKey: "yield-unrelated", runId: "run-user" },
+    );
+    await emitLifecycle({
+      runId: "run-user",
+      sessionKey: "yield-unrelated",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+    expect(calls.some((call) => call.url.includes("/message/edit"))).toBe(false);
+
+    await emitLifecycle({
+      runId: "run-continuation",
+      sessionKey: "yield-unrelated",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    handlers.before_agent_run(
+      { prompt: completionPrompt(childSessionKey), messages: [] },
+      { sessionKey: "yield-unrelated", runId: "run-continuation" },
+    );
+    await vi.runAllTicks();
+    expect(calls.some((call) => {
+      if (!call.url.includes("/message/edit")) return false;
+      const env = JSON.parse(call.body!.content_edit as string);
+      return progressHeaderText(env.card).includes("🤖 正在整理结果");
+    })).toBe(true);
+
+    calls.length = 0;
+    await emitLifecycle({
+      runId: "run-continuation",
+      sessionKey: "yield-unrelated",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+    const finalEdit = calls.find((call) => call.url.includes("/message/edit"));
+    expect(finalEdit).toBeTruthy();
+    expect(progressHeaderText(JSON.parse(finalEdit!.body!.content_edit as string).card)).toContain("✅ 已完成");
+  });
+
+  it("乱序 start/end 编辑必须串行,最终不能被迟到的 resuming 覆盖", async () => {
+    const calls: Array<{ url: string; body: Record<string, unknown> | undefined }> = [];
+    const appliedHeaders: string[] = [];
+    const resumingReached = makeDeferred();
+    const releaseResuming = makeDeferred();
+    global.fetch = vi.fn().mockImplementation(async (url: string, init?: { body?: string }) => {
+      const body = init?.body ? JSON.parse(init.body) : undefined;
+      calls.push({ url: String(url), body });
+      if (String(url).includes("/card/profile")) {
+        return { ok: true, status: 200, json: async () => ({ enabled: true, profiles: ["octo/v1"] }) };
+      }
+      if (String(url).includes("/sendMessage")) {
+        return { ok: true, status: 200, text: async () => JSON.stringify({ message_id: "race-card" }) };
+      }
+      if (String(url).includes("/message/edit")) {
+        const env = JSON.parse(body.content_edit as string);
+        const header = progressHeaderText(env.card);
+        if (header.includes("正在整理结果")) {
+          resumingReached.resolve();
+          await releaseResuming.promise;
+        }
+        appliedHeaders.push(header);
+      }
+      return { ok: true, status: 200, text: async () => "" };
+    }) as unknown as typeof fetch;
+
+    const { handlers, emitLifecycle } = makeApi();
+    const childSessionKey = "agent:main:subagent:child-race";
+    setCardContext("yield-race", {
+      apiUrl: "https://yield-race.test",
+      botToken: "bf",
+      channelId: "g1",
+      channelType: ChannelType.Group,
+    });
+    handlers.before_agent_run({}, { sessionKey: "yield-race", runId: "run-a" });
+    handlers.before_tool_call({ toolName: "sessions_spawn", toolCallId: "spawn-1" }, { sessionKey: "yield-race", runId: "run-a" });
+    handlers.after_tool_call(
+      { toolName: "sessions_spawn", toolCallId: "spawn-1", result: { details: { status: "accepted", childSessionKey, runId: "child-run" } } },
+      { sessionKey: "yield-race", runId: "run-a" },
+    );
+    handlers.before_tool_call({ toolName: "sessions_yield", toolCallId: "yield-1" }, { sessionKey: "yield-race", runId: "run-a" });
+    handlers.after_tool_call({ toolName: "sessions_yield", toolCallId: "yield-1" }, { sessionKey: "yield-race", runId: "run-a" });
+    await vi.advanceTimersByTimeAsync(900);
+    await finalizeCard("yield-race", { success: false });
+    calls.length = 0;
+
+    const startEvent = emitLifecycle({
+      runId: "run-b",
+      sessionKey: "yield-race",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    handlers.before_agent_run(
+      { prompt: completionPrompt(childSessionKey), messages: [] },
+      { sessionKey: "yield-race", runId: "run-b" },
+    );
+    await resumingReached.promise;
+    const endEvent = emitLifecycle({
+      runId: "run-b",
+      sessionKey: "yield-race",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+    await vi.runAllTicks();
+    releaseResuming.resolve();
+    await Promise.all([startEvent, endEvent]);
+
+    expect(appliedHeaders.length).toBeGreaterThanOrEqual(2);
+    expect(appliedHeaders.at(-1)).toContain("✅ 已完成");
+  });
+
+  it("旧 host 无 lifecycle API 时仍可由受信 completion prompt + agent_end 完成卡片", async () => {
+    const { fn, calls } = mockFetch();
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi({ lifecycle: false });
+    const childSessionKey = "agent:main:subagent:child-legacy";
+    setCardContext("yield-legacy", {
+      apiUrl: "https://yield-legacy.test",
+      botToken: "bf",
+      channelId: "g1",
+      channelType: ChannelType.Group,
+    });
+    handlers.before_agent_run({}, { sessionKey: "yield-legacy", runId: "run-a" });
+    handlers.before_tool_call({ toolName: "sessions_spawn", toolCallId: "spawn-1" }, { sessionKey: "yield-legacy", runId: "run-a" });
+    handlers.after_tool_call(
+      { toolName: "sessions_spawn", toolCallId: "spawn-1", result: { details: { status: "accepted", childSessionKey, runId: "child-run" } } },
+      { sessionKey: "yield-legacy", runId: "run-a" },
+    );
+    handlers.before_tool_call({ toolName: "sessions_yield", toolCallId: "yield-1" }, { sessionKey: "yield-legacy", runId: "run-a" });
+    handlers.after_tool_call({ toolName: "sessions_yield", toolCallId: "yield-1" }, { sessionKey: "yield-legacy", runId: "run-a" });
+    await vi.advanceTimersByTimeAsync(900);
+    await finalizeCard("yield-legacy", { success: false });
+    calls.length = 0;
+
+    handlers.before_agent_run(
+      { prompt: completionPrompt(childSessionKey), messages: [] },
+      { sessionKey: "yield-legacy", runId: "run-b" },
+    );
+    await vi.runAllTicks();
+    await handlers.agent_end(
+      { runId: "run-b", messages: [], success: true },
+      { sessionKey: "yield-legacy", runId: "run-b" },
+    );
+
+    const edits = calls.filter((call) => call.url.includes("/message/edit"));
+    const lastEnv = JSON.parse(edits.at(-1)!.body!.content_edit as string);
+    expect(progressHeaderText(lastEnv.card)).toContain("✅ 已完成");
+  });
+
+  it("无 continuation 的 paused 卡到期后显示等待超时并释放追踪", async () => {
+    const { fn, calls } = mockFetch();
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi({ lifecycle: false });
+    setCardContext("yield-expire", {
+      apiUrl: "https://yield-expire.test",
+      botToken: "bf",
+      channelId: "g1",
+      channelType: ChannelType.Group,
+    });
+    handlers.before_agent_run({}, { sessionKey: "yield-expire", runId: "run-a" });
+    handlers.before_tool_call({ toolName: "sessions_yield", toolCallId: "yield-1" }, { sessionKey: "yield-expire", runId: "run-a" });
+    handlers.after_tool_call({ toolName: "sessions_yield", toolCallId: "yield-1" }, { sessionKey: "yield-expire", runId: "run-a" });
+    await vi.advanceTimersByTimeAsync(900);
+    await finalizeCard("yield-expire", { success: false });
+    calls.length = 0;
+
+    await vi.advanceTimersByTimeAsync(3_600_100);
+
+    const edit = calls.find((call) => call.url.includes("/message/edit"));
+    expect(edit).toBeTruthy();
+    const env = JSON.parse(edit!.body!.content_edit as string);
+    expect(progressHeaderText(env.card)).toContain("⏱️ 等待超时");
+  });
+
+  it("paused 窗口的跨身份同 sessionKey 碰撞必须 fail-closed", async () => {
+    const { fn, calls } = mockFetch();
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers, emitLifecycle } = makeApi();
+    const childSessionKey = "agent:main:subagent:child-collision";
+    setCardContext("yield-collision", {
+      apiUrl: "https://yield-collision.test",
+      botToken: "bot-a",
+      channelId: "group-a",
+      channelType: ChannelType.Group,
+    });
+    handlers.before_agent_run({}, { sessionKey: "yield-collision", runId: "run-a" });
+    handlers.before_tool_call({ toolName: "sessions_spawn", toolCallId: "spawn-1" }, { sessionKey: "yield-collision", runId: "run-a" });
+    handlers.after_tool_call(
+      { toolName: "sessions_spawn", toolCallId: "spawn-1", result: { details: { status: "accepted", childSessionKey, runId: "child-run" } } },
+      { sessionKey: "yield-collision", runId: "run-a" },
+    );
+    handlers.before_tool_call({ toolName: "sessions_yield", toolCallId: "yield-1" }, { sessionKey: "yield-collision", runId: "run-a" });
+    handlers.after_tool_call({ toolName: "sessions_yield", toolCallId: "yield-1" }, { sessionKey: "yield-collision", runId: "run-a" });
+    await vi.advanceTimersByTimeAsync(900);
+    await finalizeCard("yield-collision", { success: false });
+    calls.length = 0;
+
+    setCardContext("yield-collision", {
+      apiUrl: "https://yield-collision.test",
+      botToken: "bot-b",
+      channelId: "group-b",
+      channelType: ChannelType.Group,
+    });
+    await emitLifecycle({
+      runId: "run-b",
+      sessionKey: "yield-collision",
+      stream: "lifecycle",
+      data: { phase: "start" },
+    });
+    handlers.before_agent_run(
+      { prompt: completionPrompt(childSessionKey), messages: [] },
+      { sessionKey: "yield-collision", runId: "run-b" },
+    );
+    await emitLifecycle({
+      runId: "run-b",
+      sessionKey: "yield-collision",
+      stream: "lifecycle",
+      data: { phase: "end" },
+    });
+
+    expect(calls.some((call) => call.url.includes("/message/edit"))).toBe(false);
+  });
+
+  it("失败的 sessions_yield 不进入等待状态", async () => {
+    const { fn, calls } = mockFetch();
+    global.fetch = fn as unknown as typeof fetch;
+    const { handlers } = makeApi();
+    setCardContext("yield-error", {
+      apiUrl: "https://yield-error.test",
+      botToken: "bf",
+      channelId: "g1",
+      channelType: ChannelType.Group,
+    });
+    handlers.before_agent_run({}, { sessionKey: "yield-error", runId: "run-a" });
+    handlers.before_tool_call(
+      { toolName: "sessions_yield", toolCallId: "yield-1" },
+      { sessionKey: "yield-error", runId: "run-a" },
+    );
+    await vi.advanceTimersByTimeAsync(900);
+    handlers.after_tool_call(
+      { toolName: "sessions_yield", toolCallId: "yield-1", error: "yield failed" },
+      { sessionKey: "yield-error", runId: "run-a" },
+    );
+    calls.length = 0;
+
+    await finalizeCard("yield-error", { success: false });
+
+    const edit = calls.find((call) => call.url.includes("/message/edit"));
+    expect(edit).toBeTruthy();
+    const env = JSON.parse(edit!.body!.content_edit as string);
+    expect(progressHeaderText(env.card)).toContain("已中断");
+    expect(progressHeaderText(env.card)).not.toContain("等待任务结果");
   });
 
   it("finalizeCard 未发过占位卡 → 仅清理不发", async () => {

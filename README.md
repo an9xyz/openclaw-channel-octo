@@ -162,6 +162,25 @@ to paste a secret in plaintext. Whether to adjust the configuration is up to you
 - Configuration is read from `channels.octo` in OpenClaw's config; the plugin
   hot-reloads when that block changes
 
+## Development
+
+Run the real container E2E for yielded progress cards with a configured Octo
+DM user. The runner builds this checkout, installs a test-only inbound bridge in
+the `ocprobe` container, restarts the real OpenClaw gateway, exercises
+`sessions_spawn` + `sessions_yield` + protected completion, and removes the
+bridge/config again even when the test fails.
+
+The bridge includes a loopback OpenAI-compatible scripted provider so tool
+choices are deterministic. OpenClaw's tool execution, subagent scheduler,
+lifecycle stream, and Octo send/edit HTTP requests remain the real host paths.
+
+```bash
+OCTO_E2E_TARGET_UID=<octo-user-uid> npm run test:e2e:openclaw
+```
+
+Override the default container with `OCTO_E2E_CONTAINER` when needed. The
+target user receives progress-card messages during the test.
+
 ## Disconnect
 
 To disconnect a bot, send `/disconnect` to BotFather in Octo. This invalidates

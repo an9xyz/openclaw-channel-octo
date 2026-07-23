@@ -47,22 +47,23 @@ export interface CardStep {
    */
   toolCallId?: string;
   /**
-   * hook 侧记录的开始时间(ms epoch)。目前只对 P1-g 的 __thinking__ 步骤有意义:
-   * SDK 无 `model_call_ended` hook,thinking 结束时机由外部信号(before_tool_call / finalize)
-   * 决定,duration = now - startedAt。渲染层只看 durationMs,该字段仅 hook 侧内部使用。
+   * hook 侧记录的开始时间(ms epoch)。用于没有成对 end hook 的内部步骤:
+   * `__thinking__` 由 before_tool_call/finalize 收尾，`__subagent_wait__` 由受信 completion
+   * continuation 收尾，duration = now - startedAt。渲染层只看 durationMs。
    */
   startedAt?: number;
 }
 
 /** 进度卡的渲染状态。 */
 export interface CardProgressState {
-  phase: "thinking" | "tool" | "done" | "error";
+  phase: "thinking" | "tool" | "paused" | "resuming" | "expired" | "done" | "error";
   steps: CardStep[];
   elapsedMs?: number;
   errorText?: string;
 }
 
 const MCP_TOOL_PREFIX = "mcp__";
+export const SUBAGENT_WAIT_STEP_TOOL = "__subagent_wait__";
 
 /** 常见工具 → 图标 + 中文标签;未知工具用通用图标 + 原名。 */
 const TOOL_META: Record<string, { icon: string; label: string }> = {
@@ -89,6 +90,7 @@ const TOOL_META: Record<string, { icon: string; label: string }> = {
 export function resolveToolMeta(tool: string): { icon: string; label: string } {
   // 特殊内部 tool 名:agent 一轮 model_call = 一步"思考"(P1-g)。以 __ 前缀,agent 侧无冲突可能。
   if (tool === "__thinking__") return { icon: "💭", label: "思考" };
+  if (tool === SUBAGENT_WAIT_STEP_TOOL) return { icon: "⏸️", label: "等待子任务" };
   if (tool.startsWith(MCP_TOOL_PREFIX)) {
     const rest = tool.slice(MCP_TOOL_PREFIX.length).replace(/__/g, " / ");
     return { icon: "🔌", label: `MCP ${rest}` };
@@ -395,6 +397,12 @@ function headerText(state: CardProgressState): string {
       return "🤖 思考中…";
     case "tool":
       return "🤖 正在处理…";
+    case "paused":
+      return "⏸️ 等待任务结果";
+    case "resuming":
+      return "🤖 正在整理结果";
+    case "expired":
+      return "⏱️ 等待超时";
     case "error": {
       const detail = sanitizeErrorText(state.errorText);
       return `⚠️ 已中断${detail ? `：${detail}` : ""}`;
@@ -611,11 +619,13 @@ function supportsTerminalCollapse(caps: CardCaps | undefined): boolean {
 
 function progressSummary(steps: CardStep[], total: number): string {
   const thinking = steps.filter((s) => s.tool === "__thinking__").length;
-  const tools = total - thinking;
-  const parts = ["推理与工具调用"];
+  const waiting = steps.filter((s) => s.tool === SUBAGENT_WAIT_STEP_TOOL).length;
+  const tools = total - thinking - waiting;
+  const parts = [waiting > 0 ? "任务过程" : "推理与工具调用"];
   if (thinking > 0) parts.push(`思考 ${thinking}`);
   if (tools > 0) parts.push(`工具 ${tools}`);
-  if (thinking === 0 && tools === 0) parts.push(`${total} 步`);
+  if (waiting > 0) parts.push(`等待 ${waiting}`);
+  if (thinking === 0 && tools === 0 && waiting === 0) parts.push(`${total} 步`);
   return parts.join(" · ");
 }
 
@@ -641,13 +651,15 @@ function terminalHeaderSegments(state: CardProgressState): RichSegment[] | null 
 
 function progressSummarySegments(steps: CardStep[], total: number, visible: string): RichSegment[] {
   const thinking = steps.filter((s) => s.tool === "__thinking__").length;
-  const tools = total - thinking;
+  const waiting = steps.filter((s) => s.tool === SUBAGENT_WAIT_STEP_TOOL).length;
+  const tools = total - thinking - waiting;
   const stats: string[] = [];
   if (thinking > 0) stats.push(`思考 ${thinking}`);
   if (tools > 0) stats.push(`工具 ${tools}`);
+  if (waiting > 0) stats.push(`等待 ${waiting}`);
   stats.push(`${visible} 步`);
   return [
-    { text: "推理与工具调用", bold: true },
+    { text: waiting > 0 ? "任务过程" : "推理与工具调用", bold: true },
     { text: ` · ${stats.join(" · ")}`, subtle: true },
   ];
 }
@@ -803,7 +815,7 @@ export function renderProgressCard(
   const detail = buildDisplayCard({ blocks: detailBlocks, caps, trusted: true });
   const headerItems = progressHeaderItems(state, header, state.steps, total, visible, canRichText);
   const canToggle = supportsTerminalCollapse(caps);
-  const isTerminal = state.phase === "done" || state.phase === "error";
+  const isTerminal = state.phase === "done" || state.phase === "error" || state.phase === "expired";
   const detailVisible = !(canToggle && isTerminal);
   const columns: Record<string, unknown>[] = [
     {

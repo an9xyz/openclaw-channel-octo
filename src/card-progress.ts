@@ -6,6 +6,7 @@
  *     (apiUrl/botToken/channel/onBehalfOf),`finally` 里 `finalizeCard(sessionKey, success)`。
  *   - 本模块订阅 hook(before/after_tool_call、model_call_started),用 `ctx.sessionKey`
  *     查 Map:首个工具事件懒发占位卡 → 后续就地 `editCardMessage`,节流合帧。
+ *   - sessions_yield 将已发出的卡移入 pausedCards；后续 lifecycle run 继续编辑同一张卡。
  *   - `sessionKey` 桥接 dispatch 与 hook(H1 实证一致)。Map 只含 octo dispatch 登记的
  *     session → hook 查不到即 return,**天然过滤**非 octo run,无需 messageProvider 判断。
  *
@@ -16,7 +17,7 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { ChannelType, CARD_PROFILE, CARD_VERSION } from "./types.js";
 import { sendCardMessage, editCardMessage, getCardProfile, httpStatusFromApiFetchError } from "./api-fetch.js";
 import { deriveCardCaps } from "./card-caps.js";
-import { renderProgressCard, renderProgressResponseCard, summarizeToolParams, type CardStep, type CardProgressState, type CardCaps } from "./card-render.js";
+import { renderProgressCard, renderProgressResponseCard, summarizeToolParams, SUBAGENT_WAIT_STEP_TOOL, type CardStep, type CardProgressState, type CardCaps } from "./card-render.js";
 import { DISPLAY_CARD_TOOL_NAME, INTERACTIVE_CARD_TOOL_NAME } from "./constants.js";
 
 /** dispatch 侧登记的发送上下文。 */
@@ -45,6 +46,12 @@ interface CardEntry {
    * 只能校验、不能认领,避免旧 run 的迟到 hook first-hook-wins 抢占新 entry。
    */
   runId?: string;
+  /** 调用 sessions_yield 后结束、正在等待后续 continuation 的 run。 */
+  pausedFromRunId?: string;
+  /** paused 后在同一 session 上启动的 continuation run。 */
+  continuationRunId?: string;
+  /** 当前 run 成功创建、可用于识别受信 completion prompt 的子 session。 */
+  childSessionKeys: Set<string>;
   messageId?: string;
   phase: CardProgressState["phase"];
   steps: CardStep[];
@@ -55,12 +62,23 @@ interface CardEntry {
   flushTimer?: ReturnType<typeof setTimeout>;
   /** 当前 in-flight flush 的 promise;finalizeCard 据此等待首帧 send/中间帧 edit 落定。 */
   flushPromise?: Promise<void>;
+  /** paused/resuming/done 跨-run edit 的串行尾指针。 */
+  stateEditPromise?: Promise<void>;
+  stateEditAbort?: AbortController;
+  /** paused 卡的有界回收定时器。 */
+  pausedExpiryTimer?: ReturnType<typeof setTimeout>;
   /** replacement/clear 时主动取消 profile/send/edit,缩小 stale side-effect 窗口。 */
   flushAbort?: AbortController;
 }
 
 /** key = sessionKey(H1 实证:全 hook 一致)。跨账号碰撞由 entry.identity + fail-closed 兜底。 */
 const cards = new Map<string, CardEntry>();
+
+/**
+ * 已经结束当前 dispatch、但仍等待 continuation 的卡片。与 cards 分开保存，避免下一条
+ * inbound 的 setCardContext 覆盖 messageId，导致后台任务回来后无法更新原卡。
+ */
+const pausedCards = new Map<string, CardEntry>();
 
 /** D12 gate 结果缓存,key = apiUrl(同部署同结果),避免每 session 重复探测。 */
 const gateCache = new Map<string, boolean>();
@@ -74,6 +92,10 @@ const capsCache = new Map<string, CardCaps>();
 
 const FLUSH_DEBOUNCE_MS = 800;
 const EDIT_TIMEOUT_MS = 10_000;
+const PAUSED_CARD_TTL_MS = 60 * 60 * 1000;
+const INTERNAL_CONTEXT_BEGIN = "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>";
+const INTERNAL_CONTEXT_END = "<<<END_OPENCLAW_INTERNAL_CONTEXT>>>";
+const INTERNAL_CONTEXT_NOTICE = "This context is runtime-generated, not user-authored. Keep internal details private.";
 
 // 进度卡失败不影响主回复流程 —— 仅告警,不抛。
 // eslint-disable-next-line no-console -- 波 B 进度卡诊断,失败降级不阻断主流程
@@ -104,7 +126,8 @@ export function setCardContext(sessionKey: string, ctx: CardContext): void {
   if (!sessionKey) return;
   const identity = contextIdentity(ctx);
   const existing = cards.get(sessionKey);
-  const collision = !!existing && existing.identity !== identity;
+  const paused = pausedCards.get(sessionKey);
+  const collision = [existing, paused].some((entry) => !!entry && entry.identity !== identity);
   // 任何 replacement 都清掉旧 entry 的 debounce timer。旧 entry 若已有 messageId,其
   // fire-and-forget finalize 仍可收尾;但定时中间帧不得跨 generation 泄漏到新 run。
   if (existing?.flushTimer) {
@@ -113,12 +136,14 @@ export function setCardContext(sessionKey: string, ctx: CardContext): void {
   }
   existing?.flushAbort?.abort(new Error("card entry replaced"));
   if (collision) {
-    existing!.skip = true; // 冻结旧 run 的卡:后续 flush/finalize 不再发送
+    if (existing) existing.skip = true;
+    if (paused) releasePausedCard(sessionKey, paused, "cross-identity collision");
     warn(`sessionKey collision across identities; failing closed for session=${sessionKey}`);
   }
   cards.set(sessionKey, {
     ctx,
     identity,
+    childSessionKeys: new Set(),
     phase: "thinking",
     steps: [],
     startedAt: Date.now(),
@@ -292,8 +317,149 @@ function isCurrentEntry(sessionKey: string, entry: CardEntry): boolean {
   return cards.get(sessionKey) === entry && !entry.skip;
 }
 
+function isTrackedEntry(sessionKey: string, entry: CardEntry): boolean {
+  return (cards.get(sessionKey) === entry || pausedCards.get(sessionKey) === entry) && !entry.skip;
+}
+
+function releasePausedCard(sessionKey: string, entry: CardEntry, reason: string): void {
+  if (entry.pausedExpiryTimer) {
+    clearTimeout(entry.pausedExpiryTimer);
+    entry.pausedExpiryTimer = undefined;
+  }
+  entry.stateEditAbort?.abort(new Error(`paused card released: ${reason}`));
+  entry.stateEditAbort = undefined;
+  entry.skip = true;
+  if (cards.get(sessionKey) === entry) cards.delete(sessionKey);
+  if (pausedCards.get(sessionKey) === entry) pausedCards.delete(sessionKey);
+}
+
+function schedulePausedCardExpiry(sessionKey: string, entry: CardEntry): void {
+  if (entry.pausedExpiryTimer) clearTimeout(entry.pausedExpiryTimer);
+  entry.pausedExpiryTimer = setTimeout(() => {
+    entry.pausedExpiryTimer = undefined;
+    if (pausedCards.get(sessionKey) !== entry || entry.skip) return;
+    void (async () => {
+      await editTrackedCardState(sessionKey, entry, "expired");
+      releasePausedCard(sessionKey, entry, "ttl expired");
+    })();
+  }, PAUSED_CARD_TTL_MS);
+}
+
+function startSubagentWait(entry: CardEntry, now: number): void {
+  const last = entry.steps[entry.steps.length - 1];
+  if (last?.tool === SUBAGENT_WAIT_STEP_TOOL && last.status === "running") return;
+  entry.steps.push({ tool: SUBAGENT_WAIT_STEP_TOOL, status: "running", startedAt: now });
+}
+
+function endSubagentWait(entry: CardEntry, now: number): void {
+  for (let i = entry.steps.length - 1; i >= 0; i--) {
+    const step = entry.steps[i];
+    if (step.tool !== SUBAGENT_WAIT_STEP_TOOL || step.status !== "running") continue;
+    step.status = "done";
+    step.durationMs = Math.max(0, now - (step.startedAt ?? now));
+    return;
+  }
+}
+
+/** 直接编辑一张已存在的进度卡；用于 paused continuation 的跨-run状态迁移。 */
+async function editTrackedCardState(
+  sessionKey: string,
+  entry: CardEntry,
+  phase: CardProgressState["phase"],
+  opts: { transient?: boolean; errorText?: string } = {},
+): Promise<void> {
+  const previous = entry.stateEditPromise;
+  const work = (async () => {
+    if (previous) {
+      try { await previous; } catch { /* previous transition already logged */ }
+    }
+    if (entry.flushPromise) {
+      try { await entry.flushPromise; } catch { /* flush already logged */ }
+    }
+    if (entry.flushTimer) {
+      clearTimeout(entry.flushTimer);
+      entry.flushTimer = undefined;
+    }
+    if (!isTrackedEntry(sessionKey, entry) || !entry.messageId) return;
+
+    const now = Date.now();
+    endRunningThinking(entry, now);
+    if (phase !== "paused") endSubagentWait(entry, now);
+    entry.phase = phase;
+    const state: CardProgressState = {
+      phase,
+      steps: entry.steps,
+      elapsedMs: Date.now() - entry.startedAt,
+      ...(opts.errorText ? { errorText: opts.errorText } : {}),
+    };
+    const abort = new AbortController();
+    entry.stateEditAbort = abort;
+    try {
+      const { card, plain } = renderProgressCard(state, capsCache.get(entry.ctx.apiUrl));
+      if (!Array.isArray(card.body) || card.body.length === 0) return;
+      await editCardMessage({
+        apiUrl: entry.ctx.apiUrl,
+        botToken: entry.ctx.botToken,
+        messageId: entry.messageId,
+        channelId: entry.ctx.channelId,
+        channelType: entry.ctx.channelType,
+        card,
+        plain,
+        ...(opts.transient ? { transient: true } : {}),
+        ...(entry.ctx.onBehalfOf ? { onBehalfOf: entry.ctx.onBehalfOf } : {}),
+        signal: AbortSignal.any([abort.signal, AbortSignal.timeout(EDIT_TIMEOUT_MS)]),
+      });
+      dbg(`transitioned session=${sessionKey} phase=${phase}`);
+    } catch (err: unknown) {
+      if (!abort.signal.aborted) {
+        warn(`state transition failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    } finally {
+      if (entry.stateEditAbort === abort) entry.stateEditAbort = undefined;
+    }
+  })();
+  entry.stateEditPromise = work;
+  try {
+    await work;
+  } finally {
+    if (entry.stateEditPromise === work) entry.stateEditPromise = undefined;
+  }
+}
+
+function finishPausedCard(
+  sessionKey: string,
+  entry: CardEntry,
+  phase: "done" | "error",
+  errorText?: string,
+): Promise<void> {
+  return (async () => {
+    await editTrackedCardState(sessionKey, entry, phase, errorText ? { errorText } : {});
+    releasePausedCard(sessionKey, entry, `continuation ${phase}`);
+  })();
+}
+
+/** sessions_yield 的 lifecycle 元数据在旧 host/Codex lane 可能缺失；成功工具结果作为兼容兜底。 */
+function markCardPaused(sessionKey: string, runId?: string, expectedEntry?: CardEntry): void {
+  const entry = expectedEntry ?? cards.get(sessionKey) ?? pausedCards.get(sessionKey);
+  if (!entry || entry.skip) return;
+  if (runId && entry.runId &&
+      entry.runId !== runId && entry.pausedFromRunId !== runId && entry.continuationRunId !== runId) return;
+  const now = Date.now();
+  endRunningThinking(entry, now);
+  startSubagentWait(entry, now);
+  entry.pausedFromRunId = runId ?? entry.continuationRunId ?? entry.runId;
+  entry.continuationRunId = undefined;
+  entry.phase = "paused";
+  if (cards.get(sessionKey) === entry) {
+    scheduleFlush(sessionKey, entry);
+  } else {
+    schedulePausedCardExpiry(sessionKey, entry);
+    void editTrackedCardState(sessionKey, entry, "paused");
+  }
+}
+
 /**
- * dispatch `finally` 收尾:渲染终态帧(✅ 已完成 / ⚠️ 中断),清理 Map。
+ * dispatch `finally` 收尾:完成/失败时清理；yield 时保留原卡供 continuation 更新。
  * 幂等:未登记或没发过占位卡则仅清理。
  */
 export async function finalizeCard(
@@ -313,13 +479,26 @@ export async function finalizeCard(
   // P1-g:若仍有 running thinking(agent 收尾时最后一次 model_call 之后未再调工具),
   // 用当前时间把它标 done + 算 duration —— 终态帧不留 ⏳。
   endRunningThinking(entry, Date.now());
+  const retainForContinuation = entry.phase === "paused" || entry.phase === "resuming";
   // 只在 entry 仍是当前登记项时删除。finalize 是 fire-and-forget 且上面 await 了 in-flight
   // flush;await 期间 per-group 队列可能推进,同 sessionKey 的下一 run setCardContext 已把
   // Map 换成新 entry —— 那时删 key 会误删新 run 的状态,使其全程无卡。终态帧仍发本 run。
-  if (cards.get(sessionKey) === entry) cards.delete(sessionKey);
+  if (cards.get(sessionKey) === entry) {
+    cards.delete(sessionKey);
+    // 没发出 messageId 的懒卡没有可更新对象，不能长期滞留在 pausedCards。
+    if (retainForContinuation && !entry.skip && entry.messageId) {
+      pausedCards.set(sessionKey, entry);
+      schedulePausedCardExpiry(sessionKey, entry);
+    }
+  }
 
   // 从没发过卡(skip / 无工具调用)→ 无需收尾帧。
   if (entry.skip || !entry.messageId) return;
+
+  if (retainForContinuation) {
+    await editTrackedCardState(sessionKey, entry, entry.phase);
+    return;
+  }
 
   const state: CardProgressState = {
     phase: opts.success ? "done" : "error",
@@ -407,19 +586,29 @@ export async function finalizeCardWithResponse(
 /** 硬清理(不发收尾帧),用于异常兜底。 */
 export function clearCard(sessionKey: string): void {
   const entry = cards.get(sessionKey);
-  if (!entry) return;
-  if (entry.flushTimer) clearTimeout(entry.flushTimer);
-  entry.flushAbort?.abort(new Error("card entry cleared"));
+  const paused = pausedCards.get(sessionKey);
+  for (const tracked of new Set([entry, paused].filter((item): item is CardEntry => !!item))) {
+    if (tracked.flushTimer) clearTimeout(tracked.flushTimer);
+    if (tracked.pausedExpiryTimer) clearTimeout(tracked.pausedExpiryTimer);
+    tracked.flushAbort?.abort(new Error("card entry cleared"));
+    tracked.stateEditAbort?.abort(new Error("card entry cleared"));
+    tracked.skip = true;
+  }
   cards.delete(sessionKey);
+  pausedCards.delete(sessionKey);
 }
 
 /** 测试辅助:清空全部状态。 */
 export function _resetCardProgressForTests(): void {
-  for (const e of cards.values()) {
+  for (const e of new Set([...cards.values(), ...pausedCards.values()])) {
     if (e.flushTimer) clearTimeout(e.flushTimer);
+    if (e.pausedExpiryTimer) clearTimeout(e.pausedExpiryTimer);
     e.flushAbort?.abort(new Error("card progress reset"));
+    e.stateEditAbort?.abort(new Error("card progress reset"));
+    e.skip = true;
   }
   cards.clear();
+  pausedCards.clear();
   gateCache.clear();
   capsCache.clear();
 }
@@ -462,10 +651,89 @@ export function bindCardRun(sessionKey: string | undefined, runId: string | unde
   if (entry.runId === undefined) entry.runId = runId;
 }
 
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+/** 兼容新 host 的 result.details 与旧 host content[].text 中的 JSON 工具结果。 */
+function acceptedSpawnChildSessionKey(result: unknown): string | undefined {
+  const root = asRecord(result);
+  if (!root) return undefined;
+  const candidates: Record<string, unknown>[] = [root];
+  const details = asRecord(root.details);
+  if (details) candidates.push(details);
+  if (Array.isArray(root.content)) {
+    for (const item of root.content) {
+      const text = asRecord(item)?.text;
+      if (typeof text !== "string") continue;
+      try {
+        const parsed = asRecord(JSON.parse(text));
+        if (!parsed) continue;
+        candidates.push(parsed);
+        const parsedDetails = asRecord(parsed.details);
+        if (parsedDetails) candidates.push(parsedDetails);
+      } catch {
+        // 非 JSON 文本不是 sessions_spawn 的结构化结果。
+      }
+    }
+  }
+  for (const candidate of candidates) {
+    const childSessionKey = typeof candidate.childSessionKey === "string"
+      ? candidate.childSessionKey.trim()
+      : "";
+    if (candidate.status === "accepted" && childSessionKey) return childSessionKey;
+  }
+  return undefined;
+}
+
+/**
+ * 仅信任 OpenClaw 生成的 protected internal-context completion event。用户文本中的
+ * 同名字段不会命中：host 会转义用户提供的 BEGIN/END delimiter。
+ */
+function matchingCompletionChildSessionKey(prompt: unknown, expected: Set<string>): string | undefined {
+  if (typeof prompt !== "string" || expected.size === 0) return undefined;
+  const escapedBegin = INTERNAL_CONTEXT_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escapedEnd = INTERNAL_CONTEXT_END.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const blockPattern = new RegExp(
+    `(?:^|\\r?\\n)${escapedBegin}\\r?\\n([\\s\\S]*?)\\r?\\n${escapedEnd}(?=\\r?\\n|$)`,
+    "g",
+  );
+  for (const blockMatch of prompt.matchAll(blockPattern)) {
+    const block = blockMatch[1] ?? "";
+    if (!block.includes(INTERNAL_CONTEXT_NOTICE)) continue;
+    const eventPattern = /(?:^|\r?\n)\[Internal task completion event\]\r?\nsource:\s*subagent\s*\r?\nsession_key:\s*([^\r\n]+)(?=\r?\n|$)/g;
+    for (const eventMatch of block.matchAll(eventPattern)) {
+      const childSessionKey = (eventMatch[1] ?? "").trim();
+      if (expected.has(childSessionKey)) return childSessionKey;
+    }
+  }
+  return undefined;
+}
+
+function bindPausedContinuation(
+  sessionKey: string | undefined,
+  runId: string | undefined,
+  prompt: unknown,
+): void {
+  if (!sessionKey || !runId) return;
+  const entry = pausedCards.get(sessionKey);
+  if (!entry || entry.skip || !entry.pausedFromRunId || runId === entry.pausedFromRunId) return;
+  if (entry.continuationRunId) return;
+  const childSessionKey = matchingCompletionChildSessionKey(prompt, entry.childSessionKeys);
+  if (!childSessionKey) return;
+  endSubagentWait(entry, Date.now());
+  entry.childSessionKeys.delete(childSessionKey);
+  entry.continuationRunId = runId;
+  void editTrackedCardState(sessionKey, entry, "resuming", { transient: true });
+}
+
 export function registerCardProgress(api: OpenClawPluginApi): void {
-  api.on("before_agent_run", (_event: unknown, ctx: unknown) => {
+  api.on("before_agent_run", (event: unknown, ctx: unknown) => {
     const { sessionKey, runId } = (ctx ?? {}) as { sessionKey?: string; runId?: string };
     bindCardRun(sessionKey, runId);
+    bindPausedContinuation(sessionKey, runId, asRecord(event)?.prompt);
     // before_agent_run 是 fail-closed gate。必须显式 pass,不能依赖不同 host 对 void 的解释。
     return { outcome: "pass" } as const;
   });
@@ -496,7 +764,13 @@ export function registerCardProgress(api: OpenClawPluginApi): void {
   });
 
   api.on("after_tool_call", (event: unknown, ctx: unknown) => {
-    const e = (event ?? {}) as { toolName?: string; error?: string; durationMs?: number; toolCallId?: string };
+    const e = (event ?? {}) as {
+      toolName?: string;
+      error?: string;
+      durationMs?: number;
+      toolCallId?: string;
+      result?: unknown;
+    };
     const sk = (ctx as { sessionKey?: string })?.sessionKey;
     const entry = sk ? cards.get(sk) : undefined;
     if (!entry || entry.skip) return;
@@ -520,6 +794,13 @@ export function registerCardProgress(api: OpenClawPluginApi): void {
       if (typeof e.durationMs === "number") target.durationMs = e.durationMs;
       if (e.error) target.error = e.error;
     }
+    if (e.toolName === "sessions_spawn" && !e.error) {
+      const childSessionKey = acceptedSpawnChildSessionKey(e.result);
+      if (childSessionKey) entry.childSessionKeys.add(childSessionKey);
+    }
+    if (e.toolName === "sessions_yield" && !e.error) {
+      markCardPaused(sk!, (ctx as { runId?: string })?.runId);
+    }
     scheduleFlush(sk!, entry);
   });
 
@@ -541,4 +822,105 @@ export function registerCardProgress(api: OpenClawPluginApi): void {
     // 并在收尾时 finalize 成误导性的"⚠️ 已中断",正是 P1-h 想消除的噪音。
     if (entry.messageId || hadRealStep) scheduleFlush(sk!, entry);
   });
+
+  const hasLifecycleSubscription = registerCardLifecycleSubscription(api);
+  if (!hasLifecycleSubscription) {
+    api.on("agent_end", (event: unknown, ctx: unknown) => {
+      const e = (event ?? {}) as { runId?: string; success?: boolean; error?: string };
+      const { sessionKey, runId: contextRunId } = (ctx ?? {}) as { sessionKey?: string; runId?: string };
+      const runId = e.runId ?? contextRunId;
+      if (!sessionKey || !runId) return;
+      const entry = pausedCards.get(sessionKey);
+      if (!entry || entry.continuationRunId !== runId) return;
+      return finishPausedCard(sessionKey, entry, e.success === true ? "done" : "error", e.error);
+    });
+  }
+}
+
+type CardLifecycleEvent = {
+  runId: string;
+  sessionKey?: string;
+  stream: string;
+  data: Record<string, unknown>;
+};
+
+type CardLifecycleSubscription = {
+  id: string;
+  description?: string;
+  streams?: string[];
+  handle: (event: CardLifecycleEvent) => void | Promise<void>;
+};
+
+/**
+ * 2026.7.x 提供 nested agent.events facade；旧 SDK 没有该字段，因此运行时 feature-detect，
+ * 并保留 flat API 兼容。旧 host 至少仍可通过成功的 sessions_yield tool hook 显示 paused。
+ */
+function registerCardLifecycleSubscription(api: OpenClawPluginApi): boolean {
+  const compat = api as unknown as {
+    agent?: {
+      events?: {
+        registerAgentEventSubscription?: (subscription: CardLifecycleSubscription) => void;
+      };
+    };
+    registerAgentEventSubscription?: (subscription: CardLifecycleSubscription) => void;
+  };
+  const nested = compat.agent?.events?.registerAgentEventSubscription;
+  const flat = compat.registerAgentEventSubscription;
+  const register = nested
+    ? (subscription: CardLifecycleSubscription) => nested.call(compat.agent!.events, subscription)
+    : flat
+      ? (subscription: CardLifecycleSubscription) => flat.call(compat, subscription)
+      : undefined;
+  if (!register) {
+    dbg("agent lifecycle subscription API unavailable; using sessions_yield tool fallback");
+    return false;
+  }
+  register({
+    id: "octo-card-progress-lifecycle",
+    description: "Keep yielded Octo progress cards in sync with continuation runs",
+    streams: ["lifecycle"],
+    handle: handleCardLifecycleEvent,
+  });
+  return true;
+}
+
+function findPausedFlowEntry(sessionKey: string, runId: string): CardEntry | undefined {
+  const candidates = [pausedCards.get(sessionKey), cards.get(sessionKey)];
+  return candidates.find((entry) => !!entry?.pausedFromRunId &&
+    (entry.pausedFromRunId === runId || entry.continuationRunId === runId));
+}
+
+async function handleCardLifecycleEvent(event: CardLifecycleEvent): Promise<void> {
+  if (event.stream !== "lifecycle" || !event.sessionKey || !event.runId) return;
+  const phase = typeof event.data.phase === "string" ? event.data.phase : "";
+  const sessionKey = event.sessionKey;
+
+  // Error is authoritative even if a malformed/legacy event also carries yielded.
+  if (phase === "error") {
+    const entry = findPausedFlowEntry(sessionKey, event.runId);
+    if (!entry) return;
+    await finishPausedCard(
+      sessionKey,
+      entry,
+      "error",
+      typeof event.data.error === "string" ? event.data.error : undefined,
+    );
+    return;
+  }
+
+  if (phase === "end" && event.data.yielded === true) {
+    const entry = findPausedFlowEntry(sessionKey, event.runId) ?? cards.get(sessionKey);
+    if (entry?.runId === event.runId || entry?.continuationRunId === event.runId) {
+      markCardPaused(sessionKey, event.runId, entry);
+    }
+    return;
+  }
+
+  // start 不含 parent/continuation 关联证据，不能据此认领 paused 卡。
+  if (phase === "start") return;
+
+  const entry = findPausedFlowEntry(sessionKey, event.runId);
+  if (phase === "end" && entry?.continuationRunId === event.runId) {
+    await finishPausedCard(sessionKey, entry, "done");
+  }
 }
