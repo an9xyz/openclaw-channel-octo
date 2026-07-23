@@ -608,7 +608,7 @@ describe("cardSupports / CardCaps 渲染协商(波 C)", () => {
     expect(progressDetailItems(card)[0].type).toBe("TextBlock");
   });
 
-  it("advertise RichTextBlock → 步骤渲成 RichTextBlock(一行内多样式;label bold、状态/耗时着色),plain 一行完整不分行", () => {
+  it("advertise RichTextBlock → 单步 label 使用灰色常规字重,plain 一行完整不分行", () => {
     // 优于 ColumnSet 列的原因:服务端 Finalize 权威重算 plain 时,ColumnSet 会把图标列/文本列
     // 各当一行,输出成"⌨️\n执行命令:ls · 200ms"两行(降级客户端视觉退化)。RichTextBlock 是单元素,
     // 内联多段样式,plain 输出干净一行。
@@ -623,12 +623,35 @@ describe("cardSupports / CardCaps 渲染协商(波 C)", () => {
       : detailItem;
     expect(row.type).toBe("RichTextBlock");
     const inlines = row.inlines as Array<Record<string, unknown>>;
-    // 至少有:图标段、label(bold)段、summary/duration 段
+    // 至少有:图标段、label(subtle)段、summary/duration 段
     expect(inlines.length).toBeGreaterThanOrEqual(2);
-    const bolded = inlines.find((i) => i.weight === "Bolder");
-    expect(bolded?.text).toBe("exec");
+    const label = inlines.find((i) => i.text === "exec");
+    expect(label).toMatchObject({ text: "exec", isSubtle: true });
+    expect(label).not.toHaveProperty("weight");
     expect(plain).toContain("⌨️ exec: ls · 200ms"); // plain 一行完整
     expect(plain).not.toContain("⌨️\nexec"); // 关键:不分行
+  });
+
+  it("advertise RichTextBlock → 合并步骤 label 使用灰色常规字重", () => {
+    const caps = { elements: new Set(["TextBlock", "RichTextBlock", "Container", "ColumnSet"]) };
+    const { card } = renderProgressCard(
+      {
+        phase: "tool",
+        steps: [
+          { tool: "exec", status: "done", durationMs: 100 },
+          { tool: "exec", status: "done", durationMs: 200 },
+        ],
+      },
+      caps,
+    );
+    const detailItem = progressDetailItems(card)[0];
+    const row = detailItem.type === "Container"
+      ? (detailItem.items as Array<Record<string, unknown>>)[0]
+      : detailItem;
+    const inlines = row.inlines as Array<Record<string, unknown>>;
+    const label = inlines.find((inline) => inline.text === "exec");
+    expect(label).toMatchObject({ text: "exec", isSubtle: true });
+    expect(label).not.toHaveProperty("weight");
   });
 
   it("advertise Container+RichTextBlock → 进度步骤按 thinking 阶段收进 timeline 容器", () => {
